@@ -23,7 +23,7 @@ workflows must not weaken repository policy.
    annotated tag, for example `v0.1.0`. The workflow rejects a tag that does not
    exactly match the Cargo version.
 4. Inspect the generated draft release. Confirm all four launcher archives and
-   `SHA256SUMS` are attached, and inspect both versioned multi-architecture
+   the installer are listed in `SHA256SUMS`, and inspect both versioned multi-architecture
    image manifests.
 5. Verify an artifact attestation when desired:
 
@@ -39,6 +39,10 @@ workflows must not weaken repository policy.
 Do not delete and recreate a released tag. A correction gets a new patch
 version so the binary and its exact-version runtime images remain an auditable
 set.
+
+Official launcher artifacts are compiled with the `release-distribution`
+feature. That feature authorizes self-replacement; ordinary Cargo builds expose
+non-mutating update checks but cannot overwrite themselves.
 
 ## Image contract
 

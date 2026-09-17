@@ -17,6 +17,20 @@ runtime images, and only then atomically replaces an existing installation.
 Install a particular release with `TSZ_VERSION=v0.1.0`; use
 `TSZ_SKIP_IMAGE_PULL=1` only when the images have already been provisioned.
 
+Release `0.2.0` and later can update themselves through the same verified,
+atomic installation path:
+
+```console
+thus-spoke-zakura update --check
+thus-spoke-zakura update
+```
+
+The first command exits `0` when current, `10` when an update is available,
+and `1` on an actual error. It also supports `--json`. Pin an exact version—or
+intentionally roll back—with `thus-spoke-zakura update 0.1.0`. The existing
+binary is never replaced unless the release checksum, version validation, and
+matching image pull all succeed.
+
 ## Requirements
 
 Running a published build requires Docker. `docker version` must show both the
@@ -72,6 +86,7 @@ Every command accepts `--name <instance>`; the default name is `default`.
 
 ```text
 pull                Pull exact production images for this launcher version
+update [VERSION]    Check for or install a released launcher version
 build [--dev]       Build those images from the current source checkout
 start [--no-open]   Run an existing image in the foreground
 status              Show health and endpoints
@@ -109,6 +124,12 @@ installation. `start` never pulls or builds implicitly, so a run is
 reproducible and will fail with a precise command if an exact image is absent.
 The mutable `latest` image aliases are provided for human discovery only and
 are never consumed by the launcher.
+
+Only official release binaries can replace themselves. A source build may run
+`cargo run -p thus-spoke-zakura -- update --check`, but an attempted mutation
+explains how to update through Git/Cargo instead. Because `0.1.0` predates the
+command, existing `0.1.0` users must rerun the public installer once to move to
+`0.2.0`; subsequent releases can use `thus-spoke-zakura update`.
 
 With no subcommand, `thus-spoke-zakura` defaults to `start`. Every start creates
 a fresh development environment, deleting any previous state for the selected

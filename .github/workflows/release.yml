@@ -40,8 +40,9 @@ jobs:
       - run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
       - run: rustup default 1.98.0
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test -p thus-spoke-zakura --features release-distribution
       - run: tests/install.sh
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -72,7 +73,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install 1.98.0 --profile minimal --target "${{ matrix.target }}"
       - run: rustup default 1.98.0
-      - run: cargo build --locked --release -p thus-spoke-zakura --target "${{ matrix.target }}"
+      - run: cargo build --locked --release -p thus-spoke-zakura --features release-distribution --target "${{ matrix.target }}"
       - name: Package launcher
         shell: bash
         run: |
@@ -142,7 +143,9 @@ jobs:
           merge-multiple: true
       - name: Create checksums
         working-directory: dist
-        run: sha256sum -- *.tar.gz > SHA256SUMS
+        run: |
+          cp ../install.sh install.sh
+          sha256sum -- install.sh *.tar.gz > SHA256SUMS
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: "dist/*"
@@ -150,7 +153,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" dist/* \
             --draft --verify-tag --generate-notes \
             --title "Thus Spoke Zakura $GITHUB_REF_NAME"

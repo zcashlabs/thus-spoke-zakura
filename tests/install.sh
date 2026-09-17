@@ -55,9 +55,27 @@ PATH="$bin:$PATH" FIXTURES="$fixtures" TSZ_INSTALL_DIR="$install_dir" \
   TSZ_VERSION=v9.8.7 TSZ_SKIP_IMAGE_PULL=1 "$root/install.sh"
 test "$("$install_dir/thus-spoke-zakura" --version)" = "thus-spoke-zakura 9.8.7"
 
+sed 's/9\.8\.7/8.0.0/' "$fixtures/payload/thus-spoke-zakura" \
+  > "$fixtures/payload/thus-spoke-zakura.next"
+mv "$fixtures/payload/thus-spoke-zakura.next" "$fixtures/payload/thus-spoke-zakura"
+chmod +x "$fixtures/payload/thus-spoke-zakura"
+tar -czf "$fixtures/$asset" -C "$fixtures/payload" thus-spoke-zakura
+if command -v sha256sum >/dev/null 2>&1; then
+  hash="$(sha256sum "$fixtures/$asset" | awk '{print $1}')"
+else
+  hash="$(shasum -a 256 "$fixtures/$asset" | awk '{print $1}')"
+fi
+printf '%s  %s\n' "$hash" "$asset" > "$fixtures/SHA256SUMS"
+PATH="$bin:$PATH" FIXTURES="$fixtures" TSZ_INSTALL_DIR="$install_dir" \
+  TSZ_VERSION=8.0.0 TSZ_SKIP_IMAGE_PULL=1 "$root/install.sh"
+test "$("$install_dir/thus-spoke-zakura" --version)" = "thus-spoke-zakura 8.0.0"
+PATH="$bin:$PATH" FIXTURES="$fixtures" TSZ_INSTALL_DIR="$install_dir" \
+  TSZ_VERSION=8.0.0 TSZ_SKIP_IMAGE_PULL=1 "$root/install.sh"
+test "$("$install_dir/thus-spoke-zakura" --version)" = "thus-spoke-zakura 8.0.0"
+
 printf '%s\n' old > "$install_dir/thus-spoke-zakura"
 if PATH="$bin:$PATH" FIXTURES="$fixtures" FAIL_PULL=1 TSZ_INSTALL_DIR="$install_dir" \
-  TSZ_VERSION=9.8.7 "$root/install.sh"; then
+  TSZ_VERSION=8.0.0 "$root/install.sh"; then
   echo "installer unexpectedly succeeded when image pull failed" >&2
   exit 1
 fi

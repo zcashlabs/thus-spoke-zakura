@@ -46,7 +46,12 @@ jobs:
         run: |
           docker logout ghcr.io || true
           installer="https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/${{ github.event.release.tag_name }}/install.sh"
+          if [[ "${{ github.event.release.tag_name }}" == "v0.2.0" ]]; then
+            curl --proto '=https' --tlsv1.2 -fsSL "$installer" \
+              | TSZ_VERSION=v0.1.0 sh
+          fi
           curl --proto '=https' --tlsv1.2 -fsSL "$installer" | sh
           curl --proto '=https' --tlsv1.2 -fsSL "$installer" \
             | TSZ_VERSION=latest TSZ_SKIP_IMAGE_PULL=1 sh
           "$TSZ_INSTALL_DIR/thus-spoke-zakura" --version
+          "$TSZ_INSTALL_DIR/thus-spoke-zakura" update --check

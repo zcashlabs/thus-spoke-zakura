@@ -6,10 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+release-distribution = []
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 directories.workspace = true
+reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
