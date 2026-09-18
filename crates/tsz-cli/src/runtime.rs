@@ -511,6 +511,7 @@ struct Shutdown {
 }
 
 impl Shutdown {
+    #[cfg(test)]
     fn from_receiver(receiver: mpsc::Receiver<()>) -> Self {
         Self { receiver }
     }
@@ -938,9 +939,11 @@ mod tests {
                 .any(|e| e == "delete:alpha"),
             "expected delete:alpha after allocate:alpha, got {events:?}"
         );
-        assert!(!events
-            .iter()
-            .any(|e| e.starts_with("delete:") && !e.ends_with("alpha")));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.starts_with("delete:") && !e.ends_with("alpha"))
+        );
         assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
     }
 
