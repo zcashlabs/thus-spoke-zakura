@@ -591,6 +591,88 @@ impl Shutdown {
     }
 }
 
+trait StartHost {
+    fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()>;
+    fn allocate(
+        &self,
+        runtime: &Runtime,
+        name: &InstanceName,
+        shutdown: &Shutdown,
+    ) -> Result<Endpoints>;
+    fn wait_ready(
+        &self,
+        endpoints: &Endpoints,
+        app_container: &str,
+        timeout: Duration,
+        shutdown: &Shutdown,
+    ) -> Result<()>;
+    fn open_url(&self, url: &str) -> Result<()>;
+    fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()>;
+}
+
+struct CleanupOnDrop<'a> {
+    runtime: &'a Runtime,
+    name: &'a InstanceName,
+    host: &'a dyn StartHost,
+    active: bool,
+}
+
+impl Drop for CleanupOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.host.delete(self.runtime, self.name);
+        }
+    }
+}
+
+impl Runtime {
+    fn start_with(
+        &self,
+        name: &InstanceName,
+        no_open: bool,
+        json: bool,
+        host: &dyn StartHost,
+        shutdown: &Shutdown,
+    ) -> Result<()> {
+        let mut cleanup = CleanupOnDrop {
+            runtime: self,
+            name,
+            host,
+            active: true,
+        };
+        println!("Preparing a fresh {name} environment…");
+        host.delete(self, name)?;
+        println!("Starting {name}…");
+        let endpoints = host.allocate(self, name, shutdown)?;
+        if shutdown.try_interrupted() {
+            bail!("interrupted");
+        }
+        host.wait_ready(
+            &endpoints,
+            &format!("{}-app", prefix(name)),
+            Duration::from_secs(120),
+            shutdown,
+        )?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&endpoints)?);
+        } else {
+            print_endpoints(name, &endpoints);
+        }
+        if !no_open {
+            host.open_url(&endpoints.dashboard)?;
+        }
+        if !json {
+            println!("\nPress Ctrl+C to stop and delete this development environment.");
+        }
+        host.wait_for_shutdown(shutdown)?;
+        println!("\nStopping and deleting {name}…");
+        host.delete(self, name)?;
+        cleanup.active = false;
+        println!("Deleted {name} and all of its development data.");
+        Ok(())
+    }
+}
+
 fn wait_for_shutdown() -> Result<()> {
     let (sender, receiver) = mpsc::channel();
     ctrlc::set_handler(move || {
@@ -700,6 +782,126 @@ fn docker_logs(container: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingHost {
+        events: Arc<Mutex<Vec<String>>>,
+        wait_ready_result: Result<(), String>,
+        open_url_result: Result<(), String>,
+        interrupt_before_ready: bool,
+    }
+
+    impl RecordingHost {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    events: events.clone(),
+                    wait_ready_result: Ok(()),
+                    open_url_result: Ok(()),
+                    interrupt_before_ready: false,
+                },
+                events,
+            )
+        }
+
+        fn push(&self, event: &str) {
+            self.events.lock().unwrap().push(event.to_owned());
+        }
+    }
+
+    impl StartHost for RecordingHost {
+        fn delete(&self, _runtime: &Runtime, name: &InstanceName) -> Result<()> {
+            self.push(&format!("delete:{name}"));
+            Ok(())
+        }
+
+        fn allocate(
+            &self,
+            _runtime: &Runtime,
+            name: &InstanceName,
+            shutdown: &Shutdown,
+        ) -> Result<Endpoints> {
+            self.push(&format!("allocate:{name}"));
+            if shutdown.try_interrupted() {
+                bail!("interrupted");
+            }
+            Ok(Endpoints {
+                dashboard: "http://127.0.0.1:1".into(),
+                rpc: "http://127.0.0.1:2".into(),
+                lightwalletd: "http://127.0.0.1:3".into(),
+                p2p: "127.0.0.1:4".into(),
+            })
+        }
+
+        fn wait_ready(
+            &self,
+            _endpoints: &Endpoints,
+            _app_container: &str,
+            _timeout: Duration,
+            shutdown: &Shutdown,
+        ) -> Result<()> {
+            self.push("wait_ready");
+            if self.interrupt_before_ready || shutdown.try_interrupted() {
+                bail!("interrupted");
+            }
+            self.wait_ready_result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| anyhow!("{e}"))
+        }
+
+        fn open_url(&self, url: &str) -> Result<()> {
+            self.push(&format!("open_url:{url}"));
+            self.open_url_result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| anyhow!("{e}"))
+        }
+
+        fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
+            self.push("wait_for_shutdown");
+            shutdown.wait()
+        }
+    }
+
+    fn runtime_for_tests() -> Runtime {
+        Runtime {
+            root: std::env::temp_dir().join("tsz-start-cleanup-tests"),
+        }
+    }
+
+    fn name(value: &str) -> InstanceName {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn readiness_failure_deletes_the_started_instance() {
+        let (mut host, events) = RecordingHost::new();
+        host.wait_ready_result = Err("dashboard did not become healthy".into());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let err = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, &host, &shutdown)
+            .unwrap_err();
+        assert!(err.to_string().contains("dashboard did not become healthy"));
+        let events = events.lock().unwrap().clone();
+        let allocate_pos = events
+            .iter()
+            .position(|e| e == "allocate:alpha")
+            .expect("allocate:alpha");
+        assert!(
+            events[allocate_pos + 1..]
+                .iter()
+                .any(|e| e == "delete:alpha"),
+            "expected delete:alpha after allocate:alpha, got {events:?}"
+        );
+        assert!(!events
+            .iter()
+            .any(|e| e.starts_with("delete:") && !e.ends_with("alpha")));
+        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+    }
+
     #[test]
     fn validates_instance_names() {
         for valid in ["default", "project-2", "a"] {
