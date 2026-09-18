@@ -4,8 +4,11 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     str::FromStr,
-    sync::mpsc,
-    thread,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
+    },
     time::{Duration, Instant},
 };
 
@@ -507,32 +510,73 @@ fn build_project_images(dev: bool) -> Result<()> {
     )
 }
 struct Shutdown {
+    flag: Arc<AtomicBool>,
     receiver: mpsc::Receiver<()>,
 }
 
 impl Shutdown {
     #[cfg(test)]
     fn from_receiver(receiver: mpsc::Receiver<()>) -> Self {
-        Self { receiver }
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            receiver,
+        }
     }
 
     fn install() -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
+        let flag = Arc::new(AtomicBool::new(false));
+        let handler_flag = flag.clone();
         ctrlc::set_handler(move || {
+            handler_flag.store(true, Ordering::SeqCst);
             let _ = sender.send(());
         })
         .context("installing the shutdown signal handler")?;
-        Ok(Self { receiver })
+        Ok(Self { flag, receiver })
     }
 
     fn try_interrupted(&self) -> bool {
-        self.receiver.try_recv().is_ok()
+        if self.receiver.try_recv().is_ok() {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.try_interrupted() {
+            bail!("interrupted");
+        }
+        Ok(())
     }
 
     fn wait(&self) -> Result<()> {
+        if self.try_interrupted() {
+            return Ok(());
+        }
         self.receiver
             .recv()
-            .context("waiting for a shutdown signal")
+            .context("waiting for a shutdown signal")?;
+        self.flag.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn wait_timeout(&self, timeout: Duration) -> Result<()> {
+        if self.try_interrupted() {
+            bail!("interrupted");
+        }
+        match self.receiver.recv_timeout(timeout) {
+            Ok(()) => {
+                self.flag.store(true, Ordering::SeqCst);
+                bail!("interrupted");
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                if self.try_interrupted() {
+                    bail!("interrupted");
+                }
+                Err(anyhow!("waiting for a shutdown signal"))
+            }
+        }
     }
 }
 
@@ -571,15 +615,11 @@ impl StartHost for DockerHost {
         fs::create_dir_all(runtime.instance_dir(name))?;
         let prefix = prefix(name);
         ensure_network(&prefix)?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         for suffix in ["chain", "wallet", "lightwalletd", "config"] {
             ensure_volume(&format!("{prefix}-{suffix}"), name)?;
         }
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
 
         if !container_exists(&format!("{prefix}-init"))? {
             docker([
@@ -599,37 +639,23 @@ impl StartHost for DockerHost {
                 "--config-dir",
                 "/config",
             ])?;
-            if shutdown.try_interrupted() {
-                bail!("interrupted");
-            }
+            shutdown.check()?;
             docker(["start", "-a", &format!("{prefix}-init")])?;
-            if shutdown.try_interrupted() {
-                bail!("interrupted");
-            }
+            shutdown.check()?;
         }
 
         ensure_zakura(&prefix, name)?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         ensure_lightwalletd(&prefix, name)?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         for service in ["zakura", "lightwalletd"] {
             docker(["start", &format!("{prefix}-{service}")])?;
-            if shutdown.try_interrupted() {
-                bail!("interrupted");
-            }
+            shutdown.check()?;
         }
         ensure_app(&prefix, name)?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         docker(["start", &format!("{prefix}-app")])?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         let endpoints = inspect_endpoints(&prefix)?;
         runtime.write_instance(name, &endpoints)?;
         Ok(endpoints)
@@ -663,8 +689,11 @@ struct CleanupOnDrop<'a> {
 
 impl Drop for CleanupOnDrop<'_> {
     fn drop(&mut self) {
-        if self.active {
-            let _ = self.host.delete(self.runtime, self.name);
+        if !self.active {
+            return;
+        }
+        if let Err(error) = self.host.delete(self.runtime, self.name) {
+            eprintln!("could not delete {}: {error:#}", self.name);
         }
     }
 }
@@ -688,9 +717,7 @@ impl Runtime {
         host.delete(self, name)?;
         println!("Starting {name}…");
         let endpoints = host.allocate(self, name, shutdown)?;
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         host.wait_ready(
             &endpoints,
             &format!("{}-app", prefix(name)),
@@ -734,9 +761,7 @@ fn wait_ready(
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if shutdown.try_interrupted() {
-            bail!("interrupted");
-        }
+        shutdown.check()?;
         if Command::new("curl")
             .args(["-fsS", &format!("{base}/api/v1/health")])
             .stdout(Stdio::null())
@@ -751,7 +776,11 @@ fn wait_ready(
                 .unwrap_or_else(|error| format!("could not read app logs: {error}"));
             bail!("app exited before becoming healthy:\n{logs}");
         }
-        thread::sleep(Duration::from_millis(750));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        shutdown.wait_timeout(remaining.min(Duration::from_millis(750)))?;
     }
     bail!(
         "dashboard did not become healthy within {} seconds",
@@ -866,9 +895,7 @@ mod tests {
             shutdown: &Shutdown,
         ) -> Result<Endpoints> {
             self.push(&format!("allocate:{name}"));
-            if shutdown.try_interrupted() {
-                bail!("interrupted");
-            }
+            shutdown.check()?;
             Ok(Endpoints {
                 dashboard: "http://127.0.0.1:1".into(),
                 rpc: "http://127.0.0.1:2".into(),
@@ -885,9 +912,10 @@ mod tests {
             shutdown: &Shutdown,
         ) -> Result<()> {
             self.push("wait_ready");
-            if self.interrupt_before_ready || shutdown.try_interrupted() {
+            if self.interrupt_before_ready {
                 bail!("interrupted");
             }
+            shutdown.check()?;
             self.wait_ready_result
                 .as_ref()
                 .map(|_| ())
@@ -1047,7 +1075,41 @@ mod tests {
         assert!(!shutdown.try_interrupted());
         sender.send(()).unwrap();
         assert!(shutdown.try_interrupted());
-        assert!(!shutdown.try_interrupted());
+        assert!(shutdown.try_interrupted());
+        shutdown.wait().unwrap();
+    }
+
+    #[test]
+    fn shutdown_check_bails_when_latched() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        shutdown.check().unwrap();
+        sender.send(()).unwrap();
+        let err = shutdown.check().unwrap_err();
+        assert!(err.to_string().contains("interrupted"));
+        let err = shutdown.check().unwrap_err();
+        assert!(err.to_string().contains("interrupted"));
+    }
+
+    #[test]
+    fn shutdown_wait_timeout_wakes_on_signal() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            sender.send(()).unwrap();
+        });
+        let started = Instant::now();
+        let err = shutdown.wait_timeout(Duration::from_secs(2)).unwrap_err();
+        assert!(err.to_string().contains("interrupted"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn shutdown_wait_timeout_returns_on_idle() {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        shutdown.wait_timeout(Duration::from_millis(20)).unwrap();
     }
 
     #[test]
