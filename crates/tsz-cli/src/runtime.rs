@@ -859,9 +859,9 @@ mod tests {
                 .map_err(|e| anyhow!("{e}"))
         }
 
-        fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
+        fn wait_for_shutdown(&self, _shutdown: &Shutdown) -> Result<()> {
             self.push("wait_for_shutdown");
-            shutdown.wait()
+            Ok(())
         }
     }
 
@@ -900,6 +900,67 @@ mod tests {
             .iter()
             .any(|e| e.starts_with("delete:") && !e.ends_with("alpha")));
         assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+    }
+
+    #[test]
+    fn browser_open_failure_deletes_and_does_not_wait() {
+        let (mut host, events) = RecordingHost::new();
+        host.open_url_result = Err("opening http://127.0.0.1:1".into());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let err = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, &host, &shutdown)
+            .unwrap_err();
+        assert!(err.to_string().contains("opening"));
+        let events = events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e.starts_with("open_url:")));
+        assert!(events.iter().any(|e| e == "delete:alpha"));
+        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+    }
+
+    #[test]
+    fn no_open_skips_browser_and_waits_for_shutdown() {
+        let (host, events) = RecordingHost::new();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        runtime_for_tests()
+            .start_with(&name("alpha"), true, false, &host, &shutdown)
+            .unwrap();
+        let events = events.lock().unwrap().clone();
+        assert!(!events.iter().any(|e| e.starts_with("open_url:")));
+        assert!(events.iter().any(|e| e == "wait_for_shutdown"));
+        assert!(events.iter().any(|e| e == "delete:alpha"));
+    }
+
+    #[test]
+    fn interrupt_before_ready_deletes_the_started_instance() {
+        let (mut host, events) = RecordingHost::new();
+        host.interrupt_before_ready = true;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let err = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, &host, &shutdown)
+            .unwrap_err();
+        assert!(err.to_string().contains("interrupted"));
+        let events = events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e == "allocate:alpha"));
+        assert!(events.iter().any(|e| e == "delete:alpha"));
+        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+    }
+
+    #[test]
+    fn interrupt_during_allocate_deletes_only_the_named_instance() {
+        let (host, events) = RecordingHost::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(()).unwrap();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let err = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, &host, &shutdown)
+            .unwrap_err();
+        assert!(err.to_string().contains("interrupted"));
+        let events = events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e == "delete:alpha"));
+        assert!(!events.iter().any(|e| e.contains("beta")));
     }
 
     #[test]
