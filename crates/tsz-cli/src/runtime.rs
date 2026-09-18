@@ -562,6 +562,35 @@ fn build_project_images(dev: bool) -> Result<()> {
         &project_root,
     )
 }
+struct Shutdown {
+    receiver: mpsc::Receiver<()>,
+}
+
+impl Shutdown {
+    fn from_receiver(receiver: mpsc::Receiver<()>) -> Self {
+        Self { receiver }
+    }
+
+    fn install() -> Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        ctrlc::set_handler(move || {
+            let _ = sender.send(());
+        })
+        .context("installing the shutdown signal handler")?;
+        Ok(Self { receiver })
+    }
+
+    fn try_interrupted(&self) -> bool {
+        self.receiver.try_recv().is_ok()
+    }
+
+    fn wait(&self) -> Result<()> {
+        self.receiver
+            .recv()
+            .context("waiting for a shutdown signal")
+    }
+}
+
 fn wait_for_shutdown() -> Result<()> {
     let (sender, receiver) = mpsc::channel();
     ctrlc::set_handler(move || {
@@ -697,5 +726,23 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn shutdown_reports_interrupt_from_channel() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        assert!(!shutdown.try_interrupted());
+        sender.send(()).unwrap();
+        assert!(shutdown.try_interrupted());
+        assert!(!shutdown.try_interrupted());
+    }
+
+    #[test]
+    fn shutdown_wait_returns_after_signal() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        sender.send(()).unwrap();
+        shutdown.wait().unwrap();
     }
 }
