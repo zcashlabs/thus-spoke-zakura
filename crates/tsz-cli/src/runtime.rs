@@ -859,9 +859,9 @@ mod tests {
                 .map_err(|e| anyhow!("{e}"))
         }
 
-        fn wait_for_shutdown(&self, _shutdown: &Shutdown) -> Result<()> {
+        fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
             self.push("wait_for_shutdown");
-            Ok(())
+            shutdown.wait()
         }
     }
 
@@ -921,7 +921,11 @@ mod tests {
     #[test]
     fn no_open_skips_browser_and_waits_for_shutdown() {
         let (host, events) = RecordingHost::new();
-        let (_sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            sender.send(()).unwrap();
+        });
         let shutdown = Shutdown::from_receiver(receiver);
         runtime_for_tests()
             .start_with(&name("alpha"), true, false, &host, &shutdown)
