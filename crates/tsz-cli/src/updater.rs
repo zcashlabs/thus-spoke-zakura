@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     io::Write,
     path::Path,
     process::{Command, ExitCode, Stdio},
@@ -65,6 +65,26 @@ pub fn run(requested: Option<&str>, check: bool, json: bool) -> Result<ExitCode>
         .context("the running launcher has no parent directory")?;
     run_installer(INSTALLER, &target, install_dir)?;
     Ok(ExitCode::SUCCESS)
+}
+
+pub fn uninstall() -> Result<ExitCode> {
+    ensure_release_distribution()?;
+    let executable = env::current_exe().context("locating the running launcher")?;
+    remove_installed_executable(&executable)?;
+    println!("Uninstalled ths from {}.", executable.display());
+    println!("Cached Docker images and configuration were left in place.");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn remove_installed_executable(executable: &Path) -> Result<()> {
+    if executable.file_name().and_then(|name| name.to_str()) != Some("ths") {
+        bail!(
+            "refusing to remove unexpected executable {}; uninstall ths from its installed path",
+            executable.display()
+        );
+    }
+    fs::remove_file(executable)
+        .with_context(|| format!("removing installed launcher {}", executable.display()))
 }
 
 fn ensure_release_distribution() -> Result<()> {
@@ -238,6 +258,21 @@ mod tests {
         if !cfg!(feature = "release-distribution") {
             assert!(ensure_release_distribution().is_err());
         }
+    }
+
+    #[test]
+    fn uninstall_removes_only_an_executable_named_ths() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("ths");
+        std::fs::write(&executable, "launcher").unwrap();
+
+        remove_installed_executable(&executable).unwrap();
+        assert!(!executable.exists());
+
+        let unexpected = directory.path().join("another-tool");
+        std::fs::write(&unexpected, "keep me").unwrap();
+        assert!(remove_installed_executable(&unexpected).is_err());
+        assert!(unexpected.exists());
     }
 
     fn serve_once(status: &'static str, body: &'static str) -> String {

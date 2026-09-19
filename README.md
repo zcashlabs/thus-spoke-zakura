@@ -124,6 +124,7 @@ Running `ths` with no command starts the default environment.
 | `ths pull` | Pull the exact images for this launcher version |
 | `ths update --check` | Check for a newer release |
 | `ths update` | Install the latest verified release |
+| `ths uninstall` | Remove the installed launcher executable |
 
 Every command accepts `--name` for isolated environments:
 
@@ -222,6 +223,17 @@ ths reset --force
 ```
 
 This permanently deletes that instance's development data.
+
+**Uninstall the launcher**
+
+Stop any running environment with Ctrl+C, then run:
+
+```console
+ths uninstall
+```
+
+This removes only the installed `ths` executable. Cached Docker images and the
+small launcher configuration directory remain available for a later reinstall.
 
 ## Releases
 

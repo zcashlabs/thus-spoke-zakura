@@ -48,6 +48,8 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Remove this installed launcher executable.
+    Uninstall,
     /// Show service and endpoint status.
     Status,
     /// Open the dashboard in the default browser.
@@ -79,12 +81,16 @@ fn main() -> Result<ExitCode> {
     if let Some(Command::Update { version, check }) = &cli.command {
         return updater::run(version.as_deref(), *check, cli.json);
     }
+    if matches!(cli.command, Some(Command::Uninstall)) {
+        return updater::uninstall();
+    }
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start { no_open: false }) {
         Command::Start { no_open } => runtime.start(&cli.name, no_open, cli.json),
         Command::Build { dev } => runtime.build(dev),
         Command::Pull => runtime.pull(),
         Command::Update { .. } => unreachable!("update is handled before runtime discovery"),
+        Command::Uninstall => unreachable!("uninstall is handled before runtime discovery"),
         Command::Status => runtime.status(&cli.name, cli.json),
         Command::Open => runtime.open(&cli.name),
         Command::Endpoints => runtime.endpoints(&cli.name, cli.json),
@@ -122,6 +128,9 @@ mod tests {
                 check: false
             })
         ));
+
+        let cli = Cli::try_parse_from(["ths", "uninstall"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Uninstall)));
 
         assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 
