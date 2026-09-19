@@ -53,5 +53,5 @@ jobs:
           curl --proto '=https' --tlsv1.2 -fsSL "$installer" | sh
           curl --proto '=https' --tlsv1.2 -fsSL "$installer" \
             | TSZ_VERSION=latest TSZ_SKIP_IMAGE_PULL=1 sh
-          "$TSZ_INSTALL_DIR/thus-spoke-zakura" --version
-          "$TSZ_INSTALL_DIR/thus-spoke-zakura" update --check
+          "$TSZ_INSTALL_DIR/ths" --version
+          "$TSZ_INSTALL_DIR/ths" update --check

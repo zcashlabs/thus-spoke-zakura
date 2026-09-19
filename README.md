@@ -36,12 +36,12 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlab
 ```
 
 The installer supports Linux and macOS on Intel and ARM. It verifies the
-download and pulls the matching runtime images.
+download and pulls the matching runtime images. The installed command is `ths`.
 
 ### 3. Start it
 
 ```console
-thus-spoke-zakura
+ths
 ```
 
 The first start can take a little longer while Docker prepares the images.
@@ -97,39 +97,39 @@ addresses. Ports are selected automatically and bound only to `127.0.0.1`.
 You can also print these values in a terminal:
 
 ```console
-thus-spoke-zakura endpoints
-thus-spoke-zakura endpoints --json
+ths endpoints
+ths endpoints --json
 ```
 
 Run these commands in a second terminal while the environment is running.
 
 ## Useful commands
 
-Running `thus-spoke-zakura` with no command starts the default environment.
+Running `ths` with no command starts the default environment.
 
 | Command | What it does |
 | --- | --- |
-| `thus-spoke-zakura` | Start a fresh environment and open the dashboard |
-| `thus-spoke-zakura start --no-open` | Start without opening a browser |
-| `thus-spoke-zakura status` | Show health and endpoint information |
-| `thus-spoke-zakura open` | Open the running dashboard |
-| `thus-spoke-zakura endpoints --json` | Print endpoints for scripts and developer tools |
-| `thus-spoke-zakura logs app -f` | Follow dashboard/server logs |
-| `thus-spoke-zakura logs zakura -f` | Follow node logs |
-| `thus-spoke-zakura logs lightwalletd -f` | Follow lightwalletd logs |
-| `thus-spoke-zakura list` | List known environments |
-| `thus-spoke-zakura stop` | Stop and delete the environment |
-| `thus-spoke-zakura reset --force` | Force-delete one environment and all its data |
-| `thus-spoke-zakura doctor` | Check Docker and local configuration |
-| `thus-spoke-zakura pull` | Pull the exact images for this launcher version |
-| `thus-spoke-zakura update --check` | Check for a newer release |
-| `thus-spoke-zakura update` | Install the latest verified release |
+| `ths` | Start a fresh environment and open the dashboard |
+| `ths start --no-open` | Start without opening a browser |
+| `ths status` | Show health and endpoint information |
+| `ths open` | Open the running dashboard |
+| `ths endpoints --json` | Print endpoints for scripts and developer tools |
+| `ths logs app -f` | Follow dashboard/server logs |
+| `ths logs zakura -f` | Follow node logs |
+| `ths logs lightwalletd -f` | Follow lightwalletd logs |
+| `ths list` | List known environments |
+| `ths stop` | Stop and delete the environment |
+| `ths reset --force` | Force-delete one environment and all its data |
+| `ths doctor` | Check Docker and local configuration |
+| `ths pull` | Pull the exact images for this launcher version |
+| `ths update --check` | Check for a newer release |
+| `ths update` | Install the latest verified release |
 
 Every command accepts `--name` for isolated environments:
 
 ```console
-thus-spoke-zakura --name alice
-thus-spoke-zakura --name bob
+ths --name alice
+ths --name bob
 ```
 
 Each named environment gets its own ports and Docker resources. Run each one in
@@ -201,7 +201,7 @@ access, so use it only for trusted users.
 **The dashboard did not open**
 
 ```console
-thus-spoke-zakura open
+ths open
 ```
 
 Or copy the Dashboard URL printed by the launcher.
@@ -209,16 +209,16 @@ Or copy the Dashboard URL printed by the launcher.
 **A service is unhealthy**
 
 ```console
-thus-spoke-zakura status
-thus-spoke-zakura logs app
-thus-spoke-zakura logs zakura
-thus-spoke-zakura logs lightwalletd
+ths status
+ths logs app
+ths logs zakura
+ths logs lightwalletd
 ```
 
 **Start over completely**
 
 ```console
-thus-spoke-zakura reset --force
+ths reset --force
 ```
 
 This permanently deletes that instance's development data.

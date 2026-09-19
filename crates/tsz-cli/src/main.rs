@@ -9,7 +9,7 @@ use runtime::{InstanceName, Runtime};
 
 #[derive(Parser)]
 #[command(
-    name = "thus-spoke-zakura",
+    name = "ths",
     version,
     about = "A one-command Zakura regtest environment"
 )]
@@ -105,16 +105,16 @@ mod tests {
 
     #[test]
     fn separates_building_from_starting() {
-        let default = Cli::try_parse_from(["thus-spoke-zakura"]).unwrap();
+        let default = Cli::try_parse_from(["ths"]).unwrap();
         assert!(default.command.is_none());
 
-        let cli = Cli::try_parse_from(["thus-spoke-zakura", "build", "--dev"]).unwrap();
+        let cli = Cli::try_parse_from(["ths", "build", "--dev"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Build { dev: true })));
 
-        let cli = Cli::try_parse_from(["thus-spoke-zakura", "pull"]).unwrap();
+        let cli = Cli::try_parse_from(["ths", "pull"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Pull)));
 
-        let cli = Cli::try_parse_from(["thus-spoke-zakura", "update", "v1.2.3"]).unwrap();
+        let cli = Cli::try_parse_from(["ths", "update", "v1.2.3"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Update {
@@ -123,8 +123,8 @@ mod tests {
             })
         ));
 
-        assert!(Cli::try_parse_from(["thus-spoke-zakura", "update", "1.2.3", "--check"]).is_err());
+        assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 
-        assert!(Cli::try_parse_from(["thus-spoke-zakura", "start", "--build"]).is_err());
+        assert!(Cli::try_parse_from(["ths", "start", "--build"]).is_err());
     }
 }

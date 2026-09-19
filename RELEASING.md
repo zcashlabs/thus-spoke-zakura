@@ -28,7 +28,7 @@ workflows must not weaken repository policy.
 5. Verify an artifact attestation when desired:
 
    ```console
-   gh attestation verify thus-spoke-zakura-x86_64-unknown-linux-gnu.tar.gz \
+   gh attestation verify ths-x86_64-unknown-linux-gnu.tar.gz \
      --repo zcashlabs/thus-spoke-zakura
    ```
 
@@ -77,7 +77,7 @@ ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:<version>
 zakuracore/zakura:1.4.0
 ```
 
-`thus-spoke-zakura pull` fetches that set. `start` has no network-side image
+`ths pull` fetches that set. `start` has no network-side image
 resolution and never consumes `latest`. Contributor builds deliberately use
 the same exact local tags, allowing a source build to replace the matching
 images without changing runtime behavior.

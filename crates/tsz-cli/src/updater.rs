@@ -87,7 +87,7 @@ fn latest_version_from(endpoint: &str) -> Result<Version> {
         .build()
         .context("creating the release client")?
         .get(endpoint)
-        .header(reqwest::header::USER_AGENT, "thus-spoke-zakura-updater")
+        .header(reqwest::header::USER_AGENT, "ths-updater")
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .with_context(|| format!("checking the latest release at {endpoint}"))?;
@@ -139,13 +139,13 @@ fn print_report(current: &Version, available: &Version, status: Status, json: bo
         );
     } else {
         match status {
-            Status::UpToDate => println!("thus-spoke-zakura {current} is up to date."),
+            Status::UpToDate => println!("ths {current} is up to date."),
             Status::UpdateAvailable => {
                 println!("Update available: {current} → {available}");
             }
-            Status::Ahead => println!(
-                "thus-spoke-zakura {current} is newer than the latest release ({available})."
-            ),
+            Status::Ahead => {
+                println!("ths {current} is newer than the latest release ({available}).")
+            }
         }
     }
     Ok(())

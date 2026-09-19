@@ -11,7 +11,7 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "Unsupported platform: $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 
-asset="thus-spoke-zakura-$target.tar.gz"
+asset="ths-$target.tar.gz"
 if [ "$requested_version" = "latest" ]; then
   release_url="https://github.com/$repo/releases/latest/download"
 else
@@ -24,7 +24,7 @@ fi
 
 destination="${TSZ_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$destination"
-stage="$(mktemp -d "$destination/.thus-spoke-zakura.XXXXXX")"
+stage="$(mktemp -d "$destination/.ths.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 
 curl --proto '=https' --tlsv1.2 -fsSL "$release_url/$asset" -o "$stage/$asset"
@@ -46,14 +46,14 @@ fi
 [ "$actual" = "$expected" ] || { echo "Checksum verification failed for $asset" >&2; exit 1; }
 
 members="$(tar -tzf "$stage/$asset")"
-[ "$members" = "thus-spoke-zakura" ] || {
+[ "$members" = "ths" ] || {
   echo "Release archive contains unexpected files" >&2
   exit 1
 }
-tar -xzf "$stage/$asset" -C "$stage" thus-spoke-zakura
-chmod 755 "$stage/thus-spoke-zakura"
+tar -xzf "$stage/$asset" -C "$stage" ths
+chmod 755 "$stage/ths"
 
-installed_version="$("$stage/thus-spoke-zakura" --version | awk '{print $2}')"
+installed_version="$("$stage/ths" --version | awk '{print $2}')"
 [ -n "$installed_version" ] || { echo "Could not read launcher version" >&2; exit 1; }
 if [ "$requested_version" != "latest" ]; then
   expected_version="${requested_version#v}"
@@ -64,10 +64,10 @@ if [ "$requested_version" != "latest" ]; then
 fi
 
 if [ "${TSZ_SKIP_IMAGE_PULL:-0}" != "1" ]; then
-  "$stage/thus-spoke-zakura" pull
+  "$stage/ths" pull
 fi
 
-mv -f "$stage/thus-spoke-zakura" "$destination/thus-spoke-zakura"
+mv -f "$stage/ths" "$destination/ths"
 trap - EXIT HUP INT TERM
 rm -rf "$stage"
-echo "Installed thus-spoke-zakura $installed_version to $destination"
+echo "Installed ths $installed_version to $destination"

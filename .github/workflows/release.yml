@@ -78,12 +78,12 @@ jobs:
         shell: bash
         run: |
           mkdir dist
-          cp "target/${{ matrix.target }}/release/thus-spoke-zakura" dist/
-          tar -C dist -czf "thus-spoke-zakura-${{ matrix.target }}.tar.gz" thus-spoke-zakura
+          cp "target/${{ matrix.target }}/release/ths" dist/
+          tar -C dist -czf "ths-${{ matrix.target }}.tar.gz" ths
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: launcher-${{ matrix.target }}
-          path: thus-spoke-zakura-${{ matrix.target }}.tar.gz
+          path: ths-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   image-platforms:

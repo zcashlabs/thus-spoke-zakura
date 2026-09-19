@@ -517,7 +517,7 @@ fn ensure_image(image: &str) -> Result<()> {
 fn require_image(image: &str) -> Result<()> {
     if docker_output(["image", "inspect", image]).is_err() {
         bail!(
-            "required image {image} is unavailable; run `thus-spoke-zakura pull` (or `thus-spoke-zakura build` from a source checkout) first"
+            "required image {image} is unavailable; run `ths pull` (or `ths build` from a source checkout) first"
         );
     }
     Ok(())
