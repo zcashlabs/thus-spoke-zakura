@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { Fuel, Pickaxe } from 'lucide-react';
+import { AlertTriangle, Fuel, Pickaxe } from 'lucide-react';
 import { Shell } from '@/components/layout/Shell';
 import { WalletPage } from '@/features/wallet/WalletPage';
 import { ExplorerPage } from '@/features/explorer/ExplorerPage';
@@ -62,6 +62,25 @@ export function App() {
           )}
         </div>
       </header>
+
+      {status?.wallet_sync?.state === 'error' && (
+        <div
+          role="alert"
+          className="border-warning/35 bg-warning-soft text-warning mb-4 flex items-start gap-2.5 rounded-xs border px-4 py-3 text-[12px]"
+        >
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <div>
+            <b className="block">Wallet data may be stale</b>
+            <span className="text-ink-muted">
+              The last known balances remain available. Synchronization will retry automatically
+              {status.wallet_sync.last_success_at
+                ? `; last successful update was ${new Date(status.wallet_sync.last_success_at * 1000).toLocaleTimeString()}`
+                : ''}
+              .
+            </span>
+          </div>
+        </div>
+      )}
 
       <div key={pathname} className="animate-rise">
         <Routes>

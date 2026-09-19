@@ -9,8 +9,12 @@ function walletKeys() {
 
 function useInvalidateWallet() {
   const queryClient = useQueryClient();
-  return () => {
-    for (const key of walletKeys()) void queryClient.invalidateQueries({ queryKey: key });
+  return async () => {
+    await Promise.all(
+      walletKeys().map((key) =>
+        queryClient.invalidateQueries({ queryKey: key, refetchType: 'active' }),
+      ),
+    );
   };
 }
 

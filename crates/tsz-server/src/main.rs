@@ -112,6 +112,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     api::provision_initial_balance(&state)
         .await
         .context("provisioning Account 1 with 5 Orchard ZEC")?;
+    tokio::spawn(api::wallet_sync_loop(state.clone()));
     let app = api::router(state);
     let address: SocketAddr = std::env::var("TSZ_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())

@@ -242,6 +242,28 @@ impl RealWallet {
         }
     }
 
+    pub async fn latest_height(&self) -> Result<u64> {
+        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        Ok(client
+            .get_latest_block(ChainSpec::default())
+            .await?
+            .into_inner()
+            .height)
+    }
+
+    pub async fn heights(&self) -> Result<(Option<u64>, Option<u64>)> {
+        let db = self.db.lock().await;
+        Ok(db
+            .get_wallet_summary(ConfirmationsPolicy::MIN)?
+            .map(|summary| {
+                (
+                    Some(u64::from(u32::from(summary.fully_scanned_height()))),
+                    Some(u64::from(u32::from(summary.chain_tip_height()))),
+                )
+            })
+            .unwrap_or((None, None)))
+    }
+
     pub async fn apply_balances(&self, accounts: &mut [Account]) -> Result<()> {
         let db = self.db.lock().await;
         let Some(summary) = db.get_wallet_summary(ConfirmationsPolicy::MIN)? else {

@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Context;
 use axum::{
@@ -14,7 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS;
 
@@ -32,18 +36,173 @@ struct Inner {
     rpc: NodeRpc,
     instance: String,
     events: broadcast::Sender<String>,
+    wallet_sync: Mutex<()>,
+    wallet_snapshot: RwLock<WalletSnapshot>,
+}
+
+#[derive(Clone)]
+struct WalletSnapshot {
+    accounts: Vec<Account>,
+    status: WalletSyncStatus,
+}
+
+#[derive(Clone, Serialize)]
+struct WalletSyncStatus {
+    state: &'static str,
+    fully_scanned_height: Option<u64>,
+    observed_height: Option<u64>,
+    last_success_at: Option<u64>,
+    error: Option<String>,
 }
 
 impl AppState {
     pub fn new(store: Store, wallet: RealWallet, rpc: String, instance: String) -> Self {
         let (events, _) = broadcast::channel(128);
+        let accounts = store.accounts().unwrap_or_default();
         Self(Arc::new(Inner {
             store,
             wallet,
             rpc: NodeRpc::new(rpc),
             instance,
             events,
+            wallet_sync: Mutex::new(()),
+            wallet_snapshot: RwLock::new(WalletSnapshot {
+                accounts,
+                status: WalletSyncStatus {
+                    state: "syncing",
+                    fully_scanned_height: None,
+                    observed_height: None,
+                    last_success_at: None,
+                    error: None,
+                },
+            }),
         }))
+    }
+
+    async fn accounts(&self) -> Vec<Account> {
+        self.0.wallet_snapshot.read().await.accounts.clone()
+    }
+
+    async fn wallet_sync_status(&self) -> WalletSyncStatus {
+        self.0.wallet_snapshot.read().await.status.clone()
+    }
+
+    async fn synchronize_wallet(&self, target_height: Option<u64>) -> anyhow::Result<()> {
+        let _guard = self.0.wallet_sync.lock().await;
+        if let Some(target) = target_height
+            && self
+                .0
+                .wallet_snapshot
+                .read()
+                .await
+                .status
+                .fully_scanned_height
+                .is_some_and(|height| height >= target)
+        {
+            return Ok(());
+        }
+
+        {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.state = "syncing";
+            snapshot.status.error = None;
+        }
+        notify(self, "sync");
+
+        let result = async {
+            if let Some(target) = target_height {
+                self.0
+                    .wallet
+                    .wait_for_height(target, Duration::from_secs(120))
+                    .await?;
+            }
+            self.0.wallet.sync().await?;
+            self.refresh_wallet_snapshot().await
+        }
+        .await;
+
+        if let Err(error) = &result {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.state = "error";
+            snapshot.status.error = Some(error.to_string());
+            notify(self, "sync");
+        }
+        result
+    }
+
+    async fn synchronize_latest(&self) -> anyhow::Result<()> {
+        let observed = self.0.wallet.latest_height().await?;
+        {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.observed_height = Some(observed);
+        }
+        self.synchronize_wallet(Some(observed)).await
+    }
+
+    async fn refresh_wallet_snapshot(&self) -> anyhow::Result<()> {
+        let mut accounts = self.0.store.accounts()?;
+        self.0.wallet.apply_balances(&mut accounts).await?;
+        let (fully_scanned_height, chain_tip_height) = self.0.wallet.heights().await?;
+        let changed = self.0.wallet_snapshot.read().await.accounts != accounts;
+        {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.accounts = accounts;
+            snapshot.status = WalletSyncStatus {
+                state: "ready",
+                fully_scanned_height,
+                observed_height: chain_tip_height,
+                last_success_at: Some(now_unix()),
+                error: None,
+            };
+        }
+        notify(self, "sync");
+        if changed {
+            notify(self, "wallet");
+        }
+        Ok(())
+    }
+
+    async fn sync_if_chain_advanced(&self) -> anyhow::Result<()> {
+        let observed = self.0.wallet.latest_height().await?;
+        {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.observed_height = Some(observed);
+        }
+        let scanned = self
+            .0
+            .wallet_snapshot
+            .read()
+            .await
+            .status
+            .fully_scanned_height;
+        if scanned.is_none_or(|height| height < observed) {
+            self.synchronize_wallet(Some(observed)).await?;
+            notify(self, "chain");
+        }
+        Ok(())
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub async fn wallet_sync_loop(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = state.sync_if_chain_advanced().await {
+            tracing::warn!(%error, "background wallet synchronization failed");
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.status.state = "error";
+            snapshot.status.error = Some(error.to_string());
+            drop(snapshot);
+            notify(&state, "sync");
+        }
     }
 }
 
@@ -114,21 +273,21 @@ pub fn router(state: AppState) -> Router {
 
 pub async fn dependencies_ready(state: &AppState) -> anyhow::Result<()> {
     state.0.rpc.chain_info().await?;
-    state.0.wallet.sync().await?;
+    state.synchronize_latest().await?;
     Ok(())
 }
 
 async fn health(State(state): State<AppState>) -> Response {
     let node = state.0.rpc.chain_info().await.ok();
-    let wallet = state.0.wallet.sync().await;
-    let status = if node.is_some() && wallet.is_ok() {
+    let wallet = state.wallet_sync_status().await;
+    let status = if node.is_some() && wallet.last_success_at.is_some() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
         status,
-        Json(json!({"ok": node.is_some() && wallet.is_ok(), "instance": state.0.instance, "node": node, "wallet": wallet.err().map(|e| e.to_string())})),
+        Json(json!({"ok": node.is_some() && wallet.last_success_at.is_some(), "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
     )
         .into_response()
 }
@@ -141,6 +300,7 @@ struct Status {
     auto_mine: bool,
     network: &'static str,
     endpoints: PublicEndpoints,
+    wallet_sync: WalletSyncStatus,
 }
 
 #[derive(Serialize)]
@@ -170,12 +330,11 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
                 .unwrap_or_else(|_| "http://127.0.0.1:9067".into()),
             p2p: std::env::var("TSZ_PUBLIC_P2P").unwrap_or_else(|_| "127.0.0.1:18233".into()),
         },
+        wallet_sync: state.wallet_sync_status().await,
     }))
 }
 async fn accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<Account>>> {
-    state.0.wallet.sync().await?;
-    let mut accounts = state.0.store.accounts()?;
-    state.0.wallet.apply_balances(&mut accounts).await?;
+    let mut accounts = state.accounts().await;
     accounts.retain(|account| account.id <= USER_ACCOUNT_COUNT);
     Ok(Json(accounts))
 }
@@ -210,7 +369,7 @@ async fn send(
     if let Some(existing) = state.0.store.activity_for_key(&req.idempotency_key)? {
         return Ok(Json(existing));
     }
-    state.0.wallet.sync().await?;
+    state.synchronize_latest().await?;
     let destination = state.0.store.account(req.to_account)?;
     let address = if req.destination_pool == "transparent" {
         destination.transparent_address
@@ -296,7 +455,7 @@ async fn fund_from_treasury(
         "orchard" => destination.unified_address,
         _ => anyhow::bail!("pool must be transparent or orchard"),
     };
-    state.0.wallet.sync().await?;
+    state.synchronize_latest().await?;
     let seed = state.0.store.seed()?;
     // SDK proposals check spendability and the actual fee before construction. Total
     // balances include pending change and cannot decide whether this request is fundable.
@@ -488,12 +647,7 @@ async fn mine_and_sync(state: &AppState, blocks: u32) -> anyhow::Result<Vec<Stri
         .pointer("/height")
         .and_then(Value::as_u64)
         .context("Zakura mined block omitted its height")?;
-    state
-        .0
-        .wallet
-        .wait_for_height(tip_height, Duration::from_secs(120))
-        .await?;
-    state.0.wallet.sync().await?;
+    state.synchronize_wallet(Some(tip_height)).await?;
     // Every caller here produces blocks, so the chain moved for everyone, not
     // just the tab that asked. Without this, other dashboards keep the old
     // height and tip until something else happens to mine.
@@ -509,7 +663,6 @@ pub async fn provision_initial_balance(state: &AppState) -> anyhow::Result<()> {
         .activity_for_key(INITIAL_FUNDING_KEY)?
         .is_some()
     {
-        state.0.wallet.sync().await?;
         return Ok(());
     }
     // A fresh wallet needs scanned blocks before a proposal can determine its target height.
@@ -524,10 +677,9 @@ pub async fn provision_initial_balance(state: &AppState) -> anyhow::Result<()> {
         INITIAL_FUNDING_KEY,
     )
     .await?;
-    state.0.wallet.sync().await?;
-    let mut accounts = state.0.store.accounts()?;
-    state.0.wallet.apply_balances(&mut accounts).await?;
-    let account = accounts
+    let account = state
+        .accounts()
+        .await
         .into_iter()
         .find(|account| account.id == 1)
         .context("Account 1 disappeared during startup provisioning")?;
@@ -879,6 +1031,52 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let (status, _) = get(&dir, "/wallet").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(dir.path().join("server.db")).expect("open store");
+        store.initialize().expect("initialize store");
+        let wallet =
+            RealWallet::open(dir.path(), &store.seed().expect("wallet seed")).expect("open wallet");
+        (
+            AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn account_reads_return_the_snapshot_without_contacting_lightwalletd() {
+        let (state, _dir) = state_with_local_wallet();
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.accounts[0].orchard_zatoshi = 400_000_000;
+        }
+
+        let Json(accounts) = accounts(State(state))
+            .await
+            .unwrap_or_else(|_| panic!("cached account read failed"));
+
+        assert_eq!(accounts.len(), usize::from(USER_ACCOUNT_COUNT));
+        assert_eq!(accounts[0].orchard_zatoshi, 400_000_000);
+    }
+
+    #[tokio::test]
+    async fn synchronization_failure_preserves_the_last_good_snapshot() {
+        let (state, _dir) = state_with_local_wallet();
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.accounts[0].orchard_zatoshi = 400_000_000;
+            snapshot.status.last_success_at = Some(123);
+        }
+
+        assert!(state.synchronize_wallet(Some(1)).await.is_err());
+
+        let snapshot = state.0.wallet_snapshot.read().await;
+        assert_eq!(snapshot.accounts[0].orchard_zatoshi, 400_000_000);
+        assert_eq!(snapshot.status.last_success_at, Some(123));
+        assert_eq!(snapshot.status.state, "error");
+        assert!(snapshot.status.error.is_some());
     }
 
     #[test]

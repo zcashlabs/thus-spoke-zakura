@@ -61,6 +61,15 @@ export const endpointsSchema = z.object({
 });
 export type Endpoints = z.infer<typeof endpointsSchema>;
 
+export const walletSyncSchema = z.object({
+  state: z.enum(['ready', 'syncing', 'error']),
+  fully_scanned_height: z.number().int().nonnegative().nullable(),
+  observed_height: z.number().int().nonnegative().nullable(),
+  last_success_at: z.number().int().nonnegative().nullable(),
+  error: z.string().nullable(),
+});
+export type WalletSync = z.infer<typeof walletSyncSchema>;
+
 export const statusSchema = z.object({
   instance: z.string(),
   node: chainInfoSchema.nullable().default(null),
@@ -69,6 +78,8 @@ export const statusSchema = z.object({
   network: z.string(),
   // Optional so a dashboard built before the server grew this field still loads.
   endpoints: endpointsSchema.optional(),
+  // Optional so a newer dashboard remains compatible with an older server.
+  wallet_sync: walletSyncSchema.optional(),
 });
 export type Status = z.infer<typeof statusSchema>;
 

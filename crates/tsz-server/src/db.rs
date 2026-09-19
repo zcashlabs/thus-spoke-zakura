@@ -19,7 +19,7 @@ pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 pub const USER_ACCOUNT_COUNT: u8 = 5;
 pub const TREASURY_ACCOUNT_ID: u8 = 6;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Account {
     pub id: u8,
     pub name: String,

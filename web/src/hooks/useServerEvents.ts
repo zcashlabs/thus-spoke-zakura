@@ -10,6 +10,7 @@ import { queryKeys } from './queries';
 const TOPICS: Record<string, readonly unknown[][]> = {
   wallet: [[...queryKeys.accounts], ['activity']],
   chain: [[...queryKeys.status], ['blocks'], [...queryKeys.mempool]],
+  sync: [[...queryKeys.status]],
 };
 
 export function useServerEvents(): void {
