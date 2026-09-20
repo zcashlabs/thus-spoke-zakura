@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use bip39::Mnemonic;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -11,7 +12,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zcash_keys::{
     address::Address,
-    keys::{UnifiedAddressRequest, UnifiedSpendingKey},
+    keys::{Era, UnifiedAddressRequest, UnifiedSpendingKey},
 };
 use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
 
@@ -27,6 +28,19 @@ pub struct Account {
     pub transparent_address: String,
     pub transparent_zatoshi: u64,
     pub orchard_zatoshi: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevelopmentAccountSecret {
+    pub id: u8,
+    pub unified_address: String,
+    pub unified_spending_key_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevelopmentSecrets {
+    pub mnemonic: String,
+    pub accounts: Vec<DevelopmentAccountSecret>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,24 +85,31 @@ impl Store {
             );
             CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, activity_id TEXT NOT NULL);
         "#)?;
-        let seed = db
+        let stored_seed = db
             .query_row("SELECT value FROM metadata WHERE key='seed'", [], |r| {
                 r.get::<_, String>(0)
             })
             .optional()?;
-        let entropy = if let Some(seed) = seed {
+        let seed = if let Some(seed) = stored_seed {
             hex::decode(seed).context("invalid wallet seed")?
         } else {
             let mut entropy = [0u8; 32];
             rand::rng().fill_bytes(&mut entropy);
+            let mnemonic = Mnemonic::from_entropy(&entropy)
+                .context("encoding wallet entropy as a BIP-39 mnemonic")?;
+            let seed = mnemonic.to_seed("");
             db.execute(
                 "INSERT INTO metadata(key, value) VALUES('seed', ?1)",
-                [hex::encode(entropy)],
+                [hex::encode(seed)],
             )?;
-            entropy.to_vec()
+            db.execute(
+                "INSERT INTO metadata(key, value) VALUES('mnemonic', ?1)",
+                [mnemonic.to_string()],
+            )?;
+            seed.to_vec()
         };
         for id in 1u8..=TREASURY_ACCOUNT_ID {
-            let (ua, taddr) = derived_addresses(&entropy, id)?;
+            let (ua, taddr) = derived_addresses(&seed, id)?;
             db.execute("INSERT OR IGNORE INTO accounts(id,name,unified_address,transparent_address) VALUES(?1,?2,?3,?4)", params![id, format!("Account {id}"), ua, taddr])?;
         }
         Ok(())
@@ -235,6 +256,35 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    pub fn mnemonic(&self) -> Result<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM metadata WHERE key='mnemonic'", [], |r| {
+                r.get(0)
+            })
+            .context("wallet mnemonic is missing; restart this disposable environment")
+    }
+
+    pub fn development_secrets(&self) -> Result<DevelopmentSecrets> {
+        let seed = hex::decode(self.seed()?).context("invalid wallet seed")?;
+        let mnemonic = self.mnemonic()?;
+        let network = local_network();
+        let mut accounts = Vec::with_capacity(usize::from(USER_ACCOUNT_COUNT));
+        for id in 1..=USER_ACCOUNT_COUNT {
+            let account_index = zip32::AccountId::try_from(u32::from(id - 1))
+                .map_err(|_| anyhow::anyhow!("invalid ZIP-32 account {id}"))?;
+            let spending_key = UnifiedSpendingKey::from_seed(&network, &seed, account_index)
+                .map_err(|error| anyhow::anyhow!("deriving account {id}: {error:?}"))?;
+            accounts.push(DevelopmentAccountSecret {
+                id,
+                unified_address: self.account(id)?.unified_address,
+                unified_spending_key_hex: hex::encode(spending_key.to_bytes(Era::Orchard)),
+            });
+        }
+        Ok(DevelopmentSecrets { mnemonic, accounts })
+    }
 }
 
 fn insert_activity(db: &Connection, a: &Activity, key: &str) -> Result<()> {
@@ -302,19 +352,7 @@ fn row_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
     })
 }
 fn derived_addresses(seed: &[u8], id: u8) -> Result<(String, String)> {
-    let one = Some(BlockHeight::from_u32(1));
-    let network = LocalNetwork {
-        overwinter: one,
-        sapling: one,
-        blossom: one,
-        heartwood: one,
-        canopy: one,
-        nu5: one,
-        nu6: one,
-        nu6_1: None,
-        nu6_2: None,
-        nu6_3: None,
-    };
+    let network = local_network();
     let account = zip32::AccountId::try_from(u32::from(id - 1))
         .map_err(|_| anyhow::anyhow!("invalid ZIP-32 account {id}"))?;
     let usk = UnifiedSpendingKey::from_seed(&network, seed, account)
@@ -331,6 +369,22 @@ fn derived_addresses(seed: &[u8], id: u8) -> Result<(String, String)> {
         ua.encode(&network),
         Address::Transparent(transparent).encode(&network),
     ))
+}
+
+fn local_network() -> LocalNetwork {
+    let one = Some(BlockHeight::from_u32(1));
+    LocalNetwork {
+        overwinter: one,
+        sapling: one,
+        blossom: one,
+        heartwood: one,
+        canopy: one,
+        nu5: one,
+        nu6: one,
+        nu6_1: None,
+        nu6_2: None,
+        nu6_3: None,
+    }
 }
 
 #[cfg(test)]

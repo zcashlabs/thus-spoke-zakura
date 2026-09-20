@@ -10,6 +10,7 @@ anyhow.workspace = true
 axum.workspace = true
 async-stream = "0.3"
 async-trait = "0.1"
+bip39 = "2"
 clap.workspace = true
 hex.workspace = true
 futures-core = "0.3"
@@ -31,7 +32,7 @@ tonic = "0.14"
 
 # Pin the Zakura type family even where API-facing values are serialized. The
 # wallet adapter can never silently resolve the upstream LRZ crypto packages.
-zcash_keys = { package = "zakura-keys", version = "=1.2.0", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_keys = { package = "zakura-keys", version = "=1.2.0", default-features = false, features = ["orchard", "transparent-inputs", "unstable"] }
 zcash_primitives = { package = "zakura-primitives", version = "=1.2.0", default-features = false }
 zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc5", features = ["orchard", "transparent-inputs", "sync", "lightwalletd-tonic-transport"] }
 zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc5", features = ["orchard", "transparent-inputs", "unstable"] }

@@ -4,6 +4,7 @@ mod rpc;
 mod wallet;
 
 use std::{
+    fmt::Write,
     fs,
     net::SocketAddr,
     path::PathBuf,
@@ -62,7 +63,28 @@ fn init(data_dir: PathBuf, config_dir: PathBuf) -> Result<()> {
     let miner = store.account(TREASURY_ACCOUNT_ID)?.transparent_address;
     fs::write(config_dir.join("zakurad.toml"), zakura_config(&miner))?;
     println!("initialized five development accounts and a hidden treasury; miner address {miner}");
+    println!("{}", development_credentials(&store)?);
     Ok(())
+}
+
+fn development_credentials(store: &Store) -> Result<String> {
+    let secrets = store.development_secrets()?;
+    let mut output =
+        String::from("\n⚠ DISPOSABLE REGTEST SECRETS — NEVER SEND REAL FUNDS TO THESE KEYS\n");
+    writeln!(output, "Mnemonic: {}", secrets.mnemonic)?;
+    for account in secrets.accounts {
+        writeln!(
+            output,
+            "Account {}: {}",
+            account.id, account.unified_address
+        )?;
+        writeln!(
+            output,
+            "  Unified spending key (hex): {}",
+            account.unified_spending_key_hex
+        )?;
+    }
+    Ok(output.trim_end().to_owned())
 }
 
 fn zakura_config(miner: &str) -> String {
@@ -140,5 +162,24 @@ mod tests {
         let config = zakura_config(&treasury);
         assert!(config.contains(&format!("miner_address = \"{treasury}\"")));
         assert!(!config.contains(&format!("miner_address = \"{user}\"")));
+    }
+
+    #[test]
+    fn prints_mnemonic_and_exactly_five_user_account_keys() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+
+        let output = development_credentials(&store).unwrap();
+        let mnemonic = store.development_secrets().unwrap().mnemonic;
+        assert!(output.contains(&format!("Mnemonic: {mnemonic}")));
+        assert_eq!(
+            hex::encode(mnemonic.parse::<bip39::Mnemonic>().unwrap().to_seed("")),
+            store.seed().unwrap()
+        );
+        assert_eq!(output.matches("Unified spending key (hex):").count(), 5);
+        for id in 1..=5 {
+            assert!(output.contains(&format!("Account {id}:")));
+        }
+        assert!(!output.contains("Account 6:"));
     }
 }
