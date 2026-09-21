@@ -119,6 +119,8 @@ Running `ths` with no command starts the default environment.
 | `ths open` | Open the running dashboard |
 | `ths endpoints --json` | Print endpoints for scripts and developer tools |
 | `ths mine 10` | Mine blocks on the running environment and synchronize its wallet |
+| `ths faucet <ADDRESS>` | Send 1 disposable ZEC to a Regtest unified or transparent address |
+| `ths faucet <ADDRESS> --amount 2.5` | Send a custom amount of up to 5 disposable ZEC |
 | `ths logs app -f` | Follow dashboard/server logs |
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |

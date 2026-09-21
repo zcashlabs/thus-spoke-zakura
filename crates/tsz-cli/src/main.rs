@@ -1,9 +1,9 @@
 mod runtime;
 mod updater;
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, str::FromStr};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use runtime::{InstanceName, Runtime};
 
@@ -62,6 +62,14 @@ enum Command {
         #[arg(value_parser = clap::value_parser!(u32).range(1..=10_000))]
         blocks: u32,
     },
+    /// Send disposable Regtest ZEC to a unified or transparent address.
+    Faucet {
+        /// Regtest unified or transparent destination address.
+        address: String,
+        /// Amount of ZEC to send (maximum 5, up to 8 decimal places).
+        #[arg(long, default_value = "1")]
+        amount: ZecAmount,
+    },
     /// Stream or print service logs.
     Logs {
         #[arg(value_parser = ["app", "zakura", "lightwalletd"])]
@@ -106,6 +114,9 @@ fn main() -> Result<ExitCode> {
         Command::Open => runtime.open(&cli.name),
         Command::Endpoints => runtime.endpoints(&cli.name, cli.json),
         Command::Mine { blocks } => runtime.mine(&cli.name, blocks, cli.json),
+        Command::Faucet { address, amount } => {
+            runtime.faucet(&cli.name, &address, amount.zatoshi(), cli.json)
+        }
         Command::Logs { service, follow } => runtime.logs(&cli.name, service.as_deref(), follow),
         Command::Stop => runtime.stop(&cli.name),
         Command::Reset { force } => runtime.reset(&cli.name, force),
@@ -120,6 +131,44 @@ fn should_check_for_updates(cli: &Cli) -> bool {
 }
 
 fn _assert_pathbuf_send(_: PathBuf) {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ZecAmount(u64);
+
+impl ZecAmount {
+    fn zatoshi(self) -> u64 {
+        self.0
+    }
+}
+
+impl FromStr for ZecAmount {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+        if whole.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.len() > 8
+        {
+            bail!("amount must be a decimal ZEC value with at most 8 decimal places");
+        }
+        let whole = whole.parse::<u64>()?;
+        let fraction = if fraction.is_empty() {
+            0
+        } else {
+            fraction.parse::<u64>()? * 10u64.pow(8 - fraction.len() as u32)
+        };
+        let zatoshi = whole
+            .checked_mul(100_000_000)
+            .and_then(|value| value.checked_add(fraction))
+            .ok_or_else(|| anyhow::anyhow!("amount is too large"))?;
+        if zatoshi == 0 || zatoshi > 500_000_000 {
+            bail!("amount must be greater than zero and no more than 5 ZEC");
+        }
+        Ok(Self(zatoshi))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -161,6 +210,34 @@ mod tests {
         assert!(Cli::try_parse_from(["ths", "mine", "0"]).is_err());
         assert!(Cli::try_parse_from(["ths", "mine", "10001"]).is_err());
 
+        let cli = Cli::try_parse_from(["ths", "faucet", "uregtest1example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Faucet {
+                amount: ZecAmount(100_000_000),
+                ..
+            })
+        ));
+
+        let cli = Cli::try_parse_from([
+            "ths",
+            "faucet",
+            "tmExample",
+            "--amount",
+            "1.25",
+            "--name",
+            "alice",
+        ])
+        .unwrap();
+        assert_eq!(cli.name.to_string(), "alice");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Faucet {
+                amount: ZecAmount(125_000_000),
+                ..
+            })
+        ));
+
         assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 
         assert!(Cli::try_parse_from(["ths", "start", "--build"]).is_err());
@@ -179,5 +256,14 @@ mod tests {
 
         let status = Cli::try_parse_from(["ths", "status"]).unwrap();
         assert!(!should_check_for_updates(&status));
+    }
+
+    #[test]
+    fn parses_exact_zec_amounts() {
+        assert_eq!("0.00000001".parse::<ZecAmount>().unwrap().zatoshi(), 1);
+        assert_eq!("5".parse::<ZecAmount>().unwrap().zatoshi(), 500_000_000);
+        for invalid in ["0", "5.00000001", "1.000000001", "-1", "1e2", ".5"] {
+            assert!(invalid.parse::<ZecAmount>().is_err(), "accepted {invalid}");
+        }
     }
 }

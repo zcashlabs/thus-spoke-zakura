@@ -20,12 +20,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tower_http::{services::ServeDir, trace::TraceLayer};
+use zcash_keys::address::Address;
 use zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS;
 
 use crate::{
     db::{Account, Activity, Store, TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC},
     rpc::{ChainInfo, NodeRpc},
-    wallet::{PaymentError, RealWallet},
+    wallet::{PaymentError, RealWallet, regtest_network},
 };
 
 #[derive(Clone)]
@@ -257,6 +258,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/activity", get(activity))
         .route("/api/v1/send", post(send))
         .route("/api/v1/faucet", post(faucet))
+        .route("/api/v1/faucet/address", post(faucet_address))
         .route("/api/v1/mine", post(mine))
         .route("/api/v1/dev/seed", post(seed))
         .route("/api/v1/blocks", get(blocks))
@@ -437,6 +439,48 @@ async fn faucet(
         )
         .await?,
     ))
+}
+
+#[derive(Deserialize)]
+struct FaucetAddressRequest {
+    address: String,
+    amount_zatoshi: u64,
+}
+
+#[derive(Serialize)]
+struct FaucetAddressResponse {
+    address: String,
+    amount_zatoshi: u64,
+    txid: String,
+    block_hash: String,
+}
+
+async fn faucet_address(
+    State(state): State<AppState>,
+    Json(req): Json<FaucetAddressRequest>,
+) -> ApiResult<Json<FaucetAddressResponse>> {
+    require_faucet_address(&req.address)?;
+    if req.amount_zatoshi == 0 || req.amount_zatoshi > 5 * ZATOSHIS_PER_ZEC {
+        return Err(ApiError::bad_request(
+            "amount must be greater than zero and no more than 5 ZEC",
+        ));
+    }
+    state.synchronize_latest().await?;
+    let seed = state.0.store.seed()?;
+    let treasury = state.0.store.account(TREASURY_ACCOUNT_ID)?;
+    let txid =
+        send_with_replenishment(&state, &seed, &treasury, &req.address, req.amount_zatoshi).await?;
+    let hashes = mine_and_sync(&state, 1).await?;
+    let block_hash = hashes
+        .into_iter()
+        .next()
+        .context("Zakura did not return the confirmation block hash")?;
+    Ok(Json(FaucetAddressResponse {
+        address: req.address,
+        amount_zatoshi: req.amount_zatoshi,
+        txid,
+        block_hash,
+    }))
 }
 
 async fn fund_from_treasury(
@@ -902,6 +946,18 @@ fn require_user_account(id: u8) -> ApiResult<()> {
     }
 }
 
+fn require_faucet_address(value: &str) -> ApiResult<()> {
+    match Address::decode(&regtest_network(), value) {
+        Some(Address::Unified(_) | Address::Transparent(_)) => Ok(()),
+        Some(_) => Err(ApiError::bad_request(
+            "destination must be a unified or transparent Regtest address",
+        )),
+        None => Err(ApiError::bad_request(
+            "destination is not a valid Regtest address",
+        )),
+    }
+}
+
 type ApiResult<T> = Result<T, ApiError>;
 struct ApiError {
     status: StatusCode,
@@ -1117,6 +1173,17 @@ mod tests {
             assert!(require_user_account(id).is_ok());
         }
         assert!(require_user_account(TREASURY_ACCOUNT_ID).is_err());
+    }
+
+    #[test]
+    fn faucet_accepts_only_regtest_unified_and_transparent_addresses() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let account = store.account(1).unwrap();
+
+        assert!(require_faucet_address(&account.unified_address).is_ok());
+        assert!(require_faucet_address(&account.transparent_address).is_ok());
+        assert!(require_faucet_address("not-an-address").is_err());
     }
 
     #[test]

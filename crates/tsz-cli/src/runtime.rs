@@ -74,6 +74,14 @@ struct MineResult {
     hashes: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct FaucetResult {
+    address: String,
+    amount_zatoshi: u64,
+    txid: String,
+    block_hash: String,
+}
+
 pub struct Runtime {
     root: PathBuf,
 }
@@ -256,6 +264,50 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn faucet(
+        &self,
+        name: &InstanceName,
+        address: &str,
+        amount_zatoshi: u64,
+        json: bool,
+    ) -> Result<()> {
+        let app_container = format!("{}-app", prefix(name));
+        if !container_running(&app_container).unwrap_or(false) {
+            bail!("environment {name} is not running; start it with `ths --name {name}`");
+        }
+        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?
+            .post(format!("{dashboard}/api/v1/faucet/address"))
+            .json(&serde_json::json!({
+                "address": address,
+                "amount_zatoshi": amount_zatoshi,
+            }))
+            .send()
+            .with_context(|| format!("asking environment {name} to fund {address}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response
+                .text()
+                .unwrap_or_else(|_| "response body was unreadable".to_owned());
+            bail!("environment {name} rejected faucet request ({status}): {detail}");
+        }
+        let result: FaucetResult = response.json().context("decoding faucet response")?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "Sent {} ZEC to {} on {name}.",
+                format_zec(result.amount_zatoshi),
+                result.address
+            );
+            println!("Transaction: {}", result.txid);
+            println!("Confirmed in: {}", result.block_hash);
+        }
+        Ok(())
+    }
+
     pub fn logs(&self, name: &InstanceName, service: Option<&str>, follow: bool) -> Result<()> {
         let service = service.unwrap_or("app");
         let mut args = vec!["logs"];
@@ -369,6 +421,18 @@ impl Runtime {
                 failures.join("; ")
             )
         }
+    }
+}
+
+fn format_zec(zatoshi: u64) -> String {
+    let whole = zatoshi / 100_000_000;
+    let fraction = zatoshi % 100_000_000;
+    if fraction == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction:08}")
+            .trim_end_matches('0')
+            .to_owned()
     }
 }
 
