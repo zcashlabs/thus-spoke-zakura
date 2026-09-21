@@ -118,6 +118,7 @@ Running `ths` with no command starts the default environment.
 | `ths status` | Show health and endpoint information |
 | `ths open` | Open the running dashboard |
 | `ths endpoints --json` | Print endpoints for scripts and developer tools |
+| `ths mine 10` | Mine blocks on the running environment and synchronize its wallet |
 | `ths logs app -f` | Follow dashboard/server logs |
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
@@ -135,6 +136,8 @@ Every command accepts `--name` for isolated environments:
 ```console
 ths --name alice
 ths --name bob
+ths --name alice mine 10
+ths mine 10 --name alice
 ```
 
 Each named environment gets its own ports and Docker resources. Run each one in

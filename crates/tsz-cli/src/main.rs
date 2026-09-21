@@ -56,6 +56,12 @@ enum Command {
     Open,
     /// Print endpoints for developer tooling.
     Endpoints,
+    /// Mine blocks on a running development environment.
+    Mine {
+        /// Number of blocks to mine.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        blocks: u32,
+    },
     /// Stream or print service logs.
     Logs {
         #[arg(value_parser = ["app", "zakura", "lightwalletd"])]
@@ -99,6 +105,7 @@ fn main() -> Result<ExitCode> {
         Command::Status => runtime.status(&cli.name, cli.json),
         Command::Open => runtime.open(&cli.name),
         Command::Endpoints => runtime.endpoints(&cli.name, cli.json),
+        Command::Mine { blocks } => runtime.mine(&cli.name, blocks, cli.json),
         Command::Logs { service, follow } => runtime.logs(&cli.name, service.as_deref(), follow),
         Command::Stop => runtime.stop(&cli.name),
         Command::Reset { force } => runtime.reset(&cli.name, force),
@@ -140,6 +147,19 @@ mod tests {
 
         let cli = Cli::try_parse_from(["ths", "uninstall"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Uninstall)));
+
+        let cli = Cli::try_parse_from(["ths", "mine", "10"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Mine { blocks: 10 })));
+
+        let cli = Cli::try_parse_from(["ths", "--name", "alice", "mine", "3"]).unwrap();
+        assert_eq!(cli.name.to_string(), "alice");
+        assert!(matches!(cli.command, Some(Command::Mine { blocks: 3 })));
+
+        let cli = Cli::try_parse_from(["ths", "mine", "3", "--name", "alice"]).unwrap();
+        assert_eq!(cli.name.to_string(), "alice");
+
+        assert!(Cli::try_parse_from(["ths", "mine", "0"]).is_err());
+        assert!(Cli::try_parse_from(["ths", "mine", "10001"]).is_err());
 
         assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 

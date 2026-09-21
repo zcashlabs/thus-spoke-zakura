@@ -68,6 +68,12 @@ struct Instance {
     endpoints: Endpoints,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct MineResult {
+    blocks: usize,
+    hashes: Vec<String>,
+}
+
 pub struct Runtime {
     root: PathBuf,
 }
@@ -216,6 +222,38 @@ impl Runtime {
 
     pub fn open(&self, name: &InstanceName) -> Result<()> {
         open_url(&self.read_instance(name)?.endpoints.dashboard)
+    }
+
+    pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
+        let app_container = format!("{}-app", prefix(name));
+        if !container_running(&app_container).unwrap_or(false) {
+            bail!("environment {name} is not running; start it with `ths --name {name}`");
+        }
+        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?
+            .post(format!("{dashboard}/api/v1/mine"))
+            .json(&serde_json::json!({"blocks": blocks}))
+            .send()
+            .with_context(|| format!("asking environment {name} to mine {blocks} blocks"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response
+                .text()
+                .unwrap_or_else(|_| "response body was unreadable".to_owned());
+            bail!("environment {name} rejected mining ({status}): {detail}");
+        }
+        let result: MineResult = response.json().context("decoding mining response")?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("Mined {} blocks on {name}.", result.blocks);
+            if let Some(tip) = result.hashes.last() {
+                println!("New tip: {tip}");
+            }
+        }
+        Ok(())
     }
 
     pub fn logs(&self, name: &InstanceName, service: Option<&str>, follow: bool) -> Result<()> {

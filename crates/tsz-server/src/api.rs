@@ -703,8 +703,7 @@ async fn mine(
     if !(1..=10_000).contains(&req.blocks) {
         return Err(ApiError::bad_request("blocks must be between 1 and 10,000"));
     }
-    let hashes = state.0.rpc.generate(req.blocks).await?;
-    notify(&state, "chain");
+    let hashes = mine_and_sync(&state, req.blocks).await?;
     Ok(Json(json!({"blocks":hashes.len(),"hashes":hashes})))
 }
 
