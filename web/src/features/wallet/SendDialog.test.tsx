@@ -51,6 +51,7 @@ describe('SendDialog', () => {
   let fetchMock: ReturnType<typeof mockSend>;
 
   beforeEach(() => {
+    sessionStorage.clear();
     fetchMock = mockSend();
   });
   afterEach(() => {
@@ -87,10 +88,79 @@ describe('SendDialog', () => {
     expect(body(fetchMock).amount_zatoshi).toBe(1);
   });
 
-  it('carries an idempotency key so a retry cannot double-spend', async () => {
+  it('uses a new idempotency key after a successful payment', async () => {
     await submitAmount('1');
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(body(fetchMock).idempotency_key).toHaveLength(36);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const first = body(fetchMock).idempotency_key;
+    await waitFor(() => expect(screen.getByRole('button', { name: /Send ZEC/i })).toBeEnabled());
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(first).toHaveLength(36);
+    expect(first).not.toBe(requestBody(fetchMock.mock.calls[1]?.[1]).idempotency_key);
+  });
+
+  it('reuses the idempotency key when the same submission is retried', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('response lost'));
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    const amount = screen.getByLabelText('Amount (ZEC)');
+    const submit = screen.getByRole('button', { name: /Send ZEC/i });
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '1');
+
+    await userEvent.click(submit);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(submit).toBeEnabled());
+    await userEvent.click(submit);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(requestBody(fetchMock.mock.calls[0]?.[1]).idempotency_key).toBe(
+      requestBody(fetchMock.mock.calls[1]?.[1]).idempotency_key,
+    );
+  });
+
+  it('reuses the idempotency key after the dialog is remounted', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('response lost'));
+    const first = renderWithProviders(
+      <SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />,
+    );
+    let amount = screen.getByLabelText('Amount (ZEC)');
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '1');
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    amount = screen.getByLabelText('Amount (ZEC)');
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '1');
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(requestBody(fetchMock.mock.calls[0]?.[1]).idempotency_key).toBe(
+      requestBody(fetchMock.mock.calls[1]?.[1]).idempotency_key,
+    );
+  });
+
+  it('uses a new idempotency key after the payment parameters change', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('response lost'));
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    const amount = screen.getByLabelText('Amount (ZEC)');
+    const submit = screen.getByRole('button', { name: /Send ZEC/i });
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '1');
+    await userEvent.click(submit);
+    await waitFor(() => expect(submit).toBeEnabled());
+
+    await userEvent.clear(amount);
+    await userEvent.type(amount, '2');
+    await userEvent.click(submit);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(requestBody(fetchMock.mock.calls[0]?.[1]).idempotency_key).not.toBe(
+      requestBody(fetchMock.mock.calls[1]?.[1]).idempotency_key,
+    );
   });
 
   it('refuses a zero amount without calling the API', async () => {

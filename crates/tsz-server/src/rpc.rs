@@ -31,7 +31,14 @@ pub struct ChainInfo {
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
     result: Option<T>,
-    error: Option<Value>,
+    error: Option<RpcError>,
+}
+
+#[derive(Debug, Deserialize, thiserror::Error)]
+#[error("RPC error {code}: {message}")]
+struct RpcError {
+    code: i64,
+    message: String,
 }
 
 impl NodeRpc {
@@ -72,7 +79,7 @@ impl NodeRpc {
         let status = response.status();
         let envelope: Envelope<T> = response.json().await.context("decoding Zakura response")?;
         if let Some(error) = envelope.error {
-            bail!("Zakura {method} failed: {error}");
+            return Err(error).with_context(|| format!("Zakura {method} failed"));
         }
         if !status.is_success() {
             bail!("Zakura {method} returned HTTP {status}");
@@ -95,9 +102,22 @@ impl NodeRpc {
     pub async fn transaction(&self, txid: &str) -> Result<Value> {
         self.call("getrawtransaction", json!([txid, 1])).await
     }
+    pub async fn transaction_known(&self, txid: &str) -> Result<bool> {
+        match self.transaction(txid).await {
+            Ok(_) => Ok(true),
+            Err(error) if transaction_missing(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     pub async fn mempool(&self) -> Result<Vec<String>> {
         self.call("getrawmempool", json!([])).await
     }
+}
+
+fn transaction_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RpcError>()
+        .is_some_and(|error| error.code == -5)
 }
 
 #[cfg(test)]
@@ -113,5 +133,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "Zakura getblockcount timed out after 50ms");
+    }
+
+    #[test]
+    fn only_rpc_not_found_means_a_transaction_is_missing() {
+        let missing = anyhow::Error::new(RpcError {
+            code: -5,
+            message: "not found".into(),
+        })
+        .context("getrawtransaction failed");
+        let unavailable = anyhow::Error::new(RpcError {
+            code: -28,
+            message: "warming up".into(),
+        });
+
+        assert!(transaction_missing(&missing));
+        assert!(!transaction_missing(&unavailable));
     }
 }

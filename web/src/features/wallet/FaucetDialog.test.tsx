@@ -38,6 +38,50 @@ describe('FaucetDialog', () => {
     expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1');
   });
 
+  it('reuses the idempotency key after the dialog is remounted', async () => {
+    sessionStorage.clear();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            id: 'a',
+            kind: 'faucet',
+            from_account: null,
+            to_account: 1,
+            source_pool: 'orchard',
+            destination_pool: 'orchard',
+            amount_zatoshi: 100_000_000,
+            txid: 'f'.repeat(64),
+            block_hash: null,
+            status: 'confirmed',
+            created_at: '2026-09-22 10:00:00',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    const first = renderWithProviders(
+      <FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+
+    const key = (call: number) => {
+      const raw = fetchSpy.mock.calls[call]?.[1]?.body;
+      return (JSON.parse(typeof raw === 'string' ? raw : '{}') as { idempotency_key: string })
+        .idempotency_key;
+    };
+    expect(key(0)).toBe(key(1));
+    fetchSpy.mockRestore();
+  });
+
   it('shows the faucet limit while editing and prevents submission', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
