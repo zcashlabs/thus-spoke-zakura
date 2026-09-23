@@ -85,6 +85,10 @@ struct FaucetResult {
     block_hash: String,
 }
 
+// The server gives `generate` an hour, then syncs the wallet: outwait both.
+const MINE_TIMEOUT: Duration = Duration::from_secs(3900);
+const FAUCET_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub struct Runtime {
     root: PathBuf,
 }
@@ -180,13 +184,9 @@ impl Runtime {
             bail!("environment {name} is not running; start it with `ths --name {name}`");
         }
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?
-            .post(format!("{dashboard}/api/v1/mine"))
-            .json(&serde_json::json!({"blocks": blocks}))
-            .send()
-            .with_context(|| format!("asking environment {name} to mine {blocks} blocks"))?;
+        let response = send_to_environment(mine_request(&dashboard, blocks)?, || {
+            format!("asking environment {name} to mine {blocks} blocks")
+        })?;
         let status = response.status();
         if !status.is_success() {
             let detail = response
@@ -218,16 +218,10 @@ impl Runtime {
             bail!("environment {name} is not running; start it with `ths --name {name}`");
         }
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?
-            .post(format!("{dashboard}/api/v1/faucet/address"))
-            .json(&serde_json::json!({
-                "address": address,
-                "amount_zatoshi": amount_zatoshi,
-            }))
-            .send()
-            .with_context(|| format!("asking environment {name} to fund {address}"))?;
+        let response =
+            send_to_environment(faucet_request(&dashboard, address, amount_zatoshi)?, || {
+                format!("asking environment {name} to fund {address}")
+            })?;
         let status = response.status();
         if !status.is_success() {
             let detail = response
@@ -1013,6 +1007,61 @@ fn docker_logs(container: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&logs).trim().to_owned())
 }
 
+fn mine_request(dashboard: &str, blocks: u32) -> Result<reqwest::blocking::RequestBuilder> {
+    dashboard_request(
+        &format!("{dashboard}/api/v1/mine"),
+        &serde_json::json!({"blocks": blocks}),
+        MINE_TIMEOUT,
+    )
+}
+
+fn faucet_request(
+    dashboard: &str,
+    address: &str,
+    amount_zatoshi: u64,
+) -> Result<reqwest::blocking::RequestBuilder> {
+    dashboard_request(
+        &format!("{dashboard}/api/v1/faucet/address"),
+        &serde_json::json!({
+            "address": address,
+            "amount_zatoshi": amount_zatoshi,
+        }),
+        FAUCET_TIMEOUT,
+    )
+}
+
+// The limit is on the request so a built one reports it (see tests).
+fn dashboard_request(
+    url: &str,
+    body: &serde_json::Value,
+    timeout: Duration,
+) -> Result<reqwest::blocking::RequestBuilder> {
+    Ok(reqwest::blocking::Client::builder()
+        .build()?
+        .post(url)
+        .json(body)
+        .timeout(timeout))
+}
+
+fn send_to_environment(
+    request: reqwest::blocking::RequestBuilder,
+    what: impl FnOnce() -> String,
+) -> Result<reqwest::blocking::Response> {
+    let limit = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .and_then(|request| request.timeout().copied());
+    request.send().map_err(|error| {
+        let what = what();
+        match limit {
+            Some(limit) if error.is_timeout() => {
+                anyhow::Error::new(error).context(format!("{what}: no answer after {limit:?}"))
+            }
+            _ => anyhow::Error::new(error).context(what),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,5 +1359,51 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("interrupted"));
+    }
+    #[test]
+    fn mining_asks_the_environment_to_outwait_the_server() {
+        let request = mine_request("http://127.0.0.1:1", 10_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().path(), "/api/v1/mine");
+        assert_eq!(
+            request.body().and_then(|body| body.as_bytes()),
+            Some(br#"{"blocks":10000}"#.as_slice())
+        );
+        assert_eq!(request.timeout(), Some(&MINE_TIMEOUT));
+        assert!(MINE_TIMEOUT > Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn funding_keeps_its_own_shorter_limit() {
+        let request = faucet_request("http://127.0.0.1:1", "tmAddress", 50_000)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().path(), "/api/v1/faucet/address");
+        assert_eq!(request.timeout(), Some(&FAUCET_TIMEOUT));
+        assert!(FAUCET_TIMEOUT < MINE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_stalled_environment_is_reported_with_the_limit() {
+        // Bound but never accepted: connects, never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/v1/mine", listener.local_addr().unwrap());
+        let request = dashboard_request(
+            &url,
+            &serde_json::json!({"blocks": 1}),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        let err = send_to_environment(request, || {
+            "asking environment default to mine 1 blocks".to_owned()
+        })
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "asking environment default to mine 1 blocks: no answer after 50ms"
+        );
     }
 }
