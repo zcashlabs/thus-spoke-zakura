@@ -69,8 +69,7 @@ fn init(data_dir: PathBuf, config_dir: PathBuf) -> Result<()> {
 
 fn development_credentials(store: &Store) -> Result<String> {
     let secrets = store.development_secrets()?;
-    let mut output =
-        String::from("\n⚠ DISPOSABLE REGTEST SECRETS — NEVER SEND REAL FUNDS TO THESE KEYS\n");
+    let mut output = String::from(DEVELOPMENT_CREDENTIALS_WARNING);
     writeln!(output, "Mnemonic: {}", secrets.mnemonic)?;
     for account in secrets.accounts {
         writeln!(
@@ -86,6 +85,9 @@ fn development_credentials(store: &Store) -> Result<String> {
     }
     Ok(output.trim_end().to_owned())
 }
+
+/// Printed whenever startup output includes a mnemonic or private key.
+const DEVELOPMENT_CREDENTIALS_WARNING: &str = "\n⚠ DISPOSABLE REGTEST SECRETS — NEVER SEND REAL FUNDS TO THESE KEYS\nWARNING: Never use this mnemonic or private key in production. It is intended purely for development. Using it in production can result in loss of funds.\n";
 
 fn zakura_config(miner: &str) -> String {
     format!(
@@ -181,5 +183,23 @@ mod tests {
             assert!(output.contains(&format!("Account {id}:")));
         }
         assert!(!output.contains("Account 6:"));
+    }
+
+    #[test]
+    fn warns_that_startup_credentials_must_not_be_used_in_production() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+
+        let output = development_credentials(&store).unwrap();
+        assert!(
+            output.contains(DEVELOPMENT_CREDENTIALS_WARNING.trim()),
+            "startup credential output must include the production-use warning"
+        );
+        assert!(output.contains("Never use this mnemonic or private key in production"));
+        assert!(output.contains("intended purely for development"));
+        assert!(output.contains("loss of funds"));
+        // Credentials themselves must still be present (warning only; do not remove).
+        assert!(output.contains("Mnemonic:"));
+        assert!(output.contains("Unified spending key (hex):"));
     }
 }
