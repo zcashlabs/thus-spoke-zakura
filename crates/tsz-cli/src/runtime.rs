@@ -85,6 +85,20 @@ struct FaucetResult {
     block_hash: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct Activity {
+    id: String,
+    kind: String,
+    from_account: Option<u8>,
+    to_account: u8,
+    source_pool: String,
+    destination_pool: String,
+    amount_zatoshi: u64,
+    txid: String,
+    block_hash: Option<String>,
+    status: String,
+}
+
 pub struct Runtime {
     root: PathBuf,
 }
@@ -250,6 +264,132 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn wallet_faucet(
+        &self,
+        name: &InstanceName,
+        accounts: &[u8],
+        amount_zatoshi: u64,
+        pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        let app_container = format!("{}-app", prefix(name));
+        if !container_running(&app_container).unwrap_or(false) {
+            bail!("environment {name} is not running; start it with `ths --name {name}`");
+        }
+        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?;
+        let mut funded = Vec::new();
+        let mut failures = Vec::new();
+        for &account_id in accounts {
+            let idempotency_key =
+                format!("ths-wallet-faucet-{account_id}-{}", uuid::Uuid::new_v4());
+            let outcome = client
+                .post(format!("{dashboard}/api/v1/faucet"))
+                .json(&serde_json::json!({
+                    "account_id": account_id,
+                    "pool": pool,
+                    "amount_zatoshi": amount_zatoshi,
+                    "idempotency_key": idempotency_key,
+                }))
+                .send()
+                .with_context(|| format!("asking environment {name} to fund account {account_id}"));
+            match outcome.and_then(decode_activity) {
+                Ok(activity) => funded.push(activity),
+                Err(error) => failures.push(format!("account {account_id}: {error:#}")),
+            }
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"funded": funded, "failed": failures})
+                )?
+            );
+        } else {
+            for activity in &funded {
+                println!(
+                    "Funded account {} with {} ZEC ({} pool) on {name}.",
+                    activity.to_account,
+                    format_zec(activity.amount_zatoshi),
+                    activity.destination_pool
+                );
+                println!("  Transaction: {}", activity.txid);
+            }
+            for failure in &failures {
+                eprintln!("Failed to fund {failure}");
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "{} of {} faucet requests failed",
+                failures.len(),
+                accounts.len()
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wallet_send(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        to: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        amount_zatoshi: u64,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let app_container = format!("{}-app", prefix(name));
+        if !container_running(&app_container).unwrap_or(false) {
+            bail!("environment {name} is not running; start it with `ths --name {name}`");
+        }
+        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let idempotency_key = format!("ths-wallet-send-{}", uuid::Uuid::new_v4());
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?
+            .post(format!("{dashboard}/api/v1/send"))
+            .json(&serde_json::json!({
+                "from_account": from,
+                "to_account": to,
+                "source_pool": source_pool,
+                "destination_pool": destination_pool,
+                "amount_zatoshi": amount_zatoshi,
+                "idempotency_key": idempotency_key,
+                "memo": memo,
+            }))
+            .send()
+            .with_context(|| {
+                format!("asking environment {name} to send from account {from} to account {to}")
+            })?;
+        let activity = decode_activity(response)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&activity)?);
+        } else {
+            println!(
+                "Sent {} ZEC from account {} ({} pool) to account {} ({} pool) on {name}.",
+                format_zec(activity.amount_zatoshi),
+                from,
+                activity.source_pool,
+                activity.to_account,
+                activity.destination_pool
+            );
+            if let Some(memo) = memo {
+                println!("Memo: {memo}");
+            }
+            println!("Transaction: {}", activity.txid);
+            if let Some(block_hash) = &activity.block_hash {
+                println!("Confirmed in: {block_hash}");
+            }
+        }
+        Ok(())
+    }
+
     pub fn logs(&self, name: &InstanceName, service: Option<&str>, follow: bool) -> Result<()> {
         let service = service.unwrap_or("app");
         let mut args = vec!["logs"];
@@ -364,6 +504,17 @@ impl Runtime {
             )
         }
     }
+}
+
+fn decode_activity(response: reqwest::blocking::Response) -> Result<Activity> {
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response
+            .text()
+            .unwrap_or_else(|_| "response body was unreadable".to_owned());
+        bail!("rejected ({status}): {detail}");
+    }
+    response.json().context("decoding response")
 }
 
 fn format_zec(zatoshi: u64) -> String {

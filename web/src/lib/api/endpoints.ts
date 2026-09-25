@@ -49,6 +49,7 @@ export const api = {
     destination_pool: Pool;
     amount_zatoshi: bigint;
     idempotency_key: string;
+    memo?: string;
   }) =>
     post('/send', activitySchema, {
       ...input,

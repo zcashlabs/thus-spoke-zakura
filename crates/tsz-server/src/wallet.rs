@@ -42,6 +42,7 @@ use zcash_protocol::{
     ShieldedPool,
     consensus::{BlockHeight, BranchId},
     local_consensus::LocalNetwork,
+    memo::MemoBytes,
     value::Zatoshis,
 };
 use zip321::{Payment, TransactionRequest};
@@ -56,6 +57,8 @@ pub enum PaymentError {
     InsufficientFunds { available: u64, required: u64 },
     #[error("faucet treasury remains insufficient after replenishment")]
     TreasuryExhausted,
+    #[error("memos can only be sent to the orchard pool; transparent outputs cannot carry a memo")]
+    TransparentMemo,
 }
 
 #[derive(Clone)]
@@ -296,6 +299,7 @@ impl RealWallet {
         source_pool: &str,
         destination: &str,
         amount: u64,
+        memo: Option<MemoBytes>,
     ) -> Result<String> {
         let account_index = from_account
             .checked_sub(1)
@@ -308,12 +312,15 @@ impl RealWallet {
         let params = regtest_network();
         let recipient =
             Address::decode(&params, destination).context("invalid destination address")?;
+        if memo.is_some() && matches!(recipient, Address::Transparent(_) | Address::Tex(_)) {
+            return Err(PaymentError::TransparentMemo.into());
+        }
         let amount = Zatoshis::from_u64(amount).map_err(|_| anyhow::anyhow!("invalid amount"))?;
         let proposal = if source_pool == "transparent" {
             let request = TransactionRequest::new(vec![Payment::new(
                 recipient.to_zcash_address(&params),
                 Some(amount),
-                None,
+                memo,
                 None,
                 None,
                 vec![],
@@ -348,7 +355,7 @@ impl RealWallet {
                 ConfirmationsPolicy::MIN,
                 &recipient,
                 amount,
-                None,
+                memo,
                 None,
                 ShieldedPool::Orchard,
                 None,

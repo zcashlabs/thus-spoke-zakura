@@ -24,6 +24,7 @@ export interface SendVariables {
   source_pool: Pool;
   destination_pool: Pool;
   amount_zatoshi: bigint;
+  memo?: string;
 }
 
 export function useSend(): UseMutationResult<Activity, Error, SendVariables> {

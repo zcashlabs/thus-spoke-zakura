@@ -12,6 +12,7 @@ import { SendDialog } from './SendDialog';
 interface SendBody {
   amount_zatoshi: number;
   idempotency_key: string;
+  memo?: string;
 }
 
 /** Reads the JSON body of a fetch call without leaning on `any`. */
@@ -91,6 +92,55 @@ describe('SendDialog', () => {
     await submitAmount('1');
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(body(fetchMock).idempotency_key).toHaveLength(36);
+  });
+
+  it('posts the memo with the send', async () => {
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await userEvent.type(screen.getByLabelText('Memo (optional)'), 'rent for October');
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(body(fetchMock).memo).toBe('rent for October');
+  });
+
+  it('omits the memo when none is entered', async () => {
+    await submitAmount('1');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(body(fetchMock)).not.toHaveProperty('memo');
+  });
+
+  it('refuses a memo over 512 bytes without calling the API', async () => {
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    const field = screen.getByLabelText('Memo (optional)');
+    await userEvent.click(field);
+    await userEvent.paste('a'.repeat(513));
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('512 bytes');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('disables and clears the memo when the destination is transparent', async () => {
+    // Radix Select relies on pointer-capture and scrolling APIs jsdom lacks.
+    Object.assign(Element.prototype, {
+      hasPointerCapture: () => false,
+      releasePointerCapture: () => undefined,
+      scrollIntoView: () => undefined,
+    });
+
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    const memo = screen.getByLabelText('Memo (optional)');
+    expect(memo).toBeEnabled();
+    await userEvent.type(memo, 'orchard only');
+
+    await userEvent.click(screen.getByLabelText('Destination pool'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Transparent (public)' }));
+
+    expect(memo).toBeDisabled();
+    expect(memo).toHaveValue('');
+    expect(screen.getByText(/only available for orchard destinations/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(body(fetchMock)).not.toHaveProperty('memo');
   });
 
   it('refuses a zero amount without calling the API', async () => {

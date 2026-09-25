@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use zcash_keys::address::Address;
-use zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS;
+use zcash_protocol::{consensus::COINBASE_MATURITY_BLOCKS, memo::MemoBytes, value::MAX_MONEY};
 
 use crate::{
     db::{Account, Activity, Store, TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC},
@@ -361,27 +361,25 @@ struct SendRequest {
     destination_pool: String,
     amount_zatoshi: u64,
     idempotency_key: String,
+    #[serde(default)]
+    memo: Option<String>,
 }
 async fn send(
     State(state): State<AppState>,
     Json(req): Json<SendRequest>,
 ) -> ApiResult<Json<Activity>> {
-    require_key(&req.idempotency_key)?;
-    require_user_account(req.from_account)?;
-    require_user_account(req.to_account)?;
+    // Validate everything before the replay lookup so a malformed request is a
+    // 400 even when it reuses an existing idempotency key.
+    let memo = validate_send(&req)?;
     if let Some(existing) = state.0.store.activity_for_key(&req.idempotency_key)? {
         return Ok(Json(confirm_after_mining(&state, existing).await?));
     }
     state.synchronize_latest().await?;
     let destination = state.0.store.account(req.to_account)?;
-    let address = if req.destination_pool == "transparent" {
-        destination.transparent_address
-    } else if req.destination_pool == "orchard" {
+    let address = if req.destination_pool == "orchard" {
         destination.unified_address
     } else {
-        return Err(ApiError::bad_request(
-            "destination_pool must be transparent or orchard",
-        ));
+        destination.transparent_address
     };
     let txid = state
         .0
@@ -392,6 +390,7 @@ async fn send(
             &req.source_pool,
             &address,
             req.amount_zatoshi,
+            memo,
         )
         .await?;
     let pending = state.0.store.transfer(
@@ -551,6 +550,7 @@ impl FaucetRuntime for AppState {
                 "orchard",
                 destination,
                 amount_zatoshi,
+                None,
             )
             .await
     }
@@ -976,9 +976,65 @@ fn require_key(key: &str) -> ApiResult<()> {
         Err(ApiError::bad_request(
             "idempotency_key must contain 8-128 characters",
         ))
+    } else if !key.bytes().all(|byte| byte.is_ascii_graphic()) {
+        Err(ApiError::bad_request(
+            "idempotency_key must contain only visible ASCII characters",
+        ))
     } else {
         Ok(())
     }
+}
+
+fn require_pool(pool: &str, field: &str) -> ApiResult<()> {
+    if matches!(pool, "transparent" | "orchard") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(format!(
+            "{field} must be transparent or orchard"
+        )))
+    }
+}
+
+/// Checks the whole send request without touching the store, wallet or node,
+/// and returns the encoded memo it carries.
+fn validate_send(req: &SendRequest) -> ApiResult<Option<MemoBytes>> {
+    require_key(&req.idempotency_key)?;
+    require_user_account(req.from_account)?;
+    require_user_account(req.to_account)?;
+    if req.from_account == req.to_account {
+        return Err(ApiError::bad_request(
+            "from_account and to_account must be different accounts",
+        ));
+    }
+    require_pool(&req.source_pool, "source_pool")?;
+    require_pool(&req.destination_pool, "destination_pool")?;
+    if req.amount_zatoshi == 0 || req.amount_zatoshi > MAX_MONEY {
+        return Err(ApiError::bad_request(format!(
+            "amount_zatoshi must be between 1 and {MAX_MONEY}"
+        )));
+    }
+    parse_memo(req.memo.as_deref(), &req.destination_pool)
+}
+
+/// An absent (or null) memo is `None`. Any present memo, including `""`, is
+/// encoded as an explicit ZIP-302 text memo and is only valid for orchard.
+fn parse_memo(memo: Option<&str>, destination_pool: &str) -> ApiResult<Option<MemoBytes>> {
+    let Some(text) = memo else {
+        return Ok(None);
+    };
+    if destination_pool != "orchard" {
+        return Err(anyhow::Error::new(PaymentError::TransparentMemo).into());
+    }
+    // Text memos are zero-padded to 512 bytes, so a trailing NUL could not be
+    // told apart from padding and would be silently lost on decode.
+    if text.ends_with('\0') {
+        return Err(ApiError::bad_request(
+            "memo must not end with a NUL (U+0000) character",
+        ));
+    }
+    MemoBytes::from_bytes(text.as_bytes())
+        .map(Some)
+        .map_err(|error| ApiError::bad_request(format!("invalid memo: {error}")))
 }
 
 fn require_user_account(id: u8) -> ApiResult<()> {
@@ -1028,6 +1084,7 @@ impl From<anyhow::Error> for ApiError {
         Self {
             status: match error.downcast_ref() {
                 Some(PaymentError::TreasuryExhausted) => StatusCode::SERVICE_UNAVAILABLE,
+                Some(PaymentError::TransparentMemo) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             message: error.to_string(),
@@ -1331,6 +1388,243 @@ mod tests {
             assert!(require_user_account(id).is_ok());
         }
         assert!(require_user_account(TREASURY_ACCOUNT_ID).is_err());
+    }
+
+    fn is_bad_request<T>(result: ApiResult<T>) -> bool {
+        matches!(result, Err(error) if error.status == StatusCode::BAD_REQUEST)
+    }
+
+    #[test]
+    fn absent_and_null_memos_differ_from_an_explicit_empty_memo() {
+        let request = |memo: Option<Value>| {
+            let mut body = json!({
+                "from_account": 1, "to_account": 2, "source_pool": "orchard",
+                "destination_pool": "orchard", "amount_zatoshi": 1,
+                "idempotency_key": "memo-test-key",
+            });
+            if let Some(memo) = memo {
+                body["memo"] = memo;
+            }
+            serde_json::from_value::<SendRequest>(body).expect("valid request shape")
+        };
+        assert_eq!(request(None).memo, None);
+        assert_eq!(request(Some(Value::Null)).memo, None);
+        assert_eq!(request(Some(json!(""))).memo.as_deref(), Some(""));
+
+        assert!(matches!(parse_memo(None, "orchard"), Ok(None)));
+        assert!(matches!(parse_memo(None, "transparent"), Ok(None)));
+        let Ok(Some(empty)) = parse_memo(Some(""), "orchard") else {
+            panic!("an explicit empty memo must be kept");
+        };
+        assert_eq!(empty.as_array(), &[0u8; 512]);
+    }
+
+    #[test]
+    fn any_present_memo_is_rejected_for_a_transparent_destination() {
+        assert!(is_bad_request(parse_memo(Some("hi"), "transparent")));
+        assert!(is_bad_request(parse_memo(Some(""), "transparent")));
+    }
+
+    #[test]
+    fn memos_are_bounded_by_utf8_bytes() {
+        let Ok(Some(memo)) = parse_memo(Some("thanks for lunch"), "orchard") else {
+            panic!("expected an encoded memo");
+        };
+        assert_eq!(&memo.as_slice()[..16], b"thanks for lunch");
+        assert!(memo.as_slice()[16..].iter().all(|byte| *byte == 0));
+
+        assert!(parse_memo(Some(&"a".repeat(512)), "orchard").is_ok());
+        assert!(is_bad_request(parse_memo(
+            Some(&"a".repeat(513)),
+            "orchard"
+        )));
+
+        // Three bytes per character: 170 fit (510 bytes), 171 do not (513).
+        let Ok(Some(cjk)) = parse_memo(Some(&"桜".repeat(170)), "orchard") else {
+            panic!("510 bytes of multibyte text must fit");
+        };
+        assert_eq!(&cjk.as_slice()[..510], "桜".repeat(170).as_bytes());
+        assert!(is_bad_request(parse_memo(
+            Some(&"桜".repeat(171)),
+            "orchard"
+        )));
+
+        // Four bytes per character: exactly 512 fits, one more does not.
+        assert!(parse_memo(Some(&"🌸".repeat(128)), "orchard").is_ok());
+        assert!(is_bad_request(parse_memo(
+            Some(&"🌸".repeat(129)),
+            "orchard"
+        )));
+    }
+
+    #[test]
+    fn memos_must_not_end_with_nul() {
+        assert!(is_bad_request(parse_memo(Some("hi\0"), "orchard")));
+        assert!(is_bad_request(parse_memo(Some("\0"), "orchard")));
+        assert!(parse_memo(Some("a\0b"), "orchard").is_ok());
+    }
+
+    const REPLAY_KEY: &str = "existing-idempotency-key";
+
+    /// A state with a real store and offline wallet whose node RPC refuses
+    /// connections, so any synchronization or network access surfaces as a
+    /// 500 rather than the 400 or replay these tests expect.
+    fn offline_state() -> (AppState, tempfile::TempDir) {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
+        let state = AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into());
+        (state, dir)
+    }
+
+    fn valid_send() -> Value {
+        json!({
+            "from_account": 1,
+            "to_account": 2,
+            "source_pool": "orchard",
+            "destination_pool": "orchard",
+            "amount_zatoshi": 100_000,
+            "idempotency_key": REPLAY_KEY,
+        })
+    }
+
+    async fn post_send(state: &AppState, body: &Value) -> (StatusCode, Value) {
+        let response = router(state.clone())
+            .oneshot(
+                Request::post("/api/v1/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn activity_ids(state: &AppState) -> Vec<String> {
+        state
+            .0
+            .store
+            .activities(100)
+            .unwrap()
+            .into_iter()
+            .map(|activity| activity.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn invalid_sends_are_rejected_before_replay_or_synchronization() {
+        let (state, _dir) = offline_state();
+        let original = state
+            .0
+            .store
+            .transfer(1, 2, "orchard", "orchard", 100_000, REPLAY_KEY, "txid")
+            .unwrap();
+        let before = activity_ids(&state);
+
+        let with = |fields: &[(&str, Value)]| {
+            let mut body = valid_send();
+            for (field, value) in fields {
+                body[*field] = value.clone();
+            }
+            body
+        };
+        let transparent = ("destination_pool", json!("transparent"));
+        let cases = [
+            ("short key", with(&[("idempotency_key", json!("short"))])),
+            (
+                "key with spaces",
+                with(&[("idempotency_key", json!("has spaces here"))]),
+            ),
+            ("account 0", with(&[("from_account", json!(0))])),
+            (
+                "treasury account",
+                with(&[("to_account", json!(TREASURY_ACCOUNT_ID))]),
+            ),
+            ("same account", with(&[("to_account", json!(1))])),
+            (
+                "bad source pool",
+                with(&[("source_pool", json!("sapling"))]),
+            ),
+            (
+                "bad destination pool",
+                with(&[("destination_pool", json!("sprout"))]),
+            ),
+            ("zero amount", with(&[("amount_zatoshi", json!(0))])),
+            (
+                "amount over MAX_MONEY",
+                with(&[("amount_zatoshi", json!(MAX_MONEY + 1))]),
+            ),
+            ("memo too long", with(&[("memo", json!("a".repeat(513)))])),
+            ("memo ending in NUL", with(&[("memo", json!("hi\u{0}"))])),
+            (
+                "memo to transparent",
+                with(&[transparent.clone(), ("memo", json!("hi"))]),
+            ),
+            (
+                "empty memo to transparent",
+                with(&[transparent, ("memo", json!(""))]),
+            ),
+        ];
+        for (name, body) in cases {
+            let (status, response) = post_send(&state, &body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {response}");
+            assert_eq!(activity_ids(&state), before, "{name} changed activity");
+        }
+        assert_eq!(
+            state
+                .0
+                .store
+                .activity_for_key(REPLAY_KEY)
+                .unwrap()
+                .unwrap()
+                .id,
+            original.id
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_replay_returns_the_original_without_the_wallet_or_network() {
+        let (state, _dir) = offline_state();
+        let original = state
+            .0
+            .store
+            .transfer(1, 2, "orchard", "orchard", 100_000, REPLAY_KEY, "txid")
+            .unwrap();
+        let before = activity_ids(&state);
+
+        for memo in [
+            None,
+            Some(Value::Null),
+            Some(json!("")),
+            Some(json!("hello")),
+        ] {
+            let mut body = valid_send();
+            if let Some(memo) = memo {
+                body["memo"] = memo;
+            }
+            let (status, response) = post_send(&state, &body).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["id"], original.id);
+            assert_eq!(response["txid"], "txid");
+        }
+        assert_eq!(activity_ids(&state), before);
+
+        // Guard for the harness itself: a send that is not a replay must reach
+        // the (unreachable) network and fail, so the 200s above prove none did.
+        let mut fresh = valid_send();
+        fresh["idempotency_key"] = json!("a-key-never-used-before");
+        let (status, _) = post_send(&state, &fresh).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(activity_ids(&state), before);
     }
 
     #[test]

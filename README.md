@@ -64,6 +64,12 @@ needed to confirm it.
 Faucet requests are limited to 5 ZEC. These coins have no value and work only
 inside this local environment.
 
+From a terminal, fund several accounts at once by index:
+
+```console
+ths wallet faucet --accounts 1,2,3 --amount 3
+```
+
 ### Send ZEC between accounts
 
 Select **Send ZEC** or the **Send** button on an account card. Choose the source
@@ -73,7 +79,17 @@ mined automatically and appears under **Recent activity**.
 You can use Orchard or transparent balances to exercise different transaction
 routes.
 
+When the destination pool is Orchard, you can add an optional memo of up to
+512 bytes. It is encrypted to the recipient and never shown in the explorer.
+Transparent outputs cannot carry a memo, so the field is disabled for them.
+
 ![Send ZEC between development accounts](docs/images/send.png)
+
+The same transfer from a terminal:
+
+```console
+ths wallet send --from 1 --to 2 --amount 1 --memo "rent for October"
+```
 
 ### Mine blocks
 
@@ -121,6 +137,10 @@ Running `ths` with no command starts the default environment.
 | `ths mine 10` | Mine blocks on the running environment and synchronize its wallet |
 | `ths faucet <ADDRESS>` | Send 1 disposable ZEC to a Regtest unified or transparent address |
 | `ths faucet <ADDRESS> --amount 2.5` | Send a custom amount of up to 5 disposable ZEC |
+| `ths wallet faucet --accounts 1,2,3 --amount 3` | Fund development accounts by index from the treasury |
+| `ths wallet send --from 1 --to 2 --amount 1 --memo "hi"` | Send between development accounts, with an optional Orchard memo |
+| `ths wallet shield --from 1 --to 2 --amount 0.5` | Spend transparent funds into another account's Orchard balance |
+| `ths wallet unshield --from 1 --to 2 --amount 0.2` | Spend Orchard funds into another account's transparent balance |
 | `ths logs app -f` | Follow dashboard/server logs |
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
@@ -132,6 +152,10 @@ Running `ths` with no command starts the default environment.
 | `ths update --check` | Check for a newer release |
 | `ths update` | Install the latest verified release |
 | `ths uninstall` | Remove the installed launcher executable |
+
+Everything under `ths wallet` acts on the development wallet held by the
+running `ths` server. See [docs/cli.md](docs/cli.md) for the full command
+reference, including every `ths wallet` option, memo rules, and more examples.
 
 Every command accepts `--name` for isolated environments:
 
