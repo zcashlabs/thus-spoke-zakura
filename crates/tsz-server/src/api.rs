@@ -25,8 +25,8 @@ use zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS;
 
 use crate::{
     db::{
-        Account, Activity, IdempotencyConflict, Store, TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT,
-        ZATOSHIS_PER_ZEC,
+        Account, Activity, IdempotencyConflict, PreparedTransaction, Store, TREASURY_ACCOUNT_ID,
+        USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC,
     },
     rpc::{ChainInfo, NodeRpc},
     wallet::{PaymentError, PreparedPayment, RealWallet, regtest_network},
@@ -374,6 +374,16 @@ async fn send(
     require_key(&req.idempotency_key)?;
     require_user_account(req.from_account)?;
     require_user_account(req.to_account)?;
+    if !matches!(req.source_pool.as_str(), "transparent" | "orchard") {
+        return Err(ApiError::bad_request(
+            "source_pool must be transparent or orchard",
+        ));
+    }
+    if !matches!(req.destination_pool.as_str(), "transparent" | "orchard") {
+        return Err(ApiError::bad_request(
+            "destination_pool must be transparent or orchard",
+        ));
+    }
     let _payment = state.0.payments.lock().await;
     let mut pending = state.0.store.claim_transfer(
         req.from_account,
@@ -386,13 +396,14 @@ async fn send(
     loop {
         match pending.status.as_str() {
             "confirmed" => return Ok(Json(pending)),
-            "broadcast" => return Ok(Json(confirm_after_mining(&state, pending).await?)),
-            "prepared" => match submit_prepared(&state.0.store, &state, &pending).await? {
-                PreparedSubmission::Broadcast(activity) => {
-                    return Ok(Json(confirm_after_mining(&state, activity).await?));
+            "prepared" | "broadcast" => {
+                match submit_prepared(&state.0.store, &state, &pending).await? {
+                    PreparedSubmission::Broadcast(activity) => {
+                        return Ok(Json(confirm_after_mining(&state, activity).await?));
+                    }
+                    PreparedSubmission::Expired(activity) => pending = activity,
                 }
-                PreparedSubmission::Expired(activity) => pending = activity,
-            },
+            }
             "preparing" => {
                 let prepared = async {
                     state.synchronize_latest().await?;
@@ -406,6 +417,7 @@ async fn send(
                         .0
                         .wallet
                         .prepare(
+                            Some(&pending.id),
                             &state.0.store.seed()?,
                             req.from_account,
                             &req.source_pool,
@@ -418,18 +430,16 @@ async fn send(
                 let prepared = match prepared {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        state.0.store.discard_preparing(&pending.id)?;
+                        discard_unprepared_claim(&state, &pending.id).await?;
                         return Err(error.into());
                     }
                 };
-                state.0.store.record_prepared(
+                pending = state.0.store.record_prepared(
                     &pending.id,
                     &prepared.txid,
                     &prepared.raw_transaction,
                     prepared.expiry_height,
                 )?;
-                pending.txid = prepared.txid;
-                pending.status = "prepared".into();
             }
             status => {
                 return Err(anyhow::anyhow!("payment has unsupported status {status}").into());
@@ -501,9 +511,15 @@ async fn faucet_address(
     state.synchronize_latest().await?;
     let seed = state.0.store.seed()?;
     let treasury = state.0.store.account(TREASURY_ACCOUNT_ID)?;
-    let prepared =
-        prepare_with_replenishment(&state, &seed, &treasury, &req.address, req.amount_zatoshi)
-            .await?;
+    let prepared = prepare_with_replenishment(
+        &state,
+        None,
+        &seed,
+        &treasury,
+        &req.address,
+        req.amount_zatoshi,
+    )
+    .await?;
     state.0.wallet.broadcast(&prepared.raw_transaction).await?;
     mine_and_sync(&state, 1).await?;
     let mined = state.0.rpc.transaction(&prepared.txid).await?;
@@ -534,14 +550,15 @@ async fn fund_from_treasury(
     loop {
         match pending.status.as_str() {
             "confirmed" => return Ok(pending),
-            "broadcast" => break,
-            "prepared" => match submit_prepared(&state.0.store, state, &pending).await? {
-                PreparedSubmission::Broadcast(activity) => {
-                    pending = activity;
-                    break;
+            "prepared" | "broadcast" => {
+                match submit_prepared(&state.0.store, state, &pending).await? {
+                    PreparedSubmission::Broadcast(activity) => {
+                        pending = activity;
+                        break;
+                    }
+                    PreparedSubmission::Expired(activity) => pending = activity,
                 }
-                PreparedSubmission::Expired(activity) => pending = activity,
-            },
+            }
             "preparing" => {
                 let prepared = async {
                     let destination = state.0.store.account(account_id)?;
@@ -555,25 +572,30 @@ async fn fund_from_treasury(
                     // SDK proposals check spendability and the actual fee before construction. Total
                     // balances include pending change and cannot decide whether this request is fundable.
                     let treasury = state.0.store.account(TREASURY_ACCOUNT_ID)?;
-                    prepare_with_replenishment(state, &seed, &treasury, &address, amount_zatoshi)
-                        .await
+                    prepare_with_replenishment(
+                        state,
+                        Some(&pending.id),
+                        &seed,
+                        &treasury,
+                        &address,
+                        amount_zatoshi,
+                    )
+                    .await
                 }
                 .await;
                 let prepared = match prepared {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        state.0.store.discard_preparing(&pending.id)?;
+                        discard_unprepared_claim(state, &pending.id).await?;
                         return Err(error);
                     }
                 };
-                state.0.store.record_prepared(
+                pending = state.0.store.record_prepared(
                     &pending.id,
                     &prepared.txid,
                     &prepared.raw_transaction,
                     prepared.expiry_height,
                 )?;
-                pending.txid = prepared.txid;
-                pending.status = "prepared".into();
             }
             status => anyhow::bail!("payment has unsupported status {status}"),
         }
@@ -586,6 +608,7 @@ trait PaymentSubmitter: Sync {
     async fn transaction_known(&self, txid: &str) -> anyhow::Result<bool>;
     async fn chain_height(&self) -> anyhow::Result<u64>;
     async fn broadcast(&self, raw_transaction: &[u8]) -> anyhow::Result<()>;
+    async fn recover_prepared(&self, txid: &str) -> anyhow::Result<Option<PreparedPayment>>;
 }
 
 #[async_trait::async_trait]
@@ -601,6 +624,17 @@ impl PaymentSubmitter for AppState {
     async fn broadcast(&self, raw_transaction: &[u8]) -> anyhow::Result<()> {
         self.0.wallet.broadcast(raw_transaction).await
     }
+
+    async fn recover_prepared(&self, txid: &str) -> anyhow::Result<Option<PreparedPayment>> {
+        self.0.wallet.recover_prepared(txid).await
+    }
+}
+
+async fn discard_unprepared_claim(state: &AppState, id: &str) -> anyhow::Result<()> {
+    if !state.0.wallet.has_prepared(id).await? {
+        state.0.store.discard_preparing(id)?;
+    }
+    Ok(())
 }
 
 async fn submit_prepared<R: PaymentSubmitter>(
@@ -608,15 +642,41 @@ async fn submit_prepared<R: PaymentSubmitter>(
     runtime: &R,
     activity: &Activity,
 ) -> anyhow::Result<PreparedSubmission> {
-    let prepared = store.prepared_transaction(&activity.id)?;
     if runtime.transaction_known(&activity.txid).await? {
         return Ok(PreparedSubmission::Broadcast(
-            store.mark_broadcast(&activity.id)?,
+            store.mark_broadcast(&activity.id, &activity.txid)?,
         ));
     }
+    let prepared = match store.prepared_transaction(&activity.id) {
+        Ok(prepared) => prepared,
+        Err(missing) => {
+            let recovered = runtime
+                .recover_prepared(&activity.txid)
+                .await?
+                .ok_or(missing)?;
+            if recovered.txid != activity.txid {
+                anyhow::bail!("wallet returned a different prepared transaction");
+            }
+            store.record_prepared(
+                &activity.id,
+                &activity.txid,
+                &recovered.raw_transaction,
+                recovered.expiry_height,
+            )?;
+            PreparedTransaction {
+                raw_transaction: recovered.raw_transaction,
+                expiry_height: recovered.expiry_height,
+            }
+        }
+    };
     if prepared.expiry_height != 0 && runtime.chain_height().await? >= prepared.expiry_height {
+        if runtime.transaction_known(&activity.txid).await? {
+            return Ok(PreparedSubmission::Broadcast(
+                store.mark_broadcast(&activity.id, &activity.txid)?,
+            ));
+        }
         return Ok(PreparedSubmission::Expired(
-            store.reset_for_retry(&activity.id)?,
+            store.reset_for_retry(&activity.id, &activity.txid)?,
         ));
     }
     if let Err(broadcast_error) = runtime.broadcast(&prepared.raw_transaction).await {
@@ -634,7 +694,7 @@ async fn submit_prepared<R: PaymentSubmitter>(
         }
     }
     Ok(PreparedSubmission::Broadcast(
-        store.mark_broadcast(&activity.id)?,
+        store.mark_broadcast(&activity.id, &activity.txid)?,
     ))
 }
 
@@ -653,6 +713,7 @@ struct TreasuryOutput {
 trait FaucetRuntime: Sync {
     async fn prepare_payment(
         &self,
+        activity_id: Option<&str>,
         seed: &str,
         destination: &str,
         amount_zatoshi: u64,
@@ -669,6 +730,7 @@ trait FaucetRuntime: Sync {
 impl FaucetRuntime for AppState {
     async fn prepare_payment(
         &self,
+        activity_id: Option<&str>,
         seed: &str,
         destination: &str,
         amount_zatoshi: u64,
@@ -676,6 +738,7 @@ impl FaucetRuntime for AppState {
         self.0
             .wallet
             .prepare(
+                activity_id,
                 seed,
                 TREASURY_ACCOUNT_ID,
                 "orchard",
@@ -725,13 +788,14 @@ impl FaucetRuntime for AppState {
 
 async fn prepare_with_replenishment<R: FaucetRuntime>(
     runtime: &R,
+    activity_id: Option<&str>,
     seed: &str,
     treasury: &Account,
     destination: &str,
     amount_zatoshi: u64,
 ) -> anyhow::Result<PreparedPayment> {
     match runtime
-        .prepare_payment(seed, destination, amount_zatoshi)
+        .prepare_payment(activity_id, seed, destination, amount_zatoshi)
         .await
     {
         Err(error)
@@ -742,7 +806,7 @@ async fn prepare_with_replenishment<R: FaucetRuntime>(
         {
             replenish_treasury(runtime, seed, treasury).await?;
             runtime
-                .prepare_payment(seed, destination, amount_zatoshi)
+                .prepare_payment(activity_id, seed, destination, amount_zatoshi)
                 .await
                 .map_err(|error| {
                     if matches!(
@@ -1043,7 +1107,7 @@ fn confirmed_block_hash(tx: &Value) -> Option<&str> {
 
 fn apply_confirmation(store: &Store, pending: &Activity, tx: &Value) -> anyhow::Result<Activity> {
     match confirmed_block_hash(tx) {
-        Some(hash) => store.confirm(&pending.id, hash),
+        Some(hash) => store.confirm(&pending.id, &pending.txid, hash),
         None => Ok(pending.clone()),
     }
 }
@@ -1359,6 +1423,57 @@ mod tests {
         assert!(snapshot.status.error.is_some());
     }
 
+    #[tokio::test]
+    async fn send_rejects_invalid_pools_before_wallet_work() {
+        let (state, _dir) = state_with_local_wallet();
+        for (source_pool, destination_pool) in [("sapling", "orchard"), ("orchard", "sapling")] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::post("/api/v1/send")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&json!({
+                                "from_account": 1,
+                                "to_account": 2,
+                                "source_pool": source_pool,
+                                "destination_pool": destination_pool,
+                                "amount_zatoshi": 1,
+                                "idempotency_key": "invalid-pool",
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_keeps_a_claim_with_a_wallet_journal() {
+        let (state, dir) = state_with_local_wallet();
+        let claim = state
+            .0
+            .store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        rusqlite::Connection::open(dir.path().join("wallet.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO ext_tsz_prepared_payments(activity_id,txid,raw_transaction,expiry_height) VALUES(?1,?2,?3,?4)",
+                rusqlite::params![claim.id, "txid", b"signed transaction", 140_u64],
+            )
+            .unwrap();
+
+        discard_unprepared_claim(&state, &claim.id).await.unwrap();
+
+        assert_eq!(
+            state.0.store.activity_for_key("same").unwrap().unwrap().id,
+            claim.id
+        );
+    }
+
     #[test]
     fn copies_spent_output_address_and_value_onto_vin() {
         let mut tx = json!({
@@ -1430,16 +1545,47 @@ mod tests {
     }
 
     #[test]
+    fn stale_confirmation_does_not_confirm_a_replacement_transaction() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claimed = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        store
+            .record_prepared(&claimed.id, "old-txid", b"old transaction", 140)
+            .unwrap();
+        let old = store.activity_for_key("same").unwrap().unwrap();
+        store.reset_for_retry(&claimed.id, "old-txid").unwrap();
+        store
+            .record_prepared(&claimed.id, "new-txid", b"new transaction", 180)
+            .unwrap();
+
+        let current = apply_confirmation(
+            &store,
+            &old,
+            &serde_json::json!({
+                "confirmations": 1,
+                "blockhash": "old-block",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(current.txid, "new-txid");
+        assert_eq!(current.status, "prepared");
+        assert_eq!(current.block_hash, None);
+    }
+
+    #[test]
     fn apply_confirmation_uses_node_blockhash_not_a_generate_hash() {
         let store = Store::open(":memory:").unwrap();
         store.initialize().unwrap();
         let pending = store
             .claim_transfer(1, 2, "orchard", "orchard", 12_000, "issue-67")
             .unwrap();
-        store
+        let pending = store
             .record_prepared(&pending.id, "txid-abc", b"raw transaction", 140)
             .unwrap();
-        let pending = store.mark_broadcast(&pending.id).unwrap();
+        let pending = store.mark_broadcast(&pending.id, &pending.txid).unwrap();
         assert_eq!(pending.status, "broadcast");
 
         let generate_hash = "generate-hash-that-must-not-be-stored";
@@ -1527,6 +1673,7 @@ mod tests {
     impl FaucetRuntime for RecordingFaucetRuntime {
         async fn prepare_payment(
             &self,
+            _activity_id: Option<&str>,
             _seed: &str,
             _destination: &str,
             _amount_zatoshi: u64,
@@ -1604,6 +1751,7 @@ mod tests {
 
         let prepared = prepare_with_replenishment(
             &runtime,
+            None,
             "seed",
             &treasury,
             "uregtest-recipient",
@@ -1635,6 +1783,7 @@ mod tests {
     struct RecordingPaymentSubmitter {
         broadcasts: Mutex<Vec<Vec<u8>>>,
         lookups: Mutex<VecDeque<Result<bool, &'static str>>>,
+        recovered: Mutex<Option<PreparedPayment>>,
         height: AtomicU64,
         fail_next: AtomicBool,
     }
@@ -1663,6 +1812,10 @@ mod tests {
                 anyhow::bail!("response lost");
             }
             Ok(())
+        }
+
+        async fn recover_prepared(&self, _txid: &str) -> anyhow::Result<Option<PreparedPayment>> {
+            Ok(self.recovered.lock().unwrap().take())
         }
     }
 
@@ -1703,6 +1856,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_forgotten_broadcast_is_resubmitted_from_the_saved_bytes() {
+        let (store, prepared) = prepared_payment(140);
+        let broadcast = store.mark_broadcast(&prepared.id, &prepared.txid).unwrap();
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(false)])),
+            height: AtomicU64::new(139),
+            ..Default::default()
+        };
+
+        let result = submit_prepared(&store, &runtime, &broadcast).await.unwrap();
+
+        assert!(matches!(result, PreparedSubmission::Broadcast(_)));
+        assert_eq!(
+            runtime.broadcasts.into_inner().unwrap(),
+            [b"signed transaction"]
+        );
+        assert_eq!(
+            store.activity_for_key("same").unwrap().unwrap().status,
+            "broadcast"
+        );
+    }
+
+    #[tokio::test]
     async fn a_lookup_failure_does_not_broadcast_or_change_status() {
         let (store, prepared) = prepared_payment(140);
         let runtime = RecordingPaymentSubmitter {
@@ -1739,6 +1915,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_known_transaction_does_not_require_saved_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.db");
+        let store = Store::open(&path).unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        let prepared = store
+            .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
+            .unwrap();
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute("DELETE FROM prepared_payments", [])
+            .unwrap();
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(true)])),
+            ..Default::default()
+        };
+
+        let result = submit_prepared(&store, &runtime, &prepared).await.unwrap();
+
+        assert!(matches!(result, PreparedSubmission::Broadcast(_)));
+        assert_eq!(
+            store.activity_for_key("same").unwrap().unwrap().status,
+            "broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_broadcast_recovers_bytes_from_the_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.db");
+        let store = Store::open(&path).unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        let prepared = store
+            .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
+            .unwrap();
+        let broadcast = store.mark_broadcast(&prepared.id, &prepared.txid).unwrap();
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute("DELETE FROM prepared_payments", [])
+            .unwrap();
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(false)])),
+            recovered: Mutex::new(Some(PreparedPayment {
+                txid: broadcast.txid.clone(),
+                raw_transaction: b"wallet transaction".to_vec(),
+                expiry_height: 140,
+            })),
+            height: AtomicU64::new(139),
+            ..Default::default()
+        };
+
+        let result = submit_prepared(&store, &runtime, &broadcast).await.unwrap();
+
+        assert!(matches!(result, PreparedSubmission::Broadcast(_)));
+        assert_eq!(
+            runtime.broadcasts.into_inner().unwrap(),
+            [b"wallet transaction"]
+        );
+        assert_eq!(
+            store
+                .prepared_transaction(&broadcast.id)
+                .unwrap()
+                .raw_transaction,
+            b"wallet transaction"
+        );
+    }
+
+    #[tokio::test]
     async fn an_expired_missing_transaction_is_reset_for_preparation() {
         let (store, prepared) = prepared_payment(140);
         let runtime = RecordingPaymentSubmitter {
@@ -1754,6 +2004,23 @@ mod tests {
         let retry = store.activity_for_key("same").unwrap().unwrap();
         assert_eq!(retry.status, "preparing");
         assert!(retry.txid.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_transaction_seen_at_expiry_is_not_replaced() {
+        let (store, prepared) = prepared_payment(140);
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(false), Ok(true)])),
+            height: AtomicU64::new(140),
+            ..Default::default()
+        };
+
+        let result = submit_prepared(&store, &runtime, &prepared).await.unwrap();
+
+        assert!(matches!(result, PreparedSubmission::Broadcast(_)));
+        let current = store.activity_for_key("same").unwrap().unwrap();
+        assert_eq!(current.txid, "real-txid");
+        assert_eq!(current.status, "broadcast");
     }
 
     fn prepared_payment(expiry_height: u64) -> (Store, Activity) {

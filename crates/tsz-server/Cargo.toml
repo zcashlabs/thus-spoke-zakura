@@ -18,6 +18,8 @@ rand.workspace = true
 rand10 = { package = "rand", version = "0.10" }
 reqwest.workspace = true
 rusqlite.workspace = true
+schemerz = "0.2"
+schemerz-rusqlite = "0.370"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

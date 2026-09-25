@@ -277,22 +277,33 @@ impl Store {
         txid: &str,
         raw_transaction: &[u8],
         expiry_height: u64,
-    ) -> Result<()> {
+    ) -> Result<Activity> {
         let mut db = self.0.lock().unwrap();
         let tx = db.transaction()?;
         let updated = tx.execute(
             "UPDATE activity SET txid=?1,status='prepared' WHERE id=?2 AND status='preparing'",
             params![txid, id],
         )?;
-        if updated != 1 {
-            bail!("payment {id} is not waiting for a prepared transaction");
+        let activity = tx.query_row(
+            "SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1",
+            [id],
+            row_activity,
+        )?;
+        if updated == 0
+            && (activity.txid != txid
+                || !matches!(
+                    activity.status.as_str(),
+                    "prepared" | "broadcast" | "confirmed"
+                ))
+        {
+            bail!("payment {id} is not waiting for this prepared transaction");
         }
         tx.execute(
-            "INSERT INTO prepared_payments(activity_id,raw_transaction,expiry_height) VALUES(?1,?2,?3)",
+            "INSERT INTO prepared_payments(activity_id,raw_transaction,expiry_height) VALUES(?1,?2,?3) ON CONFLICT(activity_id) DO NOTHING",
             params![id, raw_transaction, expiry_height],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(activity)
     }
 
     pub fn prepared_transaction(&self, id: &str) -> Result<PreparedTransaction> {
@@ -312,16 +323,15 @@ impl Store {
             .with_context(|| format!("prepared transaction {id} is missing"))
     }
 
-    pub fn reset_for_retry(&self, id: &str) -> Result<Activity> {
+    pub fn reset_for_retry(&self, id: &str, txid: &str) -> Result<Activity> {
         let mut db = self.0.lock().unwrap();
         let tx = db.transaction()?;
-        tx.execute("DELETE FROM prepared_payments WHERE activity_id=?1", [id])?;
         let updated = tx.execute(
-            "UPDATE activity SET txid='',block_hash=NULL,status='preparing' WHERE id=?1 AND status='prepared'",
-            [id],
+            "UPDATE activity SET txid='',block_hash=NULL,status='preparing' WHERE id=?1 AND txid=?2 AND status IN ('prepared','broadcast')",
+            params![id, txid],
         )?;
-        if updated != 1 {
-            bail!("payment {id} cannot be prepared again");
+        if updated == 1 {
+            tx.execute("DELETE FROM prepared_payments WHERE activity_id=?1", [id])?;
         }
         let activity = tx.query_row(
             "SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1",
@@ -332,31 +342,31 @@ impl Store {
         Ok(activity)
     }
 
-    pub fn mark_broadcast(&self, id: &str) -> Result<Activity> {
+    pub fn mark_broadcast(&self, id: &str, txid: &str) -> Result<Activity> {
         let db = self.0.lock().unwrap();
         let updated = db.execute(
-            "UPDATE activity SET status='broadcast' WHERE id=?1 AND status IN ('prepared','broadcast')",
-            [id],
+            "UPDATE activity SET status='broadcast' WHERE id=?1 AND txid=?2 AND status IN ('prepared','broadcast')",
+            params![id, txid],
         )?;
-        if updated != 1 {
-            bail!("payment {id} has no prepared transaction");
-        }
-        db.query_row(
+        let activity = db.query_row(
             "SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1",
             [id],
             row_activity,
-        )
-        .map_err(Into::into)
+        )?;
+        if updated == 0 && (activity.txid != txid || activity.status != "confirmed") {
+            bail!("payment {id} has no matching prepared transaction");
+        }
+        Ok(activity)
     }
 
-    pub fn confirm(&self, id: &str, block_hash: &str) -> Result<Activity> {
+    pub fn confirm(&self, id: &str, txid: &str, block_hash: &str) -> Result<Activity> {
         if block_hash.is_empty() {
             bail!("block hash is required to confirm activity");
         }
         let db = self.0.lock().unwrap();
         db.execute(
-            "UPDATE activity SET status='confirmed',block_hash=?1 WHERE id=?2",
-            params![block_hash, id],
+            "UPDATE activity SET status='confirmed',block_hash=?1 WHERE id=?2 AND txid=?3",
+            params![block_hash, id, txid],
         )?;
         db.query_row("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into)
     }
@@ -704,10 +714,10 @@ mod tests {
         let activity = store
             .claim_transfer(1, 2, "orchard", "orchard", 12_000, "send")
             .unwrap();
-        store
+        let activity = store
             .record_prepared(&activity.id, "real-txid", b"raw transaction", 140)
             .unwrap();
-        let activity = store.mark_broadcast(&activity.id).unwrap();
+        let activity = store.mark_broadcast(&activity.id, &activity.txid).unwrap();
         assert_eq!(activity.txid, "real-txid");
         assert_eq!(store.account(1).unwrap().transparent_zatoshi, 0);
     }
@@ -722,18 +732,20 @@ mod tests {
         let pending = store
             .claim_transfer(1, 2, "orchard", "orchard", 12_000, "pending-key")
             .unwrap();
-        store
+        let pending = store
             .record_prepared(&pending.id, "txid-pending", b"pending", 140)
             .unwrap();
-        let pending = store.mark_broadcast(&pending.id).unwrap();
+        let pending = store.mark_broadcast(&pending.id, &pending.txid).unwrap();
         let mined = store
             .claim_transfer(1, 3, "orchard", "orchard", 13_000, "mined-key")
             .unwrap();
-        store
+        let mined = store
             .record_prepared(&mined.id, "txid-mined", b"mined", 140)
             .unwrap();
-        let mined = store.mark_broadcast(&mined.id).unwrap();
-        store.confirm(&mined.id, &"c".repeat(64)).unwrap();
+        let mined = store.mark_broadcast(&mined.id, &mined.txid).unwrap();
+        store
+            .confirm(&mined.id, &mined.txid, &"c".repeat(64))
+            .unwrap();
 
         let open = store.unconfirmed_activities().unwrap();
         assert_eq!(open.len(), 1);
@@ -749,12 +761,12 @@ mod tests {
         let pending = store
             .claim_transfer(1, 2, "orchard", "orchard", 12_000, "empty-hash")
             .unwrap();
-        store
+        let pending = store
             .record_prepared(&pending.id, "txid-empty", b"raw", 140)
             .unwrap();
-        let pending = store.mark_broadcast(&pending.id).unwrap();
+        let pending = store.mark_broadcast(&pending.id, &pending.txid).unwrap();
 
-        assert!(store.confirm(&pending.id, "").is_err());
+        assert!(store.confirm(&pending.id, &pending.txid, "").is_err());
         let again = store
             .claim_transfer(1, 2, "orchard", "orchard", 12_000, "empty-hash")
             .unwrap();
@@ -839,12 +851,109 @@ mod tests {
             .record_prepared(&claim.id, "expired-txid", b"signed transaction", 140)
             .unwrap();
 
-        let retry = store.reset_for_retry(&claim.id).unwrap();
+        let retry = store.reset_for_retry(&claim.id, "expired-txid").unwrap();
 
         assert_eq!(retry.status, "preparing");
         assert!(retry.txid.is_empty());
         assert!(store.prepared_transaction(&claim.id).is_err());
         assert!(store.activities(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recording_the_same_prepared_transaction_converges() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        let first = store
+            .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
+            .unwrap();
+
+        let second = store
+            .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
+            .unwrap();
+
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.txid, first.txid);
+        assert_eq!(second.status, "prepared");
+    }
+
+    #[test]
+    fn recording_prepared_bytes_backfills_a_legacy_broadcast() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        let prepared = store
+            .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
+            .unwrap();
+        let broadcast = store.mark_broadcast(&prepared.id, &prepared.txid).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM prepared_payments", [])
+            .unwrap();
+
+        store
+            .record_prepared(
+                &broadcast.id,
+                &broadcast.txid,
+                b"recovered transaction",
+                140,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .prepared_transaction(&broadcast.id)
+                .unwrap()
+                .raw_transaction,
+            b"recovered transaction"
+        );
+    }
+
+    #[test]
+    fn stale_retry_does_not_reset_a_replacement_transaction() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        store
+            .record_prepared(&claim.id, "old-txid", b"old transaction", 140)
+            .unwrap();
+        store.reset_for_retry(&claim.id, "old-txid").unwrap();
+        store
+            .record_prepared(&claim.id, "new-txid", b"new transaction", 180)
+            .unwrap();
+
+        let current = store.reset_for_retry(&claim.id, "old-txid").unwrap();
+
+        assert_eq!(current.txid, "new-txid");
+        assert_eq!(current.status, "prepared");
+    }
+
+    #[test]
+    fn broadcast_reconciliation_preserves_a_concurrent_confirmation() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "orchard", "orchard", 12_000, "same")
+            .unwrap();
+        store
+            .record_prepared(&claim.id, "real-txid", b"transaction", 140)
+            .unwrap();
+        store
+            .confirm(&claim.id, "real-txid", "mined-block")
+            .unwrap();
+
+        let current = store.mark_broadcast(&claim.id, "real-txid").unwrap();
+
+        assert_eq!(current.status, "confirmed");
+        assert_eq!(current.block_hash.as_deref(), Some("mined-block"));
     }
 
     #[test]

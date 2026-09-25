@@ -3196,6 +3196,8 @@ dependencies = [
  "rand 0.9.5",
  "reqwest",
  "rusqlite",
+ "schemerz",
+ "schemerz-rusqlite",
  "secrecy",
  "serde",
  "serde_json",
