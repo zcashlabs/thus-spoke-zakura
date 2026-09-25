@@ -30,6 +30,9 @@ enum Command {
     Start {
         #[arg(long)]
         no_open: bool,
+        /// Add this many to the default loopback ports. Must be a multiple of 10.
+        #[arg(long, default_value_t = 0)]
+        port_offset: u16,
     },
     /// Build the runtime images from the current source.
     Build {
@@ -104,8 +107,14 @@ fn main() -> Result<ExitCode> {
         println!("{notice}");
     }
     let runtime = Runtime::discover()?;
-    match cli.command.unwrap_or(Command::Start { no_open: false }) {
-        Command::Start { no_open } => runtime.start(&cli.name, no_open, cli.json),
+    match cli.command.unwrap_or(Command::Start {
+        no_open: false,
+        port_offset: 0,
+    }) {
+        Command::Start {
+            no_open,
+            port_offset,
+        } => runtime.start(&cli.name, no_open, cli.json, port_offset),
         Command::Build { dev } => runtime.build(dev),
         Command::Pull => runtime.pull(),
         Command::Update { .. } => unreachable!("update is handled before runtime discovery"),
@@ -241,6 +250,17 @@ mod tests {
         assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 
         assert!(Cli::try_parse_from(["ths", "start", "--build"]).is_err());
+
+        let cli = Cli::try_parse_from(["ths", "start", "--port-offset", "10"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Start {
+                no_open: false,
+                port_offset: 10
+            })
+        ));
+
+        assert!(Cli::try_parse_from(["ths", "start", "--port-offset", "1"]).is_ok());
     }
 
     #[test]
