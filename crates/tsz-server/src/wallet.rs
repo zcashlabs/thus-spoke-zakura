@@ -46,7 +46,7 @@ use zcash_protocol::{
 };
 use zip321::{Payment, TransactionRequest};
 
-use crate::db::Account;
+use crate::{db::Account, rpc::NodeRpc};
 
 type Db = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, UnwrapErr<SysRng>>;
 
@@ -63,6 +63,7 @@ pub struct RealWallet {
     db: Arc<Mutex<Db>>,
     account_ids: Vec<AccountUuid>,
     lightwalletd: String,
+    chain_guard: Option<NodeRpc>,
 }
 
 #[derive(Default)]
@@ -159,6 +160,36 @@ pub fn regtest_network() -> LocalNetwork {
 
 impl RealWallet {
     pub fn open(data_dir: &Path, seed_hex: &str) -> Result<Self> {
+        Self::open_with_birthday(
+            data_dir,
+            seed_hex,
+            ChainState::empty(BlockHeight::from_u32(1), BlockHash([0; 32])),
+        )
+    }
+
+    pub async fn open_external(data_dir: &Path, seed_hex: &str) -> Result<Self> {
+        let endpoint =
+            std::env::var("TSZ_LIGHTWALLETD").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
+        let mut client = CompactTxStreamerClient::connect(endpoint).await?;
+        let state = client
+            .get_tree_state(zcash_client_backend::proto::service::BlockId {
+                height: 1,
+                hash: vec![],
+            })
+            .await?
+            .into_inner();
+        anyhow::ensure!(
+            state.height == 1,
+            "lightwalletd did not return block 1's tree state"
+        );
+        Self::open_with_birthday(data_dir, seed_hex, state.to_chain_state()?)
+    }
+
+    fn open_with_birthday(
+        data_dir: &Path,
+        seed_hex: &str,
+        birthday_state: ChainState,
+    ) -> Result<Self> {
         let seed = hex::decode(seed_hex).context("invalid wallet seed")?;
         let secret = SecretVec::new(seed);
         let wallet_path = data_dir.join("wallet.db");
@@ -174,23 +205,7 @@ impl RealWallet {
         )
         .map_err(|e| anyhow::anyhow!("initializing wallet database: {e}"))?;
 
-        let account_count = db.get_account_ids()?.len();
-        if account_count == 0 || account_count == usize::from(crate::db::USER_ACCOUNT_COUNT) {
-            // lightwalletd treats a BlockId with height 0 as unspecified, while the
-            // SDK asks for the tree state immediately before an account birthday.
-            // Start at block 2 so that the initial tree-state request is for block 1.
-            // Block 1 is an expendable mining-reward block on this local regtest.
-            let birthday = AccountBirthday::from_parts(
-                ChainState::empty(BlockHeight::from_u32(1), BlockHash([0; 32])),
-                None,
-            );
-            for id in (account_count + 1)..=usize::from(crate::db::TREASURY_ACCOUNT_ID) {
-                db.create_account(&format!("Account {id}"), &secret, &birthday, None)?;
-            }
-        }
-        if db.get_account_ids()?.len() != usize::from(crate::db::TREASURY_ACCOUNT_ID) {
-            bail!("wallet database must contain exactly six accounts");
-        }
+        initialize_accounts(&mut db, &secret, birthday_state)?;
         let mut accounts = db
             .get_account_ids()?
             .into_iter()
@@ -208,7 +223,21 @@ impl RealWallet {
             account_ids,
             lightwalletd: std::env::var("TSZ_LIGHTWALLETD")
                 .unwrap_or_else(|_| "http://127.0.0.1:9067".into()),
+            chain_guard: None,
         })
+    }
+
+    pub fn with_chain_guard(mut self, rpc: NodeRpc) -> Self {
+        self.chain_guard = Some(rpc);
+        self
+    }
+
+    async fn validate_before_submission(&self) -> Result<()> {
+        if let Some(rpc) = &self.chain_guard {
+            rpc.validate_network().await?;
+            rpc.validate_chain_anchor().await?;
+        }
+        Ok(())
     }
 
     pub async fn sync(&self) -> Result<()> {
@@ -395,6 +424,7 @@ impl RealWallet {
         tx.write(&mut raw)?;
         drop(db);
         let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        self.validate_before_submission().await?;
         let result = client
             .send_transaction(RawTransaction {
                 data: raw,
@@ -476,6 +506,7 @@ impl RealWallet {
         tx.write(&mut raw)?;
         drop(db);
         let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        self.validate_before_submission().await?;
         let response = client
             .send_transaction(RawTransaction {
                 data: raw,
@@ -490,5 +521,164 @@ impl RealWallet {
             );
         }
         Ok(txid.to_string())
+    }
+}
+
+fn initialize_accounts(
+    db: &mut Db,
+    seed: &SecretVec<u8>,
+    birthday_state: ChainState,
+) -> Result<()> {
+    db.transactionally(|db| -> Result<()> {
+        let mut existing = db
+            .get_account_ids()?
+            .into_iter()
+            .map(|id| db.get_account(id)?.context("wallet account disappeared"))
+            .collect::<Result<Vec<_>>>()?;
+        existing.sort_by(|a, b| a.name().cmp(&b.name()));
+        let total = usize::from(crate::db::TREASURY_ACCOUNT_ID);
+        anyhow::ensure!(
+            existing.len() <= total,
+            "wallet database has unexpected accounts"
+        );
+        let fingerprint = zip32::fingerprint::SeedFingerprint::from_seed(seed.expose_secret())
+            .context("invalid wallet seed")?;
+        // Recover partial wallets made by older launchers only if their accounts
+        // form the expected prefix. Never silently derive different account keys.
+        for (index, account) in existing.iter().enumerate() {
+            let derivation = account
+                .source()
+                .key_derivation()
+                .context("unexpected imported account")?;
+            anyhow::ensure!(
+                account.name() == Some(format!("Account {}", index + 1).as_str())
+                    && u32::from(derivation.account_index()) as usize == index
+                    && derivation.seed_fingerprint() == &fingerprint,
+                "wallet accounts do not match the development seed and account sequence"
+            );
+        }
+        // Start scanning at block 2 using the real (external) or empty (managed)
+        // block-1 state. All missing accounts commit together or not at all.
+        let birthday = AccountBirthday::from_parts(birthday_state, None);
+        for id in (existing.len() + 1)..=total {
+            db.create_account(&format!("Account {id}"), seed, &birthday, None)?;
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::testing::{MockRpc, regtest_reply};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn transaction_submission_guard_rejects_a_replaced_external_node() {
+        let server = MockRpc::start(|request| {
+            if request["method"] == "getblockhash" && request["params"][0] == 1 {
+                Ok(json!("replacement-anchor"))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = RealWallet::open(dir.path(), &hex::encode([42; 64]))
+            .unwrap()
+            .with_chain_guard(
+                server
+                    .rpc
+                    .clone()
+                    .with_chain_anchor("original-anchor".into()),
+            );
+        assert!(
+            wallet
+                .validate_before_submission()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("external chain changed")
+        );
+    }
+
+    fn empty_birthday() -> ChainState {
+        ChainState::empty(BlockHeight::from_u32(1), BlockHash([0; 32]))
+    }
+
+    fn initialized_db(dir: &Path, seed: &SecretVec<u8>) -> Db {
+        let mut db = WalletDb::for_path(
+            dir.join("wallet.db"),
+            regtest_network(),
+            SystemClock,
+            UnwrapErr(SysRng),
+        )
+        .unwrap();
+        init_wallet_db(&mut db, Some(SecretVec::new(seed.expose_secret().clone()))).unwrap();
+        db
+    }
+
+    #[test]
+    fn resumes_each_partial_account_prefix_without_replacing_keys() {
+        let seed = SecretVec::new(vec![42; 64]);
+        for count in 1..=5 {
+            let dir = tempfile::tempdir().unwrap();
+            let mut db = initialized_db(dir.path(), &seed);
+            let birthday = AccountBirthday::from_parts(empty_birthday(), None);
+            let mut old_ids = vec![];
+            for id in 1..=count {
+                old_ids.push(
+                    db.create_account(&format!("Account {id}"), &seed, &birthday, None)
+                        .unwrap()
+                        .0,
+                );
+            }
+            drop(db);
+            let wallet = RealWallet::open_with_birthday(
+                dir.path(),
+                &hex::encode(seed.expose_secret()),
+                empty_birthday(),
+            )
+            .unwrap();
+            assert_eq!(wallet.account_ids.len(), 6);
+            assert_eq!(&wallet.account_ids[..count], &old_ids);
+            let ids = wallet.account_ids.clone();
+            drop(wallet);
+            let reopened = RealWallet::open_with_birthday(
+                dir.path(),
+                &hex::encode(seed.expose_secret()),
+                empty_birthday(),
+            )
+            .unwrap();
+            assert_eq!(reopened.account_ids, ids);
+        }
+    }
+
+    #[test]
+    fn account_initialization_rolls_back_the_entire_batch_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = SecretVec::new(vec![42; 64]);
+        let mut db = initialized_db(dir.path(), &seed);
+        let connection = rusqlite::Connection::open(dir.path().join("wallet.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_second_account BEFORE INSERT ON accounts WHEN NEW.name = 'Account 2' BEGIN SELECT RAISE(ABORT, 'injected account failure'); END;").unwrap();
+        assert!(initialize_accounts(&mut db, &seed, empty_birthday()).is_err());
+        assert!(db.get_account_ids().unwrap().is_empty());
+        connection
+            .execute_batch("DROP TRIGGER fail_second_account;")
+            .unwrap();
+        initialize_accounts(&mut db, &seed, empty_birthday()).unwrap();
+        assert_eq!(db.get_account_ids().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn refuses_to_extend_an_unexpected_partial_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = SecretVec::new(vec![42; 64]);
+        let mut db = initialized_db(dir.path(), &seed);
+        let birthday = AccountBirthday::from_parts(empty_birthday(), None);
+        db.create_account("Account 2", &seed, &birthday, None)
+            .unwrap();
+        assert!(initialize_accounts(&mut db, &seed, empty_birthday()).is_err());
+        assert_eq!(db.get_account_ids().unwrap().len(), 1);
     }
 }

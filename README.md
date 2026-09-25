@@ -11,8 +11,11 @@ Thus Spoke Zakura starts everything you need for local experiments:
 - lightwalletd and JSON-RPC endpoints; and
 - a browser wallet, block explorer, and network dashboard.
 
-Nothing connects to Zcash mainnet or testnet. Every run begins with a fresh
-chain, and pressing Ctrl+C deletes the containers and development data.
+Nothing connects to Zcash mainnet or testnet. Managed runs begin with a fresh
+chain, and pressing Ctrl+C deletes the containers and development data. You can
+also attach to your own local Zakura node and preserve its chain and wallet.
+Internet and LAN nodes are not supported: the faucet, initial funding, and
+confirmation controls require a local Regtest node whose mining you control.
 
 ![Wallet dashboard with five development accounts](docs/images/wallet.png)
 
@@ -125,8 +128,8 @@ Running `ths` with no command starts the default environment.
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
 | `ths list` | List known environments |
-| `ths stop` | Stop and delete the environment |
-| `ths reset --force` | Force-delete one environment and all its data |
+| `ths stop` | Delete a managed environment, or detach from a self-managed node and retain its wallet |
+| `ths reset --force` | Delete ths-managed data; preserve self-managed node processes, configuration, and chains |
 | `ths doctor` | Check Docker and local configuration |
 | `ths pull` | Pull the exact images for this launcher version |
 | `ths update --check` | Check for a newer release |
@@ -144,6 +147,10 @@ ths mine 10 --name alice
 
 Each named environment gets its own ports and Docker resources. Run each one in
 a separate terminal.
+
+Ordinary Zakura RPC calls time out after 30 seconds; mining gets up to one hour.
+`ths mine` allows 65 minutes for the full request, including chain checks and
+wallet synchronization.
 
 ## Develop from source
 
@@ -234,6 +241,87 @@ intercepted auto-mine failure, and real inclusion checks. Restore the exact line
 immediately, including after a failed run; do not retain the temporary
 production-code edit.
 
+## Test a local Zakura build
+
+The app and lightwalletd still run in Docker, but Zakura can run directly from
+your checkout. Build the companion images once from this repository:
+
+```console
+cargo run -p thus-spoke-zakura -- build --dev --without-zakura
+```
+
+Build Zakura in its own checkout, then point the launcher at the resulting
+executable:
+
+```console
+cargo run -p thus-spoke-zakura -- start --zakura-bin /path/to/zakura/target/debug/zakurad
+```
+
+With an installed launcher, the command is
+`ths start --zakura-bin /path/to/zakura/target/debug/zakurad`. Use
+`ths pull --without-zakura` to download the companion images instead of building
+them. No Zakura image is required. Local networking supports Docker Desktop,
+OrbStack, and native Docker Engine on Linux; remote daemons and rootless Docker
+are not supported for local nodes.
+
+The launcher prints the executable's path/version and generated configuration.
+It creates a fresh Regtest chain with the normal five accounts, initial 5 ZEC,
+faucet, and mining controls. `ths logs zakura -f` follows the native node's log.
+Ctrl+C or `ths stop` stops the process and deletes only that instance's managed
+data. Your Zakura checkout is not used as the chain directory.
+
+To test a change, stop the launcher, rebuild Zakura, and run the same command.
+Rebuild the companion images only when changing this project's server or UI.
+
+### Attach to a node you start on localhost
+
+To run under a debugger or control a local node process yourself, first prepare
+a wallet and matching node configuration:
+
+```console
+ths --name local prepare --zakura-rpc http://127.0.0.1:18232
+```
+
+Start your binary with the configuration path printed by `prepare`:
+
+```console
+/path/to/zakurad --config /printed/path/zakurad.toml start
+```
+
+Then attach:
+
+```console
+ths --name local start --zakura-rpc http://127.0.0.1:18232
+```
+
+`--zakura-rpc` accepts only `http://127.0.0.1:<port>` or
+`http://localhost:<port>` on this computer. It does not attach to internet or LAN
+nodes. The node is self-managed locally, not remotely hosted.
+
+Use the generated configuration: startup checks the Regtest upgrade schedule
+and treasury payout before funding the wallet. Attaching mines blocks and sends
+development transactions on this chain. RPC authentication is disabled only in
+this dedicated, loopback-bound development configuration.
+
+Ctrl+C and `ths --name local stop` detach and preserve both the local node and the prepared
+wallet. Reattach with the same command. `ths --name local reset --force` deletes the ths wallet
+and indexing data, but preserves the external node's configuration and chain.
+After resetting, prepare again and restart your node with the new configuration
+so its mining rewards go to the new treasury. Read node logs in the terminal or
+debugger that launched it.
+
+Keep `--name local` on these commands: omitting it operates on `default`, not
+the instance from this example. `prepare --json` writes only instance metadata
+to stdout; setup output and disposable development credentials go to stderr.
+
+Interrupted startup can be retried with the same attach command: wallet setup
+resumes and reconciles the original funding payment instead of sending another.
+While attached, the server checks that the node still has the wallet's original
+block-1 anchor. Replacing or resetting that chain makes health checks fail and
+blocks wallet actions until you restore the original chain or reset and prepare
+the ths wallet again. The instance name `external-nodes` is reserved to protect
+the separately stored node data from instance cleanup.
+
 ## How it fits together
 
 ```text
@@ -246,8 +334,9 @@ The server owns wallet synchronization and exposes the latest confirmed wallet
 snapshot to the dashboard. A hidden sixth account acts as the mining and faucet
 treasury. Account 1 starts with 5 Orchard ZEC, so you can experiment immediately.
 
-The launcher chooses exact versioned images, labels every Docker resource by
-instance, and never binds a service beyond loopback.
+The launcher chooses exact versioned companion images, labels Docker resources
+by instance, and publishes services only on loopback. By default it also runs
+the versioned Zakura image; local modes use your own executable or node.
 
 > [!WARNING]
 > This project is for Regtest development only. Never send real funds to an

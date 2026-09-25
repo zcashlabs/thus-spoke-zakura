@@ -83,6 +83,13 @@ export function NetworkPage() {
         <dl>
           <DataRow label="Instance">{status.data.instance}</DataRow>
           <DataRow label="Network">{status.data.network}</DataRow>
+          <DataRow label="Node runtime">
+            {status.data.node_mode === 'local_binary'
+              ? 'Local Zakura executable'
+              : status.data.node_mode === 'external_rpc'
+                ? 'Self-managed local Zakura'
+                : 'Docker'}
+          </DataRow>
           <DataRow label="Height">
             {node ? (
               <Link
@@ -110,15 +117,16 @@ export function NetworkPage() {
           <DataRow label="Development accounts">{status.data.account_count}</DataRow>
         </dl>
         <PanelNote>
-          This chain is private to your machine and starts from block 0 on every run. It has no
-          peers and no relationship to Zcash mainnet or testnet.
+          {status.data.node_mode === 'external_rpc'
+            ? 'This Regtest node runs on your machine and is managed outside ths. Internet and LAN nodes are not supported. Its chain and your development wallet are preserved when you detach.'
+            : 'This chain is private to your machine and starts from block 0 on every run. It has no peers and no relationship to Zcash mainnet or testnet.'}
         </PanelNote>
       </Panel>
 
       {endpoints && (
         <Panel eyebrow="HOST NETWORK" title="Runtime endpoints">
           <dl>
-            {ENDPOINT_ROWS.map(({ key, label }) => (
+            {ENDPOINT_ROWS.filter(({ key }) => endpoints[key]).map(({ key, label }) => (
               <DataRow key={key} label={label}>
                 <span className="flex items-center gap-2">
                   <code className="font-mono">{endpoints[key]}</code>

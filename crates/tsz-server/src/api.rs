@@ -56,14 +56,23 @@ struct WalletSyncStatus {
     error: Option<String>,
 }
 
+impl WalletSyncStatus {
+    fn is_current_at(&self, height: u64) -> bool {
+        self.state == "ready"
+            && self
+                .fully_scanned_height
+                .is_some_and(|scanned| scanned >= height)
+    }
+}
+
 impl AppState {
-    pub fn new(store: Store, wallet: RealWallet, rpc: String, instance: String) -> Self {
+    pub fn new(store: Store, wallet: RealWallet, rpc: NodeRpc, instance: String) -> Self {
         let (events, _) = broadcast::channel(128);
         let accounts = store.accounts().unwrap_or_default();
         Self(Arc::new(Inner {
             store,
             wallet,
-            rpc: NodeRpc::new(rpc),
+            rpc,
             instance,
             events,
             wallet_sync: Mutex::new(()),
@@ -88,17 +97,26 @@ impl AppState {
         self.0.wallet_snapshot.read().await.status.clone()
     }
 
+    async fn validate_chain_identity(&self) -> anyhow::Result<()> {
+        let result = self.0.rpc.validate_chain_anchor().await;
+        if let Err(error) = &result {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.state = "error";
+            snapshot.status.error = Some(error.to_string());
+            drop(snapshot);
+            notify(self, "sync");
+        }
+        result
+    }
+
     async fn synchronize_wallet(&self, target_height: Option<u64>) -> anyhow::Result<()> {
         let _guard = self.0.wallet_sync.lock().await;
-        if let Some(target) = target_height
-            && self
-                .0
-                .wallet_snapshot
-                .read()
-                .await
-                .status
-                .fully_scanned_height
-                .is_some_and(|height| height >= target)
+        self.validate_chain_identity().await?;
+        // An externally managed node may rewind or reorg without advancing its
+        // height. Let the SDK reconcile those changes instead of trusting height.
+        if !self.0.rpc.is_external()
+            && let Some(target) = target_height
+            && self.wallet_sync_status().await.is_current_at(target)
         {
             return Ok(());
         }
@@ -132,6 +150,7 @@ impl AppState {
     }
 
     async fn synchronize_latest(&self) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         let observed = self.0.wallet.latest_height().await?;
         {
             let mut snapshot = self.0.wallet_snapshot.write().await;
@@ -141,6 +160,7 @@ impl AppState {
     }
 
     async fn refresh_wallet_snapshot(&self) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         let mut accounts = self.0.store.accounts()?;
         self.0.wallet.apply_balances(&mut accounts).await?;
         let (fully_scanned_height, chain_tip_height) = self.0.wallet.heights().await?;
@@ -165,19 +185,17 @@ impl AppState {
     }
 
     async fn sync_if_chain_advanced(&self) -> anyhow::Result<()> {
+        if self.0.rpc.is_external() {
+            self.synchronize_latest().await?;
+            notify(self, "chain");
+            return Ok(());
+        }
         let observed = self.0.wallet.latest_height().await?;
         {
             let mut snapshot = self.0.wallet_snapshot.write().await;
             snapshot.status.observed_height = Some(observed);
         }
-        let scanned = self
-            .0
-            .wallet_snapshot
-            .read()
-            .await
-            .status
-            .fully_scanned_height;
-        if scanned.is_none_or(|height| height < observed) {
+        if !self.wallet_sync_status().await.is_current_at(observed) {
             self.synchronize_wallet(Some(observed)).await?;
             notify(self, "chain");
         }
@@ -281,16 +299,21 @@ pub async fn dependencies_ready(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn health(State(state): State<AppState>) -> Response {
+    let identity_valid = state.validate_chain_identity().await.is_ok();
     let node = state.0.rpc.chain_info().await.ok();
     let wallet = state.wallet_sync_status().await;
-    let status = if node.is_some() && wallet.last_success_at.is_some() {
+    let ok = identity_valid
+        && node.is_some()
+        && wallet.state != "error"
+        && wallet.last_success_at.is_some();
+    let status = if ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
         status,
-        Json(json!({"ok": node.is_some() && wallet.last_success_at.is_some(), "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
+        Json(json!({"ok": ok, "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
     )
         .into_response()
 }
@@ -302,6 +325,7 @@ struct Status {
     account_count: usize,
     auto_mine: bool,
     network: &'static str,
+    node_mode: String,
     endpoints: PublicEndpoints,
     wallet_sync: WalletSyncStatus,
 }
@@ -325,6 +349,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         account_count: state.0.store.user_accounts()?.len(),
         auto_mine: true,
         network: "Regtest",
+        node_mode: std::env::var("TSZ_NODE_MODE").unwrap_or_else(|_| "docker".into()),
         endpoints: PublicEndpoints {
             dashboard: format!("http://{dashboard_host}"),
             zakura_rpc: std::env::var("TSZ_PUBLIC_ZAKURA_RPC")
@@ -543,6 +568,7 @@ impl FaucetRuntime for AppState {
         destination: &str,
         amount_zatoshi: u64,
     ) -> anyhow::Result<String> {
+        self.validate_chain_identity().await?;
         self.0
             .wallet
             .send(
@@ -575,6 +601,7 @@ impl FaucetRuntime for AppState {
     }
 
     async fn shield_coinbase(&self, seed: &str, treasury: &Account) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         self.0
             .wallet
             .shield_coinbase(
@@ -674,6 +701,7 @@ async fn replenish_treasury<R: FaucetRuntime>(
 }
 
 async fn mine_and_sync(state: &AppState, blocks: u32) -> anyhow::Result<Vec<String>> {
+    state.validate_chain_identity().await?;
     let hashes = state.0.rpc.generate(blocks).await?;
     let tip_hash = hashes
         .last()
@@ -696,22 +724,23 @@ async fn mine_and_sync(state: &AppState, blocks: u32) -> anyhow::Result<Vec<Stri
 
 pub async fn provision_initial_balance(state: &AppState) -> anyhow::Result<()> {
     const INITIAL_FUNDING_KEY: &str = "startup-account-1-orchard-v1";
-    if let Some(existing) = state.0.store.activity_for_key(INITIAL_FUNDING_KEY)?
-        && existing.status == "confirmed"
-    {
+    if let Some(existing) = state.0.store.activity_for_key(INITIAL_FUNDING_KEY)? {
+        if existing.status != "confirmed" {
+            state.validate_chain_identity().await?;
+            let block_hash = confirm_startup_transaction(&state.0.rpc, &existing.txid).await?;
+            let block = state.0.rpc.block(&block_hash).await?;
+            let height = block["height"]
+                .as_u64()
+                .context("startup funding block omitted its height")?;
+            state.synchronize_wallet(Some(height)).await?;
+            state.0.store.confirm(&existing.id, &block_hash)?;
+        }
         return Ok(());
     }
+    // A fresh wallet needs scanned blocks before a proposal can determine its target height.
     let seed = state.0.store.seed()?;
     let treasury = state.0.store.account(TREASURY_ACCOUNT_ID)?;
-    if state
-        .0
-        .store
-        .activity_for_key(INITIAL_FUNDING_KEY)?
-        .is_none()
-    {
-        // A fresh wallet needs scanned blocks before a proposal can determine its target height.
-        replenish_treasury(state, &seed, &treasury).await?;
-    }
+    replenish_treasury(state, &seed, &treasury).await?;
     fund_from_treasury(
         state,
         1,
@@ -733,6 +762,31 @@ pub async fn provision_initial_balance(state: &AppState) -> anyhow::Result<()> {
         5 * ZATOSHIS_PER_ZEC
     );
     Ok(())
+}
+
+/// Reconcile the original payment after interrupted startup. Never create a
+/// second payment, and never mark it confirmed just because another block mined.
+async fn confirm_startup_transaction(rpc: &NodeRpc, txid: &str) -> anyhow::Result<String> {
+    let transaction = rpc.transaction(txid).await.context(
+        "startup funding transaction is unavailable; restore the node/mempool or reset the ths wallet; refusing to send a duplicate payment",
+    )?;
+    if let Some(hash) = confirmed_transaction_block(&transaction) {
+        return Ok(hash.to_owned());
+    }
+    rpc.generate(1)
+        .await
+        .context("confirming the pending startup funding transaction")?;
+    let transaction = rpc.transaction(txid).await?;
+    confirmed_transaction_block(&transaction).map(str::to_owned).context(
+        "startup funding transaction is still unconfirmed; retry attachment after the node can include it",
+    )
+}
+
+fn confirmed_transaction_block(transaction: &Value) -> Option<&str> {
+    (transaction["confirmations"].as_u64()? > 0)
+        .then(|| transaction["blockhash"].as_str())
+        .flatten()
+        .filter(|hash| !hash.is_empty())
 }
 
 #[derive(Deserialize)]
@@ -1052,6 +1106,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::rpc::testing::{MockRpc, regtest_reply};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -1141,15 +1196,246 @@ mod tests {
     }
 
     fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+        state_with_rpc(NodeRpc::new("http://127.0.0.1:1".into()))
+    }
+
+    #[test]
+    fn only_ready_snapshots_can_skip_sync_at_an_unchanged_height() {
+        let mut status = WalletSyncStatus {
+            state: "ready",
+            fully_scanned_height: Some(100),
+            observed_height: Some(100),
+            last_success_at: Some(123),
+            error: None,
+        };
+        assert!(status.is_current_at(100));
+        assert!(!status.is_current_at(101));
+        for state in ["error", "syncing"] {
+            status.state = state;
+            assert!(!status.is_current_at(100));
+            assert!(!status.is_current_at(99));
+        }
+        status.state = "ready";
+        status.fully_scanned_height = None;
+        assert!(!status.is_current_at(100));
+    }
+
+    #[tokio::test]
+    async fn managed_wallet_retries_failed_sync_without_a_new_block() {
+        let (state, _dir) = state_with_local_wallet();
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.status.state = "ready";
+            snapshot.status.fully_scanned_height = Some(100);
+        }
+        // A healthy, caught-up wallet need not contact the absent indexer.
+        state.synchronize_wallet(Some(100)).await.unwrap();
+        state.0.wallet_snapshot.write().await.status.state = "error";
+        // After failure it must attempt synchronization, not return cached success.
+        assert!(state.synchronize_wallet(Some(100)).await.is_err());
+    }
+
+    fn state_with_rpc(rpc: NodeRpc) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Store::open(dir.path().join("server.db")).expect("open store");
         store.initialize().expect("initialize store");
         let wallet =
             RealWallet::open(dir.path(), &store.seed().expect("wallet seed")).expect("open wallet");
-        (
-            AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
-            dir,
-        )
+        (AppState::new(store, wallet, rpc, "test".into()), dir)
+    }
+
+    #[tokio::test]
+    async fn replaced_external_chain_invalidates_health_and_blocks_mutations() {
+        let replaced = Arc::new(AtomicBool::new(false));
+        let node = replaced.clone();
+        let server = MockRpc::start(move |request| {
+            if request["method"] == "getblockhash"
+                && request["params"][0] == 1
+                && node.load(Ordering::SeqCst)
+            {
+                Ok(json!("replacement-anchor"))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let (state, _dir) = state_with_rpc(
+            server
+                .rpc
+                .clone()
+                .with_chain_anchor("original-anchor".into()),
+        );
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.status.state = "ready";
+            snapshot.status.last_success_at = Some(123);
+            snapshot.status.fully_scanned_height = Some(100);
+            snapshot.accounts[0].orchard_zatoshi = 500_000_000;
+        }
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::OK);
+        // Routine synchronization after the first successful scan is healthy;
+        // only an actual failure should make readiness flap to unavailable.
+        state.0.wallet_snapshot.write().await.status.state = "syncing";
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::OK);
+        replaced.store(true, Ordering::SeqCst);
+        assert!(state.sync_if_chain_advanced().await.is_err());
+        assert_eq!(state.wallet_sync_status().await.state, "error");
+        assert_eq!(
+            health(State(state.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(mine_and_sync(&state, 1).await.is_err());
+        assert!(
+            send(
+                State(state.clone()),
+                Json(SendRequest {
+                    from_account: 1,
+                    to_account: 2,
+                    source_pool: "orchard".into(),
+                    destination_pool: "orchard".into(),
+                    amount_zatoshi: 1,
+                    idempotency_key: "review-send".into(),
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            fund_from_treasury(&state, 1, "orchard", 1, "review-faucet")
+                .await
+                .is_err()
+        );
+        assert_eq!(server.count("generate"), 0);
+        assert!(state.0.store.activities(100).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_wallet_does_not_skip_sync_at_equal_or_lower_heights() {
+        let server = MockRpc::start(regtest_reply).await;
+        let (state, _dir) = state_with_rpc(
+            server
+                .rpc
+                .clone()
+                .with_chain_anchor("original-anchor".into()),
+        );
+        state
+            .0
+            .wallet_snapshot
+            .write()
+            .await
+            .status
+            .fully_scanned_height = Some(100);
+        for height in [100, 99] {
+            // No indexer is running: reaching it must fail, rather than returning
+            // success from the old height-only fast path.
+            assert!(state.synchronize_wallet(Some(height)).await.is_err());
+            assert_eq!(state.wallet_sync_status().await.state, "error");
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_startup_funding_is_not_treated_as_completed() {
+        let server = MockRpc::start(|request| {
+            if request["method"] == "getrawtransaction" {
+                Err(json!({"code":-5,"message":"transaction missing"}))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let (state, _dir) = state_with_rpc(server.rpc.clone());
+        let pending = state
+            .0
+            .store
+            .faucet(
+                1,
+                "orchard",
+                500_000_000,
+                "startup-account-1-orchard-v1",
+                "original-payment",
+            )
+            .unwrap();
+        let error = provision_initial_balance(&state).await.unwrap_err();
+        assert!(error.to_string().contains("refusing to send a duplicate"));
+        let retained = state
+            .0
+            .store
+            .activity_for_key("startup-account-1-orchard-v1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.id, pending.id);
+        assert_eq!(retained.status, pending.status);
+        assert_ne!(retained.status, "confirmed");
+        assert_eq!(state.0.store.activities(100).unwrap().len(), 1);
+        assert_eq!(server.count("generate"), 0);
+    }
+
+    #[tokio::test]
+    async fn resumes_the_original_pending_startup_transaction_after_mining_failure() {
+        let fail_mining = Arc::new(AtomicBool::new(true));
+        let mined = Arc::new(AtomicBool::new(false));
+        let fail = fail_mining.clone();
+        let confirmed = mined.clone();
+        let server = MockRpc::start(move |request| match request["method"].as_str().unwrap() {
+            "getrawtransaction" => {
+                assert_eq!(request["params"][0], "original-payment");
+                Ok(if confirmed.load(Ordering::SeqCst) {
+                    json!({"confirmations":1,"blockhash":"funding-block"})
+                } else {
+                    json!({"confirmations":0})
+                })
+            }
+            "generate" => {
+                if fail.load(Ordering::SeqCst) {
+                    Err(json!({"code":-1,"message":"interrupted mining"}))
+                } else {
+                    confirmed.store(true, Ordering::SeqCst);
+                    Ok(json!(["funding-block"]))
+                }
+            }
+            _ => regtest_reply(request),
+        })
+        .await;
+        assert!(
+            confirm_startup_transaction(&server.rpc, "original-payment")
+                .await
+                .is_err()
+        );
+        fail_mining.store(false, Ordering::SeqCst);
+        assert_eq!(
+            confirm_startup_transaction(&server.rpc, "original-payment")
+                .await
+                .unwrap(),
+            "funding-block"
+        );
+        assert_eq!(server.count("generate"), 2);
+        // A retry after mining succeeded but before the local record was updated
+        // observes confirmation and does not mine or submit another payment.
+        assert_eq!(
+            confirm_startup_transaction(&server.rpc, "original-payment")
+                .await
+                .unwrap(),
+            "funding-block"
+        );
+        assert_eq!(server.count("generate"), 2);
+        assert_eq!(server.count("sendrawtransaction"), 0);
+    }
+
+    #[tokio::test]
+    async fn mining_an_unrelated_block_does_not_complete_startup_funding() {
+        let server = MockRpc::start(|request| {
+            if request["method"] == "getrawtransaction" {
+                Ok(json!({"confirmations":0}))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let error = confirm_startup_transaction(&server.rpc, "original-payment")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("still unconfirmed"));
+        assert_eq!(server.count("generate"), 1);
     }
 
     #[tokio::test]

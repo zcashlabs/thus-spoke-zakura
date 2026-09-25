@@ -26,19 +26,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start an environment in the foreground; interrupting deletes it.
+    /// Start a local Regtest environment in the foreground.
     Start {
         #[arg(long)]
         no_open: bool,
+        /// Run a locally built Zakura executable instead of the node image.
+        #[arg(long, value_name = "PATH", conflicts_with = "zakura_rpc")]
+        zakura_bin: Option<PathBuf>,
+        /// Attach to a localhost Regtest node using a wallet created by `ths prepare`.
+        #[arg(long, value_name = "LOCAL_URL")]
+        zakura_rpc: Option<String>,
+    },
+    /// Prepare a wallet and configuration for a local Regtest node you start yourself.
+    Prepare {
+        /// HTTP RPC origin on 127.0.0.1 or localhost; internet and LAN nodes are unsupported.
+        #[arg(long, value_name = "LOCAL_URL")]
+        zakura_rpc: String,
     },
     /// Build the runtime images from the current source.
     Build {
         /// Keep workspace Rust code unoptimized while optimizing dependencies.
         #[arg(long)]
         dev: bool,
+        /// Build only the app and lightwalletd images for use with a local node.
+        #[arg(long)]
+        without_zakura: bool,
     },
     /// Pull the exact runtime images for this launcher version.
-    Pull,
+    Pull {
+        /// Pull only the app and lightwalletd images for use with a local node.
+        #[arg(long)]
+        without_zakura: bool,
+    },
     /// Check for or install a released launcher version.
     Update {
         /// Exact version to install, including an intentional rollback.
@@ -77,9 +96,9 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Stop and delete an environment.
+    /// Stop managed nodes and delete their data; detach from self-managed nodes and retain the wallet.
     Stop,
-    /// Delete one environment and all of its volumes.
+    /// Delete ths-managed data; preserve self-managed node processes, configuration, and chains.
     Reset {
         #[arg(long)]
         force: bool,
@@ -104,10 +123,28 @@ fn main() -> Result<ExitCode> {
         println!("{notice}");
     }
     let runtime = Runtime::discover()?;
-    match cli.command.unwrap_or(Command::Start { no_open: false }) {
-        Command::Start { no_open } => runtime.start(&cli.name, no_open, cli.json),
-        Command::Build { dev } => runtime.build(dev),
-        Command::Pull => runtime.pull(),
+    match cli.command.unwrap_or(Command::Start {
+        no_open: false,
+        zakura_bin: None,
+        zakura_rpc: None,
+    }) {
+        Command::Start {
+            no_open,
+            zakura_bin,
+            zakura_rpc,
+        } => runtime.start(
+            &cli.name,
+            no_open,
+            cli.json,
+            zakura_bin.as_deref(),
+            zakura_rpc.as_deref(),
+        ),
+        Command::Prepare { zakura_rpc } => runtime.prepare(&cli.name, &zakura_rpc, cli.json),
+        Command::Build {
+            dev,
+            without_zakura,
+        } => runtime.build(dev, without_zakura),
+        Command::Pull { without_zakura } => runtime.pull(without_zakura),
         Command::Update { .. } => unreachable!("update is handled before runtime discovery"),
         Command::Uninstall => unreachable!("uninstall is handled before runtime discovery"),
         Command::Status => runtime.status(&cli.name, cli.json),
@@ -175,15 +212,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_local_node_workflows_and_rejects_conflicting_sources() {
+        let cli =
+            Cli::try_parse_from(["ths", "start", "--zakura-bin", "/build with spaces/zakurad"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Start {
+                zakura_bin: Some(_),
+                zakura_rpc: None,
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "ths",
+                "start",
+                "--zakura-bin",
+                "/node",
+                "--zakura-rpc",
+                "http://127.0.0.1:18232"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["ths", "prepare"]).is_err());
+        let cli = Cli::try_parse_from([
+            "ths",
+            "prepare",
+            "--zakura-rpc",
+            "http://127.0.0.1:18232",
+            "--name",
+            "debug",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::Prepare { .. })));
+        assert_eq!(cli.name.to_string(), "debug");
+        assert!(matches!(
+            Cli::try_parse_from(["ths", "pull", "--without-zakura"])
+                .unwrap()
+                .command,
+            Some(Command::Pull {
+                without_zakura: true
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["ths", "build", "--dev", "--without-zakura"])
+                .unwrap()
+                .command,
+            Some(Command::Build {
+                dev: true,
+                without_zakura: true
+            })
+        ));
+    }
+
+    #[test]
     fn separates_building_from_starting() {
         let default = Cli::try_parse_from(["ths"]).unwrap();
         assert!(default.command.is_none());
 
         let cli = Cli::try_parse_from(["ths", "build", "--dev"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Build { dev: true })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Build {
+                dev: true,
+                without_zakura: false
+            })
+        ));
 
         let cli = Cli::try_parse_from(["ths", "pull"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Pull)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Pull {
+                without_zakura: false
+            })
+        ));
 
         let cli = Cli::try_parse_from(["ths", "update", "v1.2.3"]).unwrap();
         assert!(matches!(

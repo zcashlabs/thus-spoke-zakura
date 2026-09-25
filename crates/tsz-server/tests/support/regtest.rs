@@ -1415,7 +1415,7 @@ mod tests {
         CleanupResource, CommandExecutor, CommandOutput, DockerInspect, DockerResource,
         FailureRoute, RecoveryFailureReporter, RegtestStack, docker_resource_exists_from_inspect,
         published_loopback_port, remaining_timeout, shutdown_after_test_cancellation,
-        synchronous_command_output, synchronous_command_output_with_timeout,
+        synchronous_command_output,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1695,7 +1695,7 @@ mod tests {
     fn synchronous_command_output_does_not_wait_for_descendant_held_pipes() {
         let timeout = Duration::from_millis(150);
         let started = Instant::now();
-        let output = synchronous_command_output_with_timeout(
+        let output = super::synchronous_command_output_with_timeout(
             "sh",
             &["-c".to_owned(), "sleep 1 & exit 0".to_owned()],
             timeout,

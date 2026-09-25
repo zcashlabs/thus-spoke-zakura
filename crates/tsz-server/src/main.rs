@@ -30,6 +30,9 @@ enum Command {
         data_dir: PathBuf,
         #[arg(long, default_value = "/config")]
         config_dir: PathBuf,
+        /// Initialize the wallet after an external node's real tree state is available.
+        #[arg(long)]
+        defer_wallet: bool,
     },
     Serve {
         #[arg(long, default_value = "/data")]
@@ -49,17 +52,20 @@ async fn main() -> Result<()> {
         Command::Init {
             data_dir,
             config_dir,
-        } => init(data_dir, config_dir),
+            defer_wallet,
+        } => init(data_dir, config_dir, defer_wallet),
         Command::Serve { data_dir } => serve(data_dir).await,
     }
 }
 
-fn init(data_dir: PathBuf, config_dir: PathBuf) -> Result<()> {
+fn init(data_dir: PathBuf, config_dir: PathBuf, defer_wallet: bool) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&config_dir)?;
     let store = Store::open(data_dir.join("tsz.db"))?;
     store.initialize()?;
-    wallet::RealWallet::open(&data_dir, &store.seed()?)?;
+    if !defer_wallet {
+        wallet::RealWallet::open(&data_dir, &store.seed()?)?;
+    }
     let miner = store.account(TREASURY_ACCOUNT_ID)?.transparent_address;
     fs::write(config_dir.join("zakurad.toml"), zakura_config(&miner))?;
     println!("initialized five development accounts and a hidden treasury; miner address {miner}");
@@ -113,14 +119,73 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     let store = Store::open(data_dir.join("tsz.db"))?;
     store.initialize()?;
-    let wallet = wallet::RealWallet::open(&data_dir, &store.seed()?)?;
+    let rpc_url =
+        std::env::var("TSZ_ZAKURA_RPC").unwrap_or_else(|_| "http://127.0.0.1:18232".into());
+    let external = std::env::var("TSZ_NODE_MODE").is_ok_and(|mode| mode == "external_rpc");
+    let rpc = rpc::NodeRpc::new(rpc_url.clone());
+    let info = rpc
+        .validate_network()
+        .await
+        .context("validating the node's Regtest configuration")?;
+    rpc.validate_treasury(&store.account(TREASURY_ACCOUNT_ID)?.transparent_address)
+        .await?;
+    let rpc = if external {
+        validate_external_chain(&rpc, &data_dir).await?;
+        // The wallet starts scanning at block 2. Bootstrap block 1 only after all
+        // compatibility checks pass, and never replace an existing chain.
+        if info.blocks == 0 {
+            rpc.generate(1).await?;
+        }
+        // Record the chain before creating/scanning the wallet, so a failed
+        // startup cannot later reuse a partial wallet against a different chain.
+        let anchor = rpc.block("1").await?;
+        let hash = anchor["hash"]
+            .as_str()
+            .context("external node omitted block 1's hash")?;
+        let pending = data_dir.join("external-chain.json.tmp");
+        fs::write(&pending, serde_json::to_vec(hash)?)?;
+        fs::rename(pending, data_dir.join("external-chain.json"))?;
+        rpc.with_chain_anchor(hash.to_owned())
+    } else {
+        rpc
+    };
+    let wallet = if external {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                wallet::RealWallet::open_external(&data_dir, &store.seed()?),
+            )
+            .await
+            {
+                Ok(Ok(wallet)) => break wallet,
+                Ok(Err(error)) if Instant::now() < deadline => {
+                    tracing::info!(%error, "waiting for the external node's block-1 tree state");
+                    tokio::time::sleep(Duration::from_millis(750)).await;
+                }
+                Err(error) if Instant::now() < deadline => {
+                    tracing::info!(%error, "waiting for the external node's block-1 tree state");
+                    tokio::time::sleep(Duration::from_millis(750)).await;
+                }
+                Ok(Err(error)) => return Err(error).context("initializing the external wallet"),
+                Err(error) => return Err(error).context("waiting for lightwalletd"),
+            }
+        }
+    } else {
+        wallet::RealWallet::open(&data_dir, &store.seed()?)?
+    };
+    let wallet = if external {
+        wallet.with_chain_guard(rpc.clone())
+    } else {
+        wallet
+    };
     let state = api::AppState::new(
         store,
         wallet,
-        std::env::var("TSZ_ZAKURA_RPC").unwrap_or_else(|_| "http://127.0.0.1:18232".into()),
+        rpc,
         std::env::var("TSZ_INSTANCE").unwrap_or_else(|_| "default".into()),
     );
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(if external { 600 } else { 120 });
     loop {
         match api::dependencies_ready(&state).await {
             Ok(()) => break,
@@ -143,6 +208,21 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     tracing::info!(%address, "dashboard ready");
     let listener = tokio::net::TcpListener::bind(address).await?;
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn validate_external_chain(rpc: &rpc::NodeRpc, data_dir: &std::path::Path) -> Result<()> {
+    let path = data_dir.join("external-chain.json");
+    if path.exists() {
+        let expected: String = serde_json::from_slice(&fs::read(path)?)?;
+        let actual: serde_json::Value = rpc.block("1").await.context(
+            "external chain lost the wallet's anchor; reset the ths wallet and prepare again",
+        )?;
+        anyhow::ensure!(
+            actual["hash"].as_str() == Some(expected.as_str()),
+            "external chain changed at the wallet's birthday; reset the ths wallet and prepare again"
+        );
+    }
     Ok(())
 }
 
