@@ -4,7 +4,7 @@ import { queryKeys } from './queries';
 
 /** Everything a successful money movement invalidates. */
 function walletKeys() {
-  return [[...queryKeys.accounts], ['activity'], [...queryKeys.status], ['blocks']];
+  return [[...queryKeys.accounts], ['activity'], [...queryKeys.status], ['blocks'], ['send-quote']];
 }
 
 function useInvalidateWallet() {

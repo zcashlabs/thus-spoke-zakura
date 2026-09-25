@@ -187,6 +187,19 @@ export const addressSchema = z.object({
 });
 export type AddressInfo = z.infer<typeof addressSchema>;
 
+/** Fee and maximum spendable amount from a server-side dry-run proposal. */
+export const sendQuoteSchema = z.object({
+  available_zatoshi: zatoshi,
+  fee_zatoshi: zatoshi,
+  max_zatoshi: zatoshi,
+});
+export type SendQuote = z.infer<typeof sendQuoteSchema>;
+export interface SendQuoteInput {
+  from_account: number;
+  source_pool: Pool;
+  destination_pool: Pool;
+}
+
 export const seedSchema = z.object({ seed_hex: z.string(), warning: z.string() });
 
 export const apiErrorSchema = z.object({

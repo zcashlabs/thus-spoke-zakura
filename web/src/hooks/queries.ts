@@ -6,6 +6,8 @@ import {
   type AddressInfo,
   type Block,
   type BlockPage,
+  type SendQuote,
+  type SendQuoteInput,
   type Status,
   type Transaction,
 } from '@/lib/api';
@@ -23,6 +25,7 @@ export const queryKeys = {
   transaction: (txid: string) => ['transaction', txid] as const,
   mempool: ['mempool'] as const,
   address: (address: string) => ['address', address] as const,
+  sendQuote: (params: SendQuoteInput) => ['send-quote', params] as const,
 };
 
 export function useStatus(): UseQueryResult<Status> {
@@ -57,6 +60,14 @@ export function useTransaction(txid: string): UseQueryResult<Transaction> {
     queryKey: queryKeys.transaction(txid),
     queryFn: () => api.transaction(txid),
     enabled: txid.length > 0,
+  });
+}
+
+/** The fee depends on the source and the destination pool, not the destination account. */
+export function useSendQuote(params: SendQuoteInput): UseQueryResult<SendQuote> {
+  return useQuery({
+    queryKey: queryKeys.sendQuote(params),
+    queryFn: () => api.sendQuote(params),
   });
 }
 

@@ -26,7 +26,7 @@ use zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS;
 use crate::{
     db::{Account, Activity, Store, TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC},
     rpc::{ChainInfo, NodeRpc},
-    wallet::{PaymentError, RealWallet, regtest_network},
+    wallet::{PaymentError, RealWallet, SendQuote, regtest_network},
 };
 
 #[derive(Clone)]
@@ -258,6 +258,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/accounts", get(accounts))
         .route("/api/v1/activity", get(activity))
         .route("/api/v1/send", post(send))
+        .route("/api/v1/send/quote", post(send_quote))
         .route("/api/v1/faucet", post(faucet))
         .route("/api/v1/faucet/address", post(faucet_address))
         .route("/api/v1/mine", post(mine))
@@ -404,6 +405,38 @@ async fn send(
         &txid,
     )?;
     Ok(Json(confirm_after_mining(&state, pending).await?))
+}
+
+#[derive(Deserialize)]
+struct SendQuoteRequest {
+    from_account: u8,
+    source_pool: String,
+    destination_pool: String,
+}
+async fn send_quote(
+    State(state): State<AppState>,
+    Json(req): Json<SendQuoteRequest>,
+) -> ApiResult<Json<SendQuote>> {
+    require_user_account(req.from_account)?;
+    // The fee depends only on the destination's receiver kinds, which every
+    // account shares, so the source account's own address quotes the same fee.
+    let destination = state.0.store.account(req.from_account)?;
+    let address = if req.destination_pool == "transparent" {
+        destination.transparent_address
+    } else if req.destination_pool == "orchard" {
+        destination.unified_address
+    } else {
+        return Err(ApiError::bad_request(
+            "destination_pool must be transparent or orchard",
+        ));
+    };
+    Ok(Json(
+        state
+            .0
+            .wallet
+            .send_quote(req.from_account, &req.source_pool, &address)
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1028,6 +1061,7 @@ impl From<anyhow::Error> for ApiError {
         Self {
             status: match error.downcast_ref() {
                 Some(PaymentError::TreasuryExhausted) => StatusCode::SERVICE_UNAVAILABLE,
+                Some(PaymentError::InsufficientFunds { .. }) => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             message: error.to_string(),
@@ -1366,6 +1400,18 @@ mod tests {
         assert_eq!(
             ApiError::from(anyhow::Error::new(PaymentError::TreasuryExhausted)).status,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn an_unaffordable_send_is_reported_as_a_client_error() {
+        assert_eq!(
+            ApiError::from(anyhow::Error::new(PaymentError::InsufficientFunds {
+                available: 100_000_000,
+                required: 100_010_000,
+            }))
+            .status,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
     }
 
