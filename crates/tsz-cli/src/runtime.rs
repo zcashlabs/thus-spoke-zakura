@@ -154,8 +154,7 @@ impl Runtime {
                 )?
             );
         } else {
-            println!("{}: {}", name, if running { "running" } else { "stopped" });
-            print_endpoints(name, &endpoints);
+            println!("{}", status_text(name, running, &endpoints));
         }
         Ok(())
     }
@@ -165,7 +164,7 @@ impl Runtime {
         if json {
             println!("{}", serde_json::to_string_pretty(&endpoints)?);
         } else {
-            print_endpoints(name, &endpoints);
+            println!("{}", endpoint_lines(&endpoints));
         }
         Ok(())
     }
@@ -840,7 +839,7 @@ impl Runtime {
         if json {
             println!("{}", serde_json::to_string_pretty(&endpoints)?);
         } else {
-            print_endpoints(name, &endpoints);
+            println!("\n{name} is ready 🌸\n{}", endpoint_lines(&endpoints));
         }
         if !no_open {
             host.open_url(&endpoints.dashboard)?;
@@ -949,11 +948,15 @@ fn wait_for_zakura_tip(
         timeout.as_secs()
     )
 }
-fn print_endpoints(name: &InstanceName, e: &Endpoints) {
-    println!(
-        "\n{name} is ready 🌸\n  Dashboard    {}\n  Zakura RPC   {}\n  lightwalletd {}\n  P2P          {}",
+fn status_text(name: &InstanceName, running: bool, e: &Endpoints) -> String {
+    let state = if running { "running" } else { "stopped" };
+    format!("{name}: {state}\n{}", endpoint_lines(e))
+}
+fn endpoint_lines(e: &Endpoints) -> String {
+    format!(
+        "  Dashboard    {}\n  Zakura RPC   {}\n  lightwalletd {}\n  P2P          {}",
         e.dashboard, e.rpc, e.lightwalletd, e.p2p
-    );
+    )
 }
 fn open_url(url: &str) -> Result<()> {
     let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
@@ -1210,6 +1213,21 @@ mod tests {
         for invalid in ["", "UPPER", "with space", "-start", "end-"] {
             assert!(invalid.parse::<InstanceName>().is_err());
         }
+    }
+
+    #[test]
+    fn status_does_not_report_a_stopped_environment_as_ready() {
+        let endpoints = Endpoints {
+            dashboard: "http://127.0.0.1:1".into(),
+            rpc: "http://127.0.0.1:2".into(),
+            lightwalletd: "http://127.0.0.1:3".into(),
+            p2p: "127.0.0.1:4".into(),
+        };
+        let stopped = status_text(&name("repro"), false, &endpoints);
+        assert!(stopped.starts_with("repro: stopped\n"));
+        assert!(!stopped.contains("ready"));
+        assert!(stopped.contains("Dashboard    http://127.0.0.1:1"));
+        assert!(status_text(&name("repro"), true, &endpoints).starts_with("repro: running\n"));
     }
 
     #[test]
