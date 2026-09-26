@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use rand10::{rand_core::UnwrapErr, rngs::SysRng};
 use secrecy::{ExposeSecret, SecretVec};
 use tokio::sync::Mutex;
+use tonic::transport::{Channel, Endpoint};
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBirthday, WalletRead, WalletWrite,
@@ -49,6 +50,28 @@ use zip321::{Payment, TransactionRequest};
 use crate::db::Account;
 
 type Db = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, UnwrapErr<SysRng>>;
+
+const LIGHTWALLETD_TIMEOUT: Duration = Duration::from_secs(30);
+// lightwalletd's grpc server drops clients that ping more often than every
+// 5 minutes, so a stalled stream is detected after this plus the timeout.
+const LIGHTWALLETD_KEEPALIVE: Duration = Duration::from_secs(6 * 60);
+
+/// times out each request, and uses keepalive pings to drop a connection that
+/// stops responding, so a stalled block stream fails too.
+async fn lightwalletd_client(
+    endpoint: &str,
+    timeout: Duration,
+    keepalive: Duration,
+) -> Result<CompactTxStreamerClient<Channel>> {
+    let channel = Endpoint::from_shared(endpoint.to_owned())?
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .http2_keep_alive_interval(keepalive)
+        .keep_alive_timeout(timeout)
+        .connect()
+        .await?;
+    Ok(CompactTxStreamerClient::new(channel))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PaymentError {
@@ -211,9 +234,18 @@ impl RealWallet {
         })
     }
 
+    async fn client(&self) -> Result<CompactTxStreamerClient<Channel>> {
+        lightwalletd_client(
+            &self.lightwalletd,
+            LIGHTWALLETD_TIMEOUT,
+            LIGHTWALLETD_KEEPALIVE,
+        )
+        .await
+    }
+
     pub async fn sync(&self) -> Result<()> {
         let cache = MemoryBlockCache::default();
-        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        let mut client = self.client().await?;
         let mut db = self.db.lock().await;
         sync::run(&mut client, &regtest_network(), &cache, &mut *db, 100)
             .await
@@ -222,7 +254,7 @@ impl RealWallet {
 
     pub async fn wait_for_height(&self, target: u64, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        let mut client = self.client().await?;
         loop {
             let indexed = client
                 .get_latest_block(ChainSpec::default())
@@ -243,7 +275,7 @@ impl RealWallet {
     }
 
     pub async fn latest_height(&self) -> Result<u64> {
-        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        let mut client = self.client().await?;
         Ok(client
             .get_latest_block(ChainSpec::default())
             .await?
@@ -394,7 +426,7 @@ impl RealWallet {
         let mut raw = vec![];
         tx.write(&mut raw)?;
         drop(db);
-        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        let mut client = self.client().await?;
         let result = client
             .send_transaction(RawTransaction {
                 data: raw,
@@ -475,7 +507,7 @@ impl RealWallet {
         let mut raw = vec![];
         tx.write(&mut raw)?;
         drop(db);
-        let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
+        let mut client = self.client().await?;
         let response = client
             .send_transaction(RawTransaction {
                 data: raw,
@@ -490,5 +522,81 @@ impl RealWallet {
             );
         }
         Ok(txid.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_client_backend::proto::service::{BlockId, BlockRange};
+
+    const LIMIT: Duration = Duration::from_millis(100);
+
+    /// a fake lightwalletd that takes one request and never finishes it. with
+    /// `go_silent` it sends response headers and then stops reading the
+    /// connection, so keepalive pings go unanswered as well.
+    async fn stuck_lightwalletd(go_silent: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let (_request, mut respond) = connection.accept().await.unwrap().unwrap();
+            if go_silent {
+                let headers = http::Response::builder()
+                    .header("content-type", "application/grpc")
+                    .body(())
+                    .unwrap();
+                let _stream = respond.send_response(headers, false).unwrap();
+                let _ = tokio::time::timeout(Duration::from_millis(20), connection.accept()).await;
+                std::future::pending::<()>().await;
+            }
+            while connection.accept().await.is_some() {}
+        });
+        endpoint
+    }
+
+    async fn fails_in_time(call: impl Future<Output = Result<()>>) {
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("lightwalletd call hung instead of timing out");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn gives_up_on_a_request_that_is_never_answered() {
+        let endpoint = stuck_lightwalletd(false).await;
+        fails_in_time(async {
+            lightwalletd_client(&endpoint, LIMIT, LIMIT)
+                .await?
+                .get_latest_block(ChainSpec::default())
+                .await?;
+            Ok(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gives_up_on_a_block_stream_that_stalls() {
+        let endpoint = stuck_lightwalletd(true).await;
+        fails_in_time(async {
+            let block = |height| BlockId {
+                height,
+                hash: vec![],
+            };
+            lightwalletd_client(&endpoint, LIMIT, LIMIT)
+                .await?
+                .get_block_range(BlockRange {
+                    start: Some(block(1)),
+                    end: Some(block(2)),
+                    ..Default::default()
+                })
+                .await?
+                .into_inner()
+                .message()
+                .await?;
+            Ok(())
+        })
+        .await;
     }
 }
