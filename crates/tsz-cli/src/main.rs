@@ -76,6 +76,17 @@ enum Command {
         service: Option<String>,
         #[arg(short, long)]
         follow: bool,
+        /// Print the last LINES lines.
+        #[arg(long, value_name = "LINES", value_parser = clap::value_parser!(u64).range(1..))]
+        tail: Option<u64>,
+        /// Print the first LINES lines and exit.
+        #[arg(
+            long,
+            value_name = "LINES",
+            value_parser = clap::value_parser!(u64).range(1..),
+            conflicts_with_all = ["tail", "follow"]
+        )]
+        head: Option<u64>,
     },
     /// Stop and delete an environment.
     Stop,
@@ -117,7 +128,12 @@ fn main() -> Result<ExitCode> {
         Command::Faucet { address, amount } => {
             runtime.faucet(&cli.name, &address, amount.zatoshi(), cli.json)
         }
-        Command::Logs { service, follow } => runtime.logs(&cli.name, service.as_deref(), follow),
+        Command::Logs {
+            service,
+            follow,
+            tail,
+            head,
+        } => runtime.logs(&cli.name, service.as_deref(), follow, tail, head),
         Command::Stop => runtime.stop(&cli.name),
         Command::Reset { force } => runtime.reset(&cli.name, force),
         Command::List => runtime.list(cli.json),
@@ -241,6 +257,57 @@ mod tests {
         assert!(Cli::try_parse_from(["ths", "update", "1.2.3", "--check"]).is_err());
 
         assert!(Cli::try_parse_from(["ths", "start", "--build"]).is_err());
+    }
+
+    #[test]
+    fn parses_log_line_selection() {
+        let cli = Cli::try_parse_from(["ths", "logs"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Logs {
+                service: None,
+                follow: false,
+                tail: None,
+                head: None,
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["ths", "logs", "zakura", "--tail", "200", "-f"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Logs {
+                service: Some(_),
+                follow: true,
+                tail: Some(200),
+                head: None,
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["ths", "logs", "lightwalletd", "--head", "200"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Logs {
+                service: Some(_),
+                follow: false,
+                tail: None,
+                head: Some(200),
+            })
+        ));
+
+        for invalid in [
+            &["ths", "logs", "--tail", "0"][..],
+            &["ths", "logs", "--head", "0"],
+            &["ths", "logs", "--tail", "-1"],
+            &["ths", "logs", "--head", "1.5"],
+            &["ths", "logs", "--tail", "many"],
+            &["ths", "logs", "--head", "5", "--tail", "5"],
+            &["ths", "logs", "--head", "5", "--follow"],
+        ] {
+            assert!(
+                Cli::try_parse_from(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]

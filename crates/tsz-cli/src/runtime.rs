@@ -250,15 +250,21 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn logs(&self, name: &InstanceName, service: Option<&str>, follow: bool) -> Result<()> {
+    pub fn logs(
+        &self,
+        name: &InstanceName,
+        service: Option<&str>,
+        follow: bool,
+        tail: Option<u64>,
+        head: Option<u64>,
+    ) -> Result<()> {
         let service = service.unwrap_or("app");
-        let mut args = vec!["logs"];
-        if follow {
-            args.push("--follow");
-        }
         let container = format!("{}-{service}", prefix(name));
-        args.push(&container);
-        docker_inherit(&args)
+        if let Some(lines) = head {
+            return print_log_head(&container, lines);
+        }
+        let args = logs_args(&container, follow, tail);
+        docker_inherit(&args.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     pub fn stop(&self, name: &InstanceName) -> Result<()> {
@@ -972,6 +978,62 @@ fn open_url(url: &str) -> Result<()> {
 fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
     docker_inherit(&args)
 }
+fn logs_args(container: &str, follow: bool, tail: Option<u64>) -> Vec<String> {
+    let mut args = vec!["logs".to_owned()];
+    if follow {
+        args.push("--follow".to_owned());
+    }
+    if let Some(lines) = tail {
+        args.extend(["--tail".to_owned(), lines.to_string()]);
+    }
+    args.push(container.to_owned());
+    args
+}
+
+/// docker has no head option, so stream both of its output streams through
+/// one pipe and stop docker once enough lines have been printed.
+fn print_log_head(container: &str, lines: u64) -> Result<()> {
+    let (reader, writer) = std::io::pipe().context("creating log pipe")?;
+    let mut child = Command::new("docker")
+        .args(["logs", container])
+        .stdout(writer.try_clone()?)
+        .stderr(writer)
+        .spawn()
+        .context("running Docker")?;
+    let printed = copy_lines(
+        std::io::BufReader::new(reader),
+        std::io::stdout().lock(),
+        lines,
+    )?;
+    if printed == lines {
+        child.kill().context("stopping Docker")?;
+    }
+    // stopping docker leaves no exit code, so only its own failures count
+    if child.wait()?.code().is_some_and(|code| code != 0) {
+        bail!("docker logs {container} failed");
+    }
+    Ok(())
+}
+
+fn copy_lines(
+    mut reader: impl std::io::BufRead,
+    mut out: impl std::io::Write,
+    limit: u64,
+) -> std::io::Result<u64> {
+    let mut line = Vec::new();
+    let mut copied = 0;
+    while copied < limit {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        out.write_all(&line)?;
+        copied += 1;
+    }
+    out.flush()?;
+    Ok(copied)
+}
+
 fn docker_inherit(args: &[&str]) -> Result<()> {
     docker_command(args, None)
 }
@@ -1017,6 +1079,46 @@ fn docker_logs(container: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn builds_docker_logs_arguments() {
+        assert_eq!(
+            logs_args("tsz-default-app", false, None),
+            ["logs", "tsz-default-app"]
+        );
+        assert_eq!(
+            logs_args("tsz-default-zakura", true, None),
+            ["logs", "--follow", "tsz-default-zakura"]
+        );
+        assert_eq!(
+            logs_args("tsz-default-app", false, Some(200)),
+            ["logs", "--tail", "200", "tsz-default-app"]
+        );
+        assert_eq!(
+            logs_args("tsz-default-lightwalletd", true, Some(200)),
+            [
+                "logs",
+                "--follow",
+                "--tail",
+                "200",
+                "tsz-default-lightwalletd"
+            ]
+        );
+    }
+
+    #[test]
+    fn copies_only_the_requested_leading_lines() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new("one\ntwo\nthree\n");
+        assert_eq!(copy_lines(&mut input, &mut out, 2).unwrap(), 2);
+        assert_eq!(out, b"one\ntwo\n");
+        assert_eq!(input.position(), 8, "read past the requested lines");
+
+        let mut out = Vec::new();
+        let input = std::io::Cursor::new("one\ntwo");
+        assert_eq!(copy_lines(input, &mut out, 5).unwrap(), 2);
+        assert_eq!(out, b"one\ntwo");
+    }
 
     struct RecordingHost {
         events: Arc<Mutex<Vec<String>>>,

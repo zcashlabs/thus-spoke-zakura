@@ -124,6 +124,8 @@ Running `ths` with no command starts the default environment.
 | `ths logs app -f` | Follow dashboard/server logs |
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
+| `ths logs --tail 200 -f` | Print the last 200 app log lines, then follow |
+| `ths logs zakura --head 200` | Print the first 200 node log lines |
 | `ths list` | List known environments |
 | `ths stop` | Stop and delete the environment |
 | `ths reset --force` | Force-delete one environment and all its data |
