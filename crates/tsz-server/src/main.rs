@@ -67,10 +67,16 @@ fn init(data_dir: PathBuf, config_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+const DEVELOPMENT_CREDENTIAL_WARNING: &str = concat!(
+    "WARNING: Never use this mnemonic or private key in production. ",
+    "It is intended purely for development. Using it in production will result in loss of funds."
+);
+
 fn development_credentials(store: &Store) -> Result<String> {
     let secrets = store.development_secrets()?;
     let mut output =
         String::from("\n⚠ DISPOSABLE REGTEST SECRETS — NEVER SEND REAL FUNDS TO THESE KEYS\n");
+    writeln!(output, "{DEVELOPMENT_CREDENTIAL_WARNING}")?;
     writeln!(output, "Mnemonic: {}", secrets.mnemonic)?;
     for account in secrets.accounts {
         writeln!(
@@ -171,6 +177,19 @@ mod tests {
 
         let output = development_credentials(&store).unwrap();
         let mnemonic = store.development_secrets().unwrap().mnemonic;
+        let warning_at = output
+            .find(DEVELOPMENT_CREDENTIAL_WARNING)
+            .expect("startup credentials must warn against production use");
+        let mnemonic_at = output
+            .find("Mnemonic:")
+            .expect("startup credentials must include the mnemonic");
+        assert!(
+            warning_at < mnemonic_at,
+            "the production-use warning must appear next to the mnemonic and spending keys"
+        );
+        assert!(output.contains("Never use this mnemonic or private key in production"));
+        assert!(output.contains("purely for development"));
+        assert!(output.contains("will result in loss of funds"));
         assert!(output.contains(&format!("Mnemonic: {mnemonic}")));
         assert_eq!(
             hex::encode(mnemonic.parse::<bip39::Mnemonic>().unwrap().to_seed("")),

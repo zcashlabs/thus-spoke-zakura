@@ -1411,11 +1411,13 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
+    #[cfg(target_os = "linux")]
+    use super::synchronous_command_output_with_timeout;
     use super::{
         CleanupResource, CommandExecutor, CommandOutput, DockerInspect, DockerResource,
         FailureRoute, RecoveryFailureReporter, RegtestStack, docker_resource_exists_from_inspect,
         published_loopback_port, remaining_timeout, shutdown_after_test_cancellation,
-        synchronous_command_output, synchronous_command_output_with_timeout,
+        synchronous_command_output,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
