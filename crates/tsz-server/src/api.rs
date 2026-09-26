@@ -900,7 +900,7 @@ async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let mut receiver = state.0.events.subscribe();
-    let stream = async_stream::stream! { loop { match receiver.recv().await { Ok(data) => yield Ok(Event::default().event("update").data(data)), Err(broadcast::error::RecvError::Lagged(_)) => continue, Err(_) => break } } };
+    let stream = async_stream::stream! { loop { match receiver.recv().await { Ok(data) => yield Ok(Event::default().event("update").data(data)), Err(broadcast::error::RecvError::Lagged(_)) => yield Ok(Event::default().event("update").data("resync")), Err(_) => break } } };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
@@ -1379,6 +1379,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// a client that falls behind the event buffer must be told to refetch
+    /// everything, since it cannot know which topics it missed.
+    #[tokio::test]
+    async fn a_lagging_event_stream_asks_the_client_to_resync() {
+        use futures_core::Stream;
+
+        let (state, _dir) = state_with_local_wallet();
+        let response = router(state.clone())
+            .oneshot(Request::get("/api/v1/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        for _ in 0..=128 {
+            notify(&state, "chain");
+        }
+
+        let mut received = String::new();
+        while let Ok(Some(Ok(chunk))) = tokio::time::timeout(
+            Duration::from_millis(200),
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_next(cx)),
+        )
+        .await
+        {
+            received.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(received.contains("data: resync"), "{received}");
     }
 
     #[test]
