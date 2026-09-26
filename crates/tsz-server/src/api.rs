@@ -322,7 +322,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     Ok(Json(Status {
         instance: state.0.instance.clone(),
         node: state.0.rpc.chain_info().await.ok(),
-        account_count: state.0.store.user_accounts()?.len(),
+        account_count: usize::from(USER_ACCOUNT_COUNT),
         auto_mine: true,
         network: "Regtest",
         endpoints: PublicEndpoints {
@@ -1150,6 +1150,26 @@ mod tests {
             AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
             dir,
         )
+    }
+
+    #[tokio::test]
+    async fn status_counts_accounts_without_reading_the_seed() {
+        let (state, dir) = state_with_local_wallet();
+        rusqlite::Connection::open(dir.path().join("server.db"))
+            .unwrap()
+            .execute("UPDATE metadata SET value='not-hex' WHERE key='seed'", [])
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["account_count"], 5);
     }
 
     #[tokio::test]

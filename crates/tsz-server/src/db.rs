@@ -136,6 +136,7 @@ impl Store {
         Ok(accounts)
     }
 
+    #[cfg(test)]
     pub fn user_accounts(&self) -> Result<Vec<Account>> {
         Ok(self
             .accounts()?
