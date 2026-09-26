@@ -5,7 +5,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bip39::Mnemonic;
-use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -95,8 +94,7 @@ impl Store {
         let seed = if let Some(seed) = stored_seed {
             hex::decode(seed).context("invalid wallet seed")?
         } else {
-            let mut entropy = [0u8; 32];
-            rand::rng().fill_bytes(&mut entropy);
+            let entropy = [0u8; 32];
             let mnemonic = Mnemonic::from_entropy(&entropy)
                 .context("encoding wallet entropy as a BIP-39 mnemonic")?;
             let seed = mnemonic.to_seed("");
@@ -444,6 +442,22 @@ mod tests {
             .unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(store.account(2).unwrap().orchard_zatoshi, 0);
+    }
+    #[test]
+    fn fresh_stores_derive_the_same_development_accounts() {
+        let first = Store::open(":memory:").unwrap();
+        first.initialize().unwrap();
+        let second = Store::open(":memory:").unwrap();
+        second.initialize().unwrap();
+        assert_eq!(first.accounts().unwrap(), second.accounts().unwrap());
+        assert_eq!(
+            first.mnemonic().unwrap(),
+            format!("{}art", "abandon ".repeat(23))
+        );
+        assert_eq!(
+            first.account(1).unwrap().transparent_address,
+            "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd"
+        );
     }
     #[test]
     fn restores_the_hidden_treasury_for_existing_stores() {
