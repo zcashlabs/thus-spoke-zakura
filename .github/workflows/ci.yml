@@ -65,5 +65,5 @@ jobs:
         run: docker pull zakuracore/zakura:1.4.0
       - name: Build pinned lightwalletd image
         run: docker build -f docker/lightwalletd.Dockerfile -t tsz-recovery-lightwalletd:local .
-      - name: Run live activity recovery regression
-        run: cargo test --locked --profile dev-runtime -p tsz-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
+      - name: Run live activity recovery regressions
+        run: cargo test --locked --profile dev-runtime -p tsz-server --test activity_recovery -- --ignored --test-threads=1

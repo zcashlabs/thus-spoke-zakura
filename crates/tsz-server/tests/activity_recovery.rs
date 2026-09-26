@@ -19,6 +19,7 @@ use support::{
 };
 
 const RECOVERY_IDEMPOTENCY_KEY: &str = "recovery-after-auto-mine-failure";
+const CONCURRENT_IDEMPOTENCY_KEY: &str = "concurrent-identical-send";
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const API_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -59,6 +60,126 @@ struct Status {
 struct SyncStatus {
     state: String,
     fully_scanned_height: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountBalance {
+    id: u8,
+    orchard_zatoshi: u64,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn concurrent_identical_sends_have_one_chain_effect() -> Result<()> {
+    let server = PathBuf::from(env!("CARGO_BIN_EXE_tsz-server"));
+    let mut fixture = RegtestStack::new(server)?;
+    let scenario = async {
+        fixture.start().await?;
+        fixture.assert_running().await?;
+        let client = Client::new();
+        let before_accounts: Vec<AccountBalance> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/accounts",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let before_balance = before_accounts
+            .iter()
+            .find(|account| account.id == 2)
+            .map(|account| account.orchard_zatoshi)
+            .ok_or_else(|| anyhow::anyhow!("destination account is missing"))?;
+        let before_activities: Vec<Activity> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/activity?limit=100",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let request = json!({
+            "from_account": 1,
+            "to_account": 2,
+            "source_pool": "orchard",
+            "destination_pool": "orchard",
+            "amount_zatoshi": 10_000_000,
+            "idempotency_key": CONCURRENT_IDEMPOTENCY_KEY,
+        });
+
+        let (first, second) = tokio::join!(
+            request_json::<Activity>(
+                &client,
+                fixture.api_url(),
+                "/api/v1/send",
+                Some(&request),
+                SEND_TIMEOUT,
+            ),
+            request_json::<Activity>(
+                &client,
+                fixture.api_url(),
+                "/api/v1/send",
+                Some(&request),
+                SEND_TIMEOUT,
+            ),
+        );
+        let first = first?;
+        let second = second?;
+        anyhow::ensure!(
+            first.id == second.id,
+            "requests returned different activities"
+        );
+        anyhow::ensure!(
+            first.txid == second.txid,
+            "requests returned different transactions"
+        );
+        anyhow::ensure!(
+            first.status == "confirmed" && second.status == "confirmed",
+            "requests did not converge on a confirmed payment"
+        );
+
+        let after_accounts: Vec<AccountBalance> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/accounts",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let after_balance = after_accounts
+            .iter()
+            .find(|account| account.id == 2)
+            .map(|account| account.orchard_zatoshi)
+            .ok_or_else(|| anyhow::anyhow!("destination account is missing"))?;
+        anyhow::ensure!(
+            after_balance.checked_sub(before_balance) == Some(10_000_000),
+            "recipient balance changed by more than one payment"
+        );
+        let after_activities: Vec<Activity> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/activity?limit=100",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        anyhow::ensure!(
+            after_activities.len() == before_activities.len() + 1,
+            "concurrent requests did not create exactly one activity"
+        );
+        anyhow::ensure!(
+            after_activities
+                .iter()
+                .filter(|activity| activity.id == first.id && activity.txid == first.txid)
+                .count()
+                == 1,
+            "activity and transaction were not recorded exactly once"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.shutdown().await;
+    preserve_scenario_failure(scenario, cleanup)
 }
 
 #[tokio::test(flavor = "multi_thread")]

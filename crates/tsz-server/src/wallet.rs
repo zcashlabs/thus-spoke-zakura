@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     convert::Infallible,
     io,
     path::Path,
@@ -9,8 +9,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use rand10::{rand_core::UnwrapErr, rngs::SysRng};
+use rusqlite::OptionalExtension;
+use schemerz_rusqlite::RusqliteMigration;
 use secrecy::{ExposeSecret, SecretVec};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBirthday, WalletRead, WalletWrite,
@@ -33,13 +36,17 @@ use zcash_client_backend::{
     sync,
     wallet::OvkPolicy,
 };
-use zcash_client_sqlite::{AccountUuid, WalletDb, util::SystemClock, wallet::init::init_wallet_db};
+use zcash_client_sqlite::{
+    AccountUuid, WalletDb,
+    util::SystemClock,
+    wallet::init::{WalletMigrationError, WalletMigrator, migrations},
+};
 use zcash_keys::{address::Address, keys::UnifiedSpendingKey};
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::Transaction;
 use zcash_proofs::prover::LocalTxProver;
 use zcash_protocol::{
-    ShieldedPool,
+    ShieldedPool, TxId,
     consensus::{BlockHeight, BranchId},
     local_consensus::LocalNetwork,
     value::Zatoshis,
@@ -50,12 +57,71 @@ use crate::db::Account;
 
 type Db = WalletDb<rusqlite::Connection, LocalNetwork, SystemClock, UnwrapErr<SysRng>>;
 
+const PREPARED_PAYMENTS_MIGRATION_ID: Uuid =
+    Uuid::from_u128(0x695f93ac_6935_47e8_8f06_017b1d7ec3aa);
+
+struct PreparedPaymentsMigration;
+
+impl schemerz::Migration<Uuid> for PreparedPaymentsMigration {
+    fn id(&self) -> Uuid {
+        PREPARED_PAYMENTS_MIGRATION_ID
+    }
+
+    fn dependencies(&self) -> HashSet<Uuid> {
+        migrations::V_0_22_0_RC2.iter().copied().collect()
+    }
+
+    fn description(&self) -> &'static str {
+        "Stores prepared payments for durable application retries."
+    }
+}
+
+impl RusqliteMigration for PreparedPaymentsMigration {
+    type Error = WalletMigrationError;
+
+    fn up(&self, db: &rusqlite::Transaction<'_>) -> Result<(), Self::Error> {
+        db.execute_batch(
+            "CREATE TABLE ext_tsz_prepared_payments (
+                activity_id TEXT PRIMARY KEY,
+                txid TEXT NOT NULL,
+                raw_transaction BLOB NOT NULL,
+                expiry_height INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+}
+
+fn prepared_payment(db: &mut Db, activity_id: &str) -> Result<Option<PreparedPayment>> {
+    db.transactionally_with_extension::<_, _, anyhow::Error>(|_, ext| {
+        Ok(ext
+            .query_row(
+                "SELECT txid,raw_transaction,expiry_height FROM ext_tsz_prepared_payments WHERE activity_id=?1",
+                [activity_id],
+                |row| {
+                    Ok(PreparedPayment {
+                        txid: row.get(0)?,
+                        raw_transaction: row.get(1)?,
+                        expiry_height: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PaymentError {
     #[error("insufficient spendable funds (have {available}, need {required} including fees)")]
     InsufficientFunds { available: u64, required: u64 },
     #[error("faucet treasury remains insufficient after replenishment")]
     TreasuryExhausted,
+}
+
+pub struct PreparedPayment {
+    pub txid: String,
+    pub raw_transaction: Vec<u8>,
+    pub expiry_height: u64,
 }
 
 #[derive(Clone)]
@@ -168,11 +234,11 @@ impl RealWallet {
             SystemClock,
             UnwrapErr(SysRng),
         )?;
-        init_wallet_db(
-            &mut db,
-            Some(SecretVec::new(secret.expose_secret().clone())),
-        )
-        .map_err(|e| anyhow::anyhow!("initializing wallet database: {e}"))?;
+        WalletMigrator::new()
+            .with_seed(SecretVec::new(secret.expose_secret().clone()))
+            .with_external_migrations(vec![Box::new(PreparedPaymentsMigration)])
+            .init_or_migrate(&mut db)
+            .map_err(|e| anyhow::anyhow!("initializing wallet database: {e}"))?;
 
         let account_count = db.get_account_ids()?.len();
         if account_count == 0 || account_count == usize::from(crate::db::USER_ACCOUNT_COUNT) {
@@ -289,18 +355,28 @@ impl RealWallet {
         Ok(())
     }
 
-    pub async fn send(
+    pub async fn prepare(
         &self,
+        activity_id: Option<&str>,
         seed_hex: &str,
         from_account: u8,
         source_pool: &str,
         destination: &str,
         amount: u64,
-    ) -> Result<String> {
+    ) -> Result<PreparedPayment> {
+        let mut db = self.db.lock().await;
+        if let Some(activity_id) = activity_id
+            && let Some(prepared) = prepared_payment(&mut db, activity_id)?
+            && (prepared.expiry_height == 0
+                || db
+                    .chain_height()?
+                    .is_none_or(|height| u64::from(u32::from(height)) < prepared.expiry_height))
+        {
+            return Ok(prepared);
+        }
         let account_index = from_account
             .checked_sub(1)
             .context("invalid source account")?;
-        let mut db = self.db.lock().await;
         let account_id = *self
             .account_ids
             .get(account_index as usize)
@@ -375,29 +451,75 @@ impl RealWallet {
                 .map_err(|_| anyhow::anyhow!("invalid account index"))?,
         )
         .map_err(|e| anyhow::anyhow!("deriving spending key: {e:?}"))?;
-        let prover = LocalTxProver::bundled();
-        let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
-            &mut *db,
-            &params,
-            &prover,
-            &prover,
-            &SpendingKeys::from_unified_spending_key(usk),
-            OvkPolicy::Sender,
-            &proposal,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("building transaction: {e}"))?;
-        let txid = *txids.first();
-        let tx = db
-            .get_transaction(txid)?
-            .context("built transaction was not stored")?;
-        let mut raw = vec![];
-        tx.write(&mut raw)?;
-        drop(db);
+        db.transactionally_with_extension::<_, _, anyhow::Error>(|wallet, ext| {
+            let prover = LocalTxProver::bundled();
+            let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
+                wallet,
+                &params,
+                &prover,
+                &prover,
+                &SpendingKeys::from_unified_spending_key(usk),
+                OvkPolicy::Sender,
+                &proposal,
+                None,
+            )
+            .map_err(|error| anyhow::anyhow!("building transaction: {error}"))?;
+            let txid = *txids.first();
+            let tx = wallet
+                .get_transaction(txid)?
+                .context("built transaction was not stored")?;
+            let mut raw_transaction = vec![];
+            tx.write(&mut raw_transaction)?;
+            let prepared = PreparedPayment {
+                txid: txid.to_string(),
+                raw_transaction,
+                expiry_height: u64::from(u32::from(tx.expiry_height())),
+            };
+            if let Some(activity_id) = activity_id {
+                ext.execute(
+                    "INSERT INTO ext_tsz_prepared_payments(activity_id,txid,raw_transaction,expiry_height)
+                     VALUES(?1,?2,?3,?4)
+                     ON CONFLICT(activity_id) DO UPDATE SET
+                       txid=excluded.txid,
+                       raw_transaction=excluded.raw_transaction,
+                       expiry_height=excluded.expiry_height",
+                    rusqlite::params![
+                        activity_id,
+                        prepared.txid,
+                        prepared.raw_transaction,
+                        prepared.expiry_height
+                    ],
+                )?;
+            }
+            Ok(prepared)
+        })
+    }
+
+    pub async fn has_prepared(&self, activity_id: &str) -> Result<bool> {
+        let mut db = self.db.lock().await;
+        Ok(prepared_payment(&mut db, activity_id)?.is_some())
+    }
+
+    pub async fn recover_prepared(&self, txid: &str) -> Result<Option<PreparedPayment>> {
+        let txid = TxId::from_hex(txid).context("invalid wallet transaction id")?;
+        let db = self.db.lock().await;
+        let Some(transaction) = db.get_transaction(txid)? else {
+            return Ok(None);
+        };
+        let mut raw_transaction = vec![];
+        transaction.write(&mut raw_transaction)?;
+        Ok(Some(PreparedPayment {
+            txid: txid.to_string(),
+            raw_transaction,
+            expiry_height: u64::from(u32::from(transaction.expiry_height())),
+        }))
+    }
+
+    pub async fn broadcast(&self, raw_transaction: &[u8]) -> Result<()> {
         let mut client = CompactTxStreamerClient::connect(self.lightwalletd.clone()).await?;
         let result = client
             .send_transaction(RawTransaction {
-                data: raw,
+                data: raw_transaction.to_vec(),
                 height: 0,
             })
             .await?
@@ -408,7 +530,7 @@ impl RealWallet {
                 result.error_message
             );
         }
-        Ok(txid.to_string())
+        Ok(())
     }
 
     pub async fn shield_coinbase(
@@ -490,5 +612,43 @@ impl RealWallet {
             );
         }
         Ok(txid.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn prepared_payment_journal_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = hex::encode([7_u8; 64]);
+        let wallet = RealWallet::open(dir.path(), &seed).unwrap();
+        drop(wallet);
+
+        let db = rusqlite::Connection::open(dir.path().join("wallet.db")).unwrap();
+        db.execute(
+            "INSERT INTO ext_tsz_prepared_payments(activity_id,txid,raw_transaction,expiry_height) VALUES(?1,?2,?3,?4)",
+            rusqlite::params!["activity-1", "txid-1", b"signed transaction", 140_u64],
+        )
+        .unwrap();
+        drop(db);
+
+        let wallet = RealWallet::open(dir.path(), &seed).unwrap();
+        assert!(wallet.has_prepared("activity-1").await.unwrap());
+        assert!(!wallet.has_prepared("missing").await.unwrap());
+        let recovered = wallet
+            .prepare(
+                Some("activity-1"),
+                "invalid seed",
+                0,
+                "invalid pool",
+                "invalid address",
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.txid, "txid-1");
+        assert_eq!(recovered.raw_transaction, b"signed transaction");
     }
 }
