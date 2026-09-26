@@ -107,6 +107,31 @@ ths endpoints --json
 
 Run these commands in a second terminal while the environment is running.
 
+### Run project commands against a settled environment
+
+`ths run` creates a fresh environment, waits until Zakura, lightwalletd, and
+the wallet agree on the chain tip, runs your command, then deletes the runtime
+and its development data:
+
+```console
+ths run -- npm test
+ths run --timeout 300 -- cargo test --test payments
+```
+
+Startup and settlement have a 120-second default timeout. The child command
+has no runtime limit and receives `TSZ_INSTANCE`, `TSZ_NETWORK`, `TSZ_API_URL`,
+`TSZ_ZAKURA_RPC_URL`, `TSZ_LIGHTWALLETD_URL`, `TSZ_LIGHTWALLETD_TLS`, and
+`TSZ_P2P_ADDR`. Seeds and spending keys are not exported; projects that need
+the deterministic development seed can use the explicit `POST /api/v1/dev/seed`
+endpoint. `ths run` supports non-interactive commands; commands that read from
+the controlling terminal are not supported.
+
+To wait for an environment you started separately:
+
+```console
+ths --name protocol wait --timeout 300
+```
+
 ## Useful commands
 
 Running `ths` with no command starts the default environment.
@@ -118,6 +143,8 @@ Running `ths` with no command starts the default environment.
 | `ths status` | Show health and endpoint information |
 | `ths open` | Open the running dashboard |
 | `ths endpoints --json` | Print endpoints for scripts and developer tools |
+| `ths run -- npm test` | Run a command in a fresh, settled environment and delete it afterward |
+| `ths --name protocol wait` | Wait for an existing environment to settle |
 | `ths mine 10` | Mine blocks on the running environment and synchronize its wallet |
 | `ths faucet <ADDRESS>` | Send 1 disposable ZEC to a Regtest unified or transparent address |
 | `ths faucet <ADDRESS> --amount 2.5` | Send a custom amount of up to 5 disposable ZEC |

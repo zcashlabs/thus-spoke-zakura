@@ -56,6 +56,51 @@ struct WalletSyncStatus {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct SettlementStatus {
+    node_height: Option<u64>,
+    lightwalletd_height: Option<u64>,
+    wallet_scanned_height: Option<u64>,
+    wallet_sync_state: &'static str,
+    settled: bool,
+    settlement_blocker: Option<&'static str>,
+}
+
+fn settlement_status(
+    node_height: Option<u64>,
+    lightwalletd_height: Option<u64>,
+    wallet: &WalletSyncStatus,
+) -> SettlementStatus {
+    let settlement_blocker = if node_height.is_none() {
+        Some("node_unavailable")
+    } else if lightwalletd_height.is_none() {
+        Some("lightwalletd_unavailable")
+    } else if wallet.state == "error" {
+        Some("wallet_error")
+    } else if wallet.state != "ready" {
+        Some("wallet_syncing")
+    } else if node_height != lightwalletd_height {
+        Some("height_mismatch")
+    } else if wallet
+        .fully_scanned_height
+        .zip(lightwalletd_height)
+        .is_none_or(|(scanned, tip)| scanned < tip)
+    {
+        Some("wallet_behind")
+    } else {
+        None
+    };
+
+    SettlementStatus {
+        node_height,
+        lightwalletd_height,
+        wallet_scanned_height: wallet.fully_scanned_height,
+        wallet_sync_state: wallet.state,
+        settled: settlement_blocker.is_none(),
+        settlement_blocker,
+    }
+}
+
 impl AppState {
     pub fn new(store: Store, wallet: RealWallet, rpc: String, instance: String) -> Self {
         let (events, _) = broadcast::channel(128);
@@ -304,6 +349,8 @@ struct Status {
     network: &'static str,
     endpoints: PublicEndpoints,
     wallet_sync: WalletSyncStatus,
+    #[serde(flatten)]
+    settlement: SettlementStatus,
 }
 
 #[derive(Serialize)]
@@ -319,9 +366,19 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("127.0.0.1:8080");
+    let (node, lightwalletd_height) =
+        tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_height());
+    let node = node.ok();
+    let lightwalletd_height = lightwalletd_height.ok();
+    let wallet_sync = state.wallet_sync_status().await;
+    let settlement = settlement_status(
+        node.as_ref().map(|chain| chain.blocks),
+        lightwalletd_height,
+        &wallet_sync,
+    );
     Ok(Json(Status {
         instance: state.0.instance.clone(),
-        node: state.0.rpc.chain_info().await.ok(),
+        node,
         account_count: state.0.store.user_accounts()?.len(),
         auto_mine: true,
         network: "Regtest",
@@ -333,7 +390,8 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
                 .unwrap_or_else(|_| "http://127.0.0.1:9067".into()),
             p2p: std::env::var("TSZ_PUBLIC_P2P").unwrap_or_else(|_| "127.0.0.1:18233".into()),
         },
-        wallet_sync: state.wallet_sync_status().await,
+        wallet_sync,
+        settlement,
     }))
 }
 async fn accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<Account>>> {
@@ -1150,6 +1208,89 @@ mod tests {
             AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
             dir,
         )
+    }
+
+    fn wallet_status(
+        state: &'static str,
+        fully_scanned_height: Option<u64>,
+        error: Option<&str>,
+    ) -> WalletSyncStatus {
+        WalletSyncStatus {
+            state,
+            fully_scanned_height,
+            observed_height: fully_scanned_height,
+            last_success_at: Some(123),
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn settlement_requires_all_three_components_at_the_same_tip() {
+        for scanned in [105, 106] {
+            let status = settlement_status(
+                Some(105),
+                Some(105),
+                &wallet_status("ready", Some(scanned), None),
+            );
+            assert!(status.settled);
+            assert_eq!(status.settlement_blocker, None);
+        }
+
+        let status = settlement_status(
+            Some(105),
+            Some(104),
+            &wallet_status("ready", Some(105), None),
+        );
+        assert!(!status.settled);
+        assert_eq!(status.settlement_blocker, Some("height_mismatch"));
+    }
+
+    #[test]
+    fn settlement_reports_the_first_blocking_component() {
+        let cases = [
+            (
+                None,
+                Some(105),
+                wallet_status("ready", Some(105), None),
+                "node_unavailable",
+            ),
+            (
+                Some(105),
+                None,
+                wallet_status("ready", Some(105), None),
+                "lightwalletd_unavailable",
+            ),
+            (
+                Some(105),
+                Some(105),
+                wallet_status("error", Some(104), Some("scan failed")),
+                "wallet_error",
+            ),
+            (
+                Some(105),
+                Some(105),
+                wallet_status("syncing", Some(104), None),
+                "wallet_syncing",
+            ),
+            (
+                Some(105),
+                Some(105),
+                wallet_status("ready", None, None),
+                "wallet_behind",
+            ),
+            (
+                Some(105),
+                Some(105),
+                wallet_status("ready", Some(104), None),
+                "wallet_behind",
+            ),
+        ];
+
+        for (node, lightwalletd, wallet, expected) in cases {
+            let status = settlement_status(node, lightwalletd, &wallet);
+            assert!(!status.settled);
+            assert_eq!(status.settlement_blocker, Some(expected));
+        }
     }
 
     #[tokio::test]
