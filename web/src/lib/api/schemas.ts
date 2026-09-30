@@ -34,7 +34,9 @@ export const activitySchema = z.object({
   id: z.string(),
   kind: z.enum(['send', 'faucet']).catch('send'),
   from_account: z.number().int().nullable().default(null),
-  to_account: z.number().int(),
+  /** Null when the recipient is an address outside the development accounts. */
+  to_account: z.number().int().nullable().default(null),
+  to_address: z.string().nullable().default(null),
   source_pool: poolSchema,
   destination_pool: poolSchema,
   amount_zatoshi: zatoshi,
@@ -44,6 +46,16 @@ export const activitySchema = z.object({
   created_at: z.string(),
 });
 export type Activity = z.infer<typeof activitySchema>;
+
+/** A single-payment ZIP-321 URI as resolved by the server. */
+export const paymentUriSchema = z.object({
+  address: z.string(),
+  destination_pool: poolSchema,
+  to_account: z.number().int().nullable(),
+  amount_zatoshi: zatoshi.nullable(),
+  memo: z.string().nullable(),
+});
+export type PaymentUri = z.infer<typeof paymentUriSchema>;
 
 export const chainInfoSchema = z.object({
   chain: z.string(),

@@ -56,7 +56,8 @@ pub struct Activity {
     pub id: String,
     pub kind: String,
     pub from_account: Option<u8>,
-    pub to_account: u8,
+    pub to_account: Option<u8>,
+    pub to_address: Option<String>,
     pub source_pool: String,
     pub destination_pool: String,
     pub amount_zatoshi: u64,
@@ -64,6 +65,13 @@ pub struct Activity {
     pub block_hash: Option<String>,
     pub status: String,
     pub created_at: String,
+}
+
+/// Where a send is going: a development account, or any other Regtest address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recipient<'a> {
+    Account(u8),
+    Address(&'a str),
 }
 
 #[derive(Clone)]
@@ -85,14 +93,10 @@ impl Store {
                 transparent_address TEXT NOT NULL, transparent_zatoshi INTEGER NOT NULL DEFAULT 0,
                 orchard_zatoshi INTEGER NOT NULL DEFAULT 0
             );
-            CREATE TABLE IF NOT EXISTS activity (
-                id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_account INTEGER, to_account INTEGER NOT NULL,
-                source_pool TEXT NOT NULL, destination_pool TEXT NOT NULL, amount_zatoshi INTEGER NOT NULL,
-                txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
             CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY, activity_id TEXT NOT NULL);
         "#)?;
+        db.execute_batch(ACTIVITY_TABLE)?;
+        migrate_activity_recipients(&db)?;
         let stored_seed = db
             .query_row("SELECT value FROM metadata WHERE key='seed'", [], |r| {
                 r.get::<_, String>(0)
@@ -156,7 +160,7 @@ impl Store {
 
     pub fn activities(&self, limit: u32) -> Result<Vec<Activity>> {
         let db = self.0.lock().unwrap();
-        let mut query = db.prepare("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity ORDER BY rowid DESC LIMIT ?1")?;
+        let mut query = db.prepare("SELECT id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity ORDER BY rowid DESC LIMIT ?1")?;
         Ok(query
             .query_map([limit.min(100)], row_activity)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -164,7 +168,7 @@ impl Store {
 
     pub fn unconfirmed_activities(&self) -> Result<Vec<Activity>> {
         let db = self.0.lock().unwrap();
-        let mut query = db.prepare("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE status!='confirmed' ORDER BY rowid ASC")?;
+        let mut query = db.prepare("SELECT id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE status!='confirmed' ORDER BY rowid ASC")?;
         Ok(query
             .query_map([], row_activity)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -173,7 +177,7 @@ impl Store {
     pub fn activity_for_key(&self, key: &str) -> Result<Option<Activity>> {
         let db = self.0.lock().unwrap();
         db.query_row(
-            "SELECT a.id,a.kind,a.from_account,a.to_account,a.source_pool,a.destination_pool,a.amount_zatoshi,a.txid,a.block_hash,a.status,a.created_at FROM activity a JOIN idempotency i ON i.activity_id=a.id WHERE i.key=?1",
+            "SELECT a.id,a.kind,a.from_account,a.to_account,a.to_address,a.source_pool,a.destination_pool,a.amount_zatoshi,a.txid,a.block_hash,a.status,a.created_at FROM activity a JOIN idempotency i ON i.activity_id=a.id WHERE i.key=?1",
             [key], row_activity,
         ).optional().map_err(Into::into)
     }
@@ -182,7 +186,7 @@ impl Store {
     pub fn transfer(
         &self,
         from: u8,
-        to: u8,
+        to: Recipient<'_>,
         source_pool: &str,
         destination_pool: &str,
         amount: u64,
@@ -203,9 +207,13 @@ impl Store {
             )
             .optional()?
         {
-            return db.query_row("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into);
+            return db.query_row("SELECT id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into);
         }
-        for id in [from, to] {
+        let accounts = match to {
+            Recipient::Account(id) => vec![from, id],
+            Recipient::Address(_) => vec![from],
+        };
+        for id in accounts {
             if !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1)",
                 [id],
@@ -250,7 +258,7 @@ impl Store {
             )
             .optional()?
         {
-            return db.query_row("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into);
+            return db.query_row("SELECT id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into);
         }
         if !db.query_row(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1)",
@@ -260,7 +268,14 @@ impl Store {
             bail!("account {to} does not exist");
         }
         let tx = db.transaction()?;
-        let mut activity = new_activity("faucet", None, to, "orchard", pool, amount);
+        let mut activity = new_activity(
+            "faucet",
+            None,
+            Recipient::Account(to),
+            "orchard",
+            pool,
+            amount,
+        );
         activity.txid = txid.to_owned();
         insert_activity(&tx, &activity, key)?;
         tx.commit()?;
@@ -276,7 +291,7 @@ impl Store {
             "UPDATE activity SET status='confirmed',block_hash=?1 WHERE id=?2",
             params![block_hash, id],
         )?;
-        db.query_row("SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into)
+        db.query_row("SELECT id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at FROM activity WHERE id=?1", [id], row_activity).map_err(Into::into)
     }
 
     pub fn seed(&self) -> Result<String> {
@@ -317,8 +332,42 @@ impl Store {
     }
 }
 
+const ACTIVITY_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS activity (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_account INTEGER, to_account INTEGER,
+        to_address TEXT, source_pool TEXT NOT NULL, destination_pool TEXT NOT NULL,
+        amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+"#;
+
+/// Databases created before address sends have `to_account NOT NULL` and no
+/// `to_address`. SQLite cannot relax a constraint in place, so rebuild the
+/// table, keeping rowid order because activity is listed by rowid.
+fn migrate_activity_recipients(db: &Connection) -> Result<()> {
+    let migrated: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('activity') WHERE name='to_address')",
+        [],
+        |r| r.get(0),
+    )?;
+    if migrated {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    tx.execute_batch("ALTER TABLE activity RENAME TO activity_before_recipients;")?;
+    tx.execute_batch(ACTIVITY_TABLE)?;
+    tx.execute_batch(
+        "INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at)
+         SELECT id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,block_hash,status,created_at
+         FROM activity_before_recipients ORDER BY rowid;
+         DROP TABLE activity_before_recipients;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn insert_activity(db: &Connection, a: &Activity, key: &str) -> Result<()> {
-    db.execute("INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![a.id,a.kind,a.from_account,a.to_account,a.source_pool,a.destination_pool,a.amount_zatoshi,a.txid,a.status])?;
+    db.execute("INSERT INTO activity(id,kind,from_account,to_account,to_address,source_pool,destination_pool,amount_zatoshi,txid,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![a.id,a.kind,a.from_account,a.to_account,a.to_address,a.source_pool,a.destination_pool,a.amount_zatoshi,a.txid,a.status])?;
     db.execute(
         "INSERT INTO idempotency(key,activity_id) VALUES(?1,?2)",
         params![key, a.id],
@@ -328,7 +377,7 @@ fn insert_activity(db: &Connection, a: &Activity, key: &str) -> Result<()> {
 fn new_activity(
     kind: &str,
     from: Option<u8>,
-    to: u8,
+    to: Recipient<'_>,
     source: &str,
     destination: &str,
     amount: u64,
@@ -339,7 +388,14 @@ fn new_activity(
         id,
         kind: kind.into(),
         from_account: from,
-        to_account: to,
+        to_account: match to {
+            Recipient::Account(id) => Some(id),
+            Recipient::Address(_) => None,
+        },
+        to_address: match to {
+            Recipient::Account(_) => None,
+            Recipient::Address(address) => Some(address.to_owned()),
+        },
         source_pool: source.into(),
         destination_pool: destination.into(),
         amount_zatoshi: amount,
@@ -373,13 +429,14 @@ fn row_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
         kind: row.get(1)?,
         from_account: row.get(2)?,
         to_account: row.get(3)?,
-        source_pool: row.get(4)?,
-        destination_pool: row.get(5)?,
-        amount_zatoshi: row.get(6)?,
-        txid: row.get(7)?,
-        block_hash: row.get(8)?,
-        status: row.get(9)?,
-        created_at: row.get(10)?,
+        to_address: row.get(4)?,
+        source_pool: row.get(5)?,
+        destination_pool: row.get(6)?,
+        amount_zatoshi: row.get(7)?,
+        txid: row.get(8)?,
+        block_hash: row.get(9)?,
+        status: row.get(10)?,
+        created_at: row.get(11)?,
     })
 }
 fn derived_full_viewing_key(seed: &[u8], id: u8) -> Result<UnifiedFullViewingKey> {
@@ -604,7 +661,15 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.initialize().unwrap();
         let activity = store
-            .transfer(1, 2, "orchard", "orchard", 12_000, "send", "real-txid")
+            .transfer(
+                1,
+                Recipient::Account(2),
+                "orchard",
+                "orchard",
+                12_000,
+                "send",
+                "real-txid",
+            )
             .unwrap();
         assert_eq!(activity.txid, "real-txid");
         assert_eq!(store.account(1).unwrap().transparent_zatoshi, 0);
@@ -617,7 +682,7 @@ mod tests {
         let pending = store
             .transfer(
                 1,
-                2,
+                Recipient::Account(2),
                 "orchard",
                 "orchard",
                 12_000,
@@ -628,7 +693,7 @@ mod tests {
         let mined = store
             .transfer(
                 1,
-                3,
+                Recipient::Account(3),
                 "orchard",
                 "orchard",
                 13_000,
@@ -652,7 +717,7 @@ mod tests {
         let pending = store
             .transfer(
                 1,
-                2,
+                Recipient::Account(2),
                 "orchard",
                 "orchard",
                 12_000,
@@ -662,10 +727,87 @@ mod tests {
             .unwrap();
         assert!(store.confirm(&pending.id, "").is_err());
         let again = store
-            .transfer(1, 2, "orchard", "orchard", 12_000, "empty-hash", "ignored")
+            .transfer(
+                1,
+                Recipient::Account(2),
+                "orchard",
+                "orchard",
+                12_000,
+                "empty-hash",
+                "ignored",
+            )
             .unwrap();
         assert_eq!(again.id, pending.id);
         assert_eq!(again.status, "broadcast");
         assert_eq!(again.block_hash, None);
+    }
+
+    #[test]
+    fn records_a_send_to_an_external_address() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let activity = store
+            .transfer(
+                1,
+                Recipient::Address("tmExternal"),
+                "orchard",
+                "transparent",
+                12_000,
+                "external-key",
+                "txid-external",
+            )
+            .unwrap();
+        assert_eq!(activity.to_account, None);
+        assert_eq!(activity.to_address.as_deref(), Some("tmExternal"));
+
+        let stored = store.activity_for_key("external-key").unwrap().unwrap();
+        assert_eq!(stored.to_account, None);
+        assert_eq!(stored.to_address.as_deref(), Some("tmExternal"));
+    }
+
+    #[test]
+    fn migrates_activity_created_before_address_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.db");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE activity (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_account INTEGER,
+                     to_account INTEGER NOT NULL, source_pool TEXT NOT NULL,
+                     destination_pool TEXT NOT NULL, amount_zatoshi INTEGER NOT NULL,
+                     txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,status)
+                 VALUES('older','send',1,2,'orchard','orchard',1,'txid-older','confirmed'),
+                       ('newer','send',1,3,'orchard','orchard',2,'txid-newer','broadcast');",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        store.initialize().unwrap();
+        let activity = store.activities(10).unwrap();
+        assert_eq!(
+            activity.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
+        assert_eq!(activity[0].to_account, Some(3));
+        assert_eq!(activity[0].to_address, None);
+
+        store
+            .transfer(
+                1,
+                Recipient::Address("tmExternal"),
+                "orchard",
+                "transparent",
+                3,
+                "after-migration",
+                "txid-after",
+            )
+            .unwrap();
+        store.initialize().unwrap();
+        assert_eq!(store.activities(10).unwrap().len(), 3);
     }
 }

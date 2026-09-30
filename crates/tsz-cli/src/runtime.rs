@@ -98,13 +98,35 @@ struct Activity {
     id: String,
     kind: String,
     from_account: Option<u8>,
-    to_account: u8,
+    /// Null when the recipient is an address outside the development accounts.
+    to_account: Option<u8>,
+    #[serde(default)]
+    to_address: Option<String>,
     source_pool: String,
     destination_pool: String,
     amount_zatoshi: u64,
     txid: String,
     block_hash: Option<String>,
     status: String,
+}
+
+impl Activity {
+    fn recipient(&self) -> String {
+        match (self.to_account, &self.to_address) {
+            (Some(id), _) => format!("account {id}"),
+            (None, Some(address)) => address.clone(),
+            (None, None) => "an unknown recipient".to_owned(),
+        }
+    }
+}
+
+/// A single-payment ZIP-321 URI as resolved by the server.
+#[derive(Deserialize)]
+struct PaymentUri {
+    address: String,
+    destination_pool: String,
+    amount_zatoshi: Option<u64>,
+    memo: Option<String>,
 }
 
 pub struct Runtime {
@@ -310,7 +332,7 @@ impl Runtime {
                 }))
                 .send()
                 .with_context(|| format!("asking environment {name} to fund account {account_id}"));
-            match outcome.and_then(decode_activity) {
+            match outcome.and_then(decode_response::<Activity>) {
                 Ok(activity) => funded.push(activity),
                 Err(error) => failures.push(format!("account {account_id}: {error:#}")),
             }
@@ -325,8 +347,8 @@ impl Runtime {
         } else {
             for activity in &funded {
                 println!(
-                    "Funded account {} with {} ZEC ({} pool) on {name}.",
-                    activity.to_account,
+                    "Funded {} with {} ZEC ({} pool) on {name}.",
+                    activity.recipient(),
                     format_zec(activity.amount_zatoshi),
                     activity.destination_pool
                 );
@@ -359,39 +381,102 @@ impl Runtime {
         memo: Option<&str>,
         json: bool,
     ) -> Result<()> {
-        let app_container = format!("{}-app", prefix(name));
-        if !container_running(&app_container).unwrap_or(false) {
-            bail!("environment {name} is not running; start it with `ths --name {name}`");
-        }
-        let dashboard = self.read_instance(name)?.endpoints.dashboard;
-        let idempotency_key = format!("ths-wallet-send-{}", uuid::Uuid::new_v4());
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?
-            .post(format!("{dashboard}/api/v1/send"))
-            .json(&serde_json::json!({
+        let dashboard = self.running_dashboard(name)?;
+        self.submit_send(
+            name,
+            &dashboard,
+            from,
+            serde_json::json!({
                 "from_account": from,
                 "to_account": to,
                 "source_pool": source_pool,
                 "destination_pool": destination_pool,
                 "amount_zatoshi": amount_zatoshi,
-                "idempotency_key": idempotency_key,
                 "memo": memo,
-            }))
+            }),
+            memo,
+            json,
+        )
+    }
+
+    /// Pays a ZIP-321 URI. The server parses it, so the CLI and the dashboard
+    /// accept exactly the same URIs.
+    pub fn wallet_send_uri(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        source_pool: &str,
+        uri: &str,
+        amount_zatoshi: Option<u64>,
+        json: bool,
+    ) -> Result<()> {
+        let dashboard = self.running_dashboard(name)?;
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?
+            .post(format!("{dashboard}/api/v1/zip321/parse"))
+            .json(&serde_json::json!({ "uri": uri }))
             .send()
-            .with_context(|| {
-                format!("asking environment {name} to send from account {from} to account {to}")
-            })?;
-        let activity = decode_activity(response)?;
+            .with_context(|| format!("asking environment {name} to read the payment URI"))?;
+        let request: PaymentUri = decode_response(response)?;
+        let amount_zatoshi = match (request.amount_zatoshi, amount_zatoshi) {
+            (Some(amount), None) | (None, Some(amount)) => amount,
+            (Some(_), Some(_)) => bail!("the payment URI already sets an amount; omit --amount"),
+            (None, None) => bail!("the payment URI has no amount; pass --amount"),
+        };
+        self.submit_send(
+            name,
+            &dashboard,
+            from,
+            serde_json::json!({
+                "from_account": from,
+                "to_address": request.address,
+                "source_pool": source_pool,
+                "destination_pool": request.destination_pool,
+                "amount_zatoshi": amount_zatoshi,
+                "memo": request.memo,
+            }),
+            request.memo.as_deref(),
+            json,
+        )
+    }
+
+    fn running_dashboard(&self, name: &InstanceName) -> Result<String> {
+        let app_container = format!("{}-app", prefix(name));
+        if !container_running(&app_container).unwrap_or(false) {
+            bail!("environment {name} is not running; start it with `ths --name {name}`");
+        }
+        Ok(self.read_instance(name)?.endpoints.dashboard)
+    }
+
+    fn submit_send(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        from: u8,
+        mut body: serde_json::Value,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        body["idempotency_key"] =
+            serde_json::Value::from(format!("ths-wallet-send-{}", uuid::Uuid::new_v4()));
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()?
+            .post(format!("{dashboard}/api/v1/send"))
+            .json(&body)
+            .send()
+            .with_context(|| format!("asking environment {name} to send"))?;
+        let activity: Activity = decode_response(response)?;
         if json {
             println!("{}", serde_json::to_string_pretty(&activity)?);
         } else {
             println!(
-                "Sent {} ZEC from account {} ({} pool) to account {} ({} pool) on {name}.",
+                "Sent {} ZEC from account {} ({} pool) to {} ({} pool) on {name}.",
                 format_zec(activity.amount_zatoshi),
                 from,
                 activity.source_pool,
-                activity.to_account,
+                activity.recipient(),
                 activity.destination_pool
             );
             if let Some(memo) = memo {
@@ -521,7 +606,9 @@ impl Runtime {
     }
 }
 
-fn decode_activity(response: reqwest::blocking::Response) -> Result<Activity> {
+fn decode_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+) -> Result<T> {
     let status = response.status();
     if !status.is_success() {
         let detail = response

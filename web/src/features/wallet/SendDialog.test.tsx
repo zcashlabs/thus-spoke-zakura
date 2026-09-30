@@ -13,6 +13,9 @@ interface SendBody {
   amount_zatoshi: number;
   idempotency_key: string;
   memo?: string;
+  to_account?: number;
+  to_address?: string;
+  destination_pool?: string;
 }
 
 /** Reads the JSON body of a fetch call without leaning on `any`. */
@@ -27,8 +30,17 @@ const QUOTE = {
   max_zatoshi: 499_990_000,
 };
 
-function sendImpl(quote: typeof QUOTE) {
+/** `parsed` answers `/zip321/parse`; sends echo their recipient back as an activity. */
+function sendImpl(quote: typeof QUOTE, parsed: unknown = null) {
   return (input: RequestInfo | URL, init?: RequestInit) => {
+    if (requestUrl(input).endsWith('/zip321/parse')) {
+      return Promise.resolve(
+        new Response(JSON.stringify(parsed), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }
     if (requestUrl(input).endsWith('/send/quote')) {
       return Promise.resolve(
         new Response(JSON.stringify(quote), {
@@ -43,9 +55,10 @@ function sendImpl(quote: typeof QUOTE) {
           id: 'a',
           kind: 'send',
           from_account: 1,
-          to_account: 2,
+          to_account: requestBody(init).to_account ?? null,
+          to_address: requestBody(init).to_address ?? null,
           source_pool: 'orchard',
-          destination_pool: 'orchard',
+          destination_pool: requestBody(init).destination_pool ?? 'orchard',
           amount_zatoshi: requestBody(init).amount_zatoshi,
           txid: 'f'.repeat(64),
           block_hash: null,
@@ -58,8 +71,8 @@ function sendImpl(quote: typeof QUOTE) {
   };
 }
 
-function mockSend(quote = QUOTE) {
-  return vi.spyOn(globalThis, 'fetch').mockImplementation(sendImpl(quote));
+function mockSend(quote = QUOTE, parsed: unknown = null) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(sendImpl(quote, parsed));
 }
 
 // Filters out the quote fetch the dialog makes on mount.
@@ -179,7 +192,7 @@ describe('SendDialog', () => {
   it('names the accounts and pools being moved between', () => {
     renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
     expect(screen.getByLabelText('From account')).toBeInTheDocument();
-    expect(screen.getByLabelText('Destination account')).toBeInTheDocument();
+    expect(screen.getByLabelText('Destination')).toBeInTheDocument();
     expect(screen.getByLabelText('Source pool')).toBeInTheDocument();
     expect(screen.getByLabelText('Destination pool')).toBeInTheDocument();
   });
@@ -199,7 +212,7 @@ describe('SendDialog', () => {
     // Opening Send from Account 2 used to preselect Account 2 on both sides,
     // which is a self-send that costs a fee and moves nothing.
     expect(screen.getByLabelText('From account')).toHaveTextContent('Account 2');
-    expect(screen.getByLabelText('Destination account')).not.toHaveTextContent('Account 2');
+    expect(screen.getByLabelText('Destination')).not.toHaveTextContent('Account 2');
   });
 
   it('refuses an amount the source account cannot cover', async () => {
@@ -277,5 +290,80 @@ describe('SendDialog', () => {
       <SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} defaultAccountId={1} />,
     );
     expect(screen.getByText(/5 ZEC available in the orchard pool/i)).toBeInTheDocument();
+  });
+
+  async function applyPaymentUri(uri: string) {
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await userEvent.type(screen.getByLabelText('Payment request (optional)'), uri);
+    await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
+  }
+
+  it('fills the form from a pasted zcash: URI and sends to its address with the memo', async () => {
+    fetchMock.mockRestore();
+    fetchMock = mockSend(QUOTE, {
+      address: 'uregtest1external',
+      destination_pool: 'orchard',
+      to_account: null,
+      amount_zatoshi: 25_000_000,
+      memo: 'coffee',
+    });
+    await applyPaymentUri('zcash:uregtest1external?amount=0.25');
+
+    expect(await screen.findByLabelText('Destination address')).toHaveValue('uregtest1external');
+    expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('0.25');
+    expect(screen.getByLabelText('Memo (optional)')).toHaveValue('coffee');
+
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(sendCalls(fetchMock)).toHaveLength(1));
+    expect(body(fetchMock)).toMatchObject({
+      to_address: 'uregtest1external',
+      amount_zatoshi: 25_000_000,
+      destination_pool: 'orchard',
+      memo: 'coffee',
+    });
+    expect(body(fetchMock).to_account).toBeUndefined();
+  });
+
+  it('clears the amount for a URI without one and requires the sender to enter it', async () => {
+    fetchMock.mockRestore();
+    fetchMock = mockSend(QUOTE, {
+      address: 'tmAccount3',
+      destination_pool: 'transparent',
+      to_account: 3,
+      amount_zatoshi: null,
+      memo: null,
+    });
+    await applyPaymentUri('zcash:tmAccount3');
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Destination')).toHaveTextContent('Account 3'),
+    );
+    // The dialog's default of 1 ZEC must not carry over into a request that named no amount.
+    expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('');
+
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    expect(await screen.findByText('Enter an amount.')).toBeInTheDocument();
+    expect(sendCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('shows why a URI was rejected without changing the form', async () => {
+    fetchMock.mockRestore();
+    fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input, init) =>
+        requestUrl(input).endsWith('/zip321/parse')
+          ? Promise.resolve(
+              new Response(
+                JSON.stringify({ error: { message: 'Invalid payment URI', status: 400 } }),
+                { status: 400, headers: { 'content-type': 'application/json' } },
+              ),
+            )
+          : sendImpl(QUOTE)(input, init),
+      );
+    await applyPaymentUri('zcash:?address=a');
+
+    expect(await screen.findByText('Invalid payment URI')).toBeInTheDocument();
+    expect(screen.getByLabelText('Destination')).toHaveTextContent('Account 2');
+    expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1');
   });
 });

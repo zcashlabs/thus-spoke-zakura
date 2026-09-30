@@ -41,7 +41,7 @@ export function FaucetDialog({
       {
         onSuccess: (activity) => {
           toast.success(
-            `Funded Account ${activity.to_account}`,
+            `Funded Account ${values.account_id}`,
             `${formatZecAmount(activity.amount_zatoshi)} confirmed.`,
           );
           onOpenChange(false);

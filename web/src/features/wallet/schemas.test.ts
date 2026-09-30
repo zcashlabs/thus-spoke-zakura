@@ -29,6 +29,37 @@ describe('sendSchema', () => {
     }
   });
 
+  it('requires an address when sending outside the development accounts', () => {
+    const result = sendSchema.safeParse({ ...base, to_account: 'address', to_address: '  ' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['to_address']);
+    }
+  });
+
+  it('accepts a send to an address', () => {
+    const result = sendSchema.safeParse({
+      ...base,
+      to_account: 'address',
+      to_address: ' uregtest1external ',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.to_account).toBe('address');
+      expect(result.data.to_address).toBe('uregtest1external');
+    }
+  });
+
+  it('limits memos to 512 bytes, counting multi-byte characters', () => {
+    expect(sendSchema.safeParse({ ...base, memo: 'a'.repeat(512) }).success).toBe(true);
+    // 'é' is two bytes in UTF-8, so 257 of them exceed the limit at 257 characters.
+    const result = sendSchema.safeParse({ ...base, memo: 'é'.repeat(257) });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['memo']);
+    }
+  });
+
   it('accepts a transfer between two different accounts', () => {
     const result = sendSchema.safeParse(base);
     expect(result.success).toBe(true);

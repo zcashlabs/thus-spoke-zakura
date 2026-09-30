@@ -187,7 +187,7 @@ and Send dialogs, from a script or terminal:
 | Subcommand | What it does |
 | --- | --- |
 | `ths wallet faucet` | Fund one or more accounts from the treasury |
-| `ths wallet send` | Send funds from one account to another, with an optional memo |
+| `ths wallet send` | Send funds from one account to another, with an optional memo, or pay a `zcash:` URI |
 | `ths wallet shield` | Spend one account's transparent funds into another account's Orchard balance |
 | `ths wallet unshield` | Spend one account's Orchard funds into another account's transparent balance |
 
@@ -248,6 +248,26 @@ ths wallet send --from 2 --to 3 --amount 1 --memo "rent for October"
 
 # Rejected: transparent outputs cannot carry a memo
 ths wallet send --from 2 --to 3 --amount 1 --destination-pool transparent --memo "hi"
+```
+
+### `ths wallet send --from <N> --uri <URI> [--amount <ZEC>] [--source-pool <POOL>]`
+
+Pays a single-payment ZIP-321 `zcash:` URI, like the **Payment request** field
+in the dashboard's **Send ZEC** dialog. The URI sets the destination (any
+Regtest unified or transparent address), its pool, and any memo, so `--to`,
+`--destination-pool`, and `--memo` can't be combined with `--uri`. The server
+parses the URI (`POST /api/v1/zip321/parse`), so the CLI and the dashboard
+accept exactly the same URIs.
+
+- `--amount <ZEC>`: required when the URI has no amount, and rejected when it
+  sets one.
+
+```console
+# Pay a request for 0.01 ZEC with the memo "coffee"
+ths wallet send --from 1 --uri "zcash:uregtest1...?amount=0.01&memo=Y29mZmVl"
+
+# A URI without an amount needs --amount
+ths wallet send --from 1 --uri "zcash:tm..." --amount 0.5
 ```
 
 ### `ths wallet shield --from <N> --to <N> --amount <ZEC> [--memo <TEXT>]`
@@ -354,6 +374,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths faucet <ADDRESS> [--amount]` | Send disposable ZEC to any Regtest address |
 | `ths wallet faucet --accounts <LIST> [--amount] [--pool]` | Fund one or more of the five accounts by index |
 | `ths wallet send --from --to --amount [--source-pool] [--destination-pool] [--memo]` | Send between accounts by index, optionally with an Orchard memo |
+| `ths wallet send --from --uri [--amount] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest address |
 | `ths wallet shield --from --to --amount [--memo]` | Spend transparent funds into another account's Orchard balance |
 | `ths wallet unshield --from --to --amount` | Spend Orchard funds into another account's transparent balance |
 | `ths logs [service] [-f]` | Stream or print service logs |
