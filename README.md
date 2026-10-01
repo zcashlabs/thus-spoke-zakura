@@ -2,6 +2,25 @@
 
 Run a complete, private Zcash development network on your computer.
 
+## Documentation
+
+**[Read the book →](https://amiabix.github.io/thus-spoke-zakura-book/)**
+
+It covers starting an instance, what each component owns, accounts and pools,
+funding and sending, mining and wallet synchronization, what an API response
+proves after a lost one, and connecting your own application. There is a
+[`ths` command reference](https://amiabix.github.io/thus-spoke-zakura-book/cli.html),
+a [guide to building from source](https://amiabix.github.io/thus-spoke-zakura-book/development.html),
+and a [troubleshooting appendix](https://amiabix.github.io/thus-spoke-zakura-book/troubleshooting.html).
+The sources live in [`book/`](book/README.md).
+
+Every page is also served as markdown for tools that read rather than browse:
+append `.md` instead of `.html` to any page,
+[`book.md`](https://amiabix.github.io/thus-spoke-zakura-book/book.md) is the
+whole book in one file, and
+[`llms.txt`](https://amiabix.github.io/thus-spoke-zakura-book/llms.txt) indexes
+both.
+
 Thus Spoke Zakura starts everything you need for local experiments:
 
 - a Zakura node on Regtest;
@@ -14,7 +33,7 @@ Thus Spoke Zakura starts everything you need for local experiments:
 Nothing connects to Zcash mainnet or testnet. Every run begins with a fresh
 chain, and pressing Ctrl+C deletes the containers and development data.
 
-![Wallet dashboard with five development accounts](docs/images/wallet.png)
+![Wallet dashboard with five development accounts](book/images/wallet.png)
 
 ## Get started
 
@@ -59,7 +78,7 @@ Open **Wallet**, select **Faucet**, choose an account and amount, and select
 **Add funds**. The faucet creates disposable Regtest ZEC and mines the block
 needed to confirm it.
 
-![Fund an account with the built-in faucet](docs/images/faucet.png)
+![Fund an account with the built-in faucet](book/images/faucet.png)
 
 Faucet requests are limited to 5 ZEC. These coins have no value and work only
 inside this local environment.
@@ -83,7 +102,7 @@ When the destination pool is Orchard, you can add an optional memo of up to
 512 bytes. It is encrypted to the recipient and never shown in the explorer.
 Transparent outputs cannot carry a memo, so the field is disabled for them.
 
-![Send ZEC between development accounts](docs/images/send.png)
+![Send ZEC between development accounts](book/images/send.png)
 
 The same transfer from a terminal:
 
@@ -97,7 +116,7 @@ Select **Mine** from any dashboard page and enter the number of blocks. This is
 useful when testing confirmations, expiry, coinbase maturity, or code that
 reacts to new blocks.
 
-![Mine blocks on the local Regtest network](docs/images/mine.png)
+![Mine blocks on the local Regtest network](book/images/mine.png)
 
 ### Explore blocks and transactions
 
@@ -105,7 +124,7 @@ The **Explorer** lists recent blocks. Search by block height, block hash,
 transaction ID, or transparent address, then open an item to inspect its
 details.
 
-![Local Regtest block explorer](docs/images/explorer.png)
+![Local Regtest block explorer](book/images/explorer.png)
 
 ### Connect your own application
 
@@ -120,7 +139,7 @@ The default instance always binds loopback ports:
 
 If a port is already taken, `ths start` exits and names that port. It does not pick a random host port.
 
-![Network health and runtime endpoints](docs/images/network.png)
+![Network health and runtime endpoints](book/images/network.png)
 
 ```console
 ths endpoints
@@ -189,7 +208,7 @@ Running `ths` with no command starts the default environment.
 | `ths uninstall` | Remove the installed launcher executable |
 
 Everything under `ths wallet` acts on the development wallet held by the
-running `ths` server. See [docs/cli.md](docs/cli.md) for the full command
+running `ths` server. See [book/cli.md](book/cli.md) for the full command
 reference, including every `ths wallet` option, memo rules, and more examples.
 
 Every command accepts `--name` for isolated environments:

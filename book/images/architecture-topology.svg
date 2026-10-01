@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 520" width="912" height="520" role="img" aria-label="Your machine holds the launcher, a browser and your own code; every published port binds to loopback. Inside a private Docker network sit the app, lightwalletd and Zakura containers, each backed by its own volume.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">One instance: three containers, four volumes</text>
+<rect class="zone" x="48" y="72" width="904" height="116" rx="12"/>
+<text class="k" x="64" y="94">YOUR MACHINE</text>
+<rect class="card" x="48.0" y="104" width="282.6666666666667" height="60" rx="8"/>
+<text class="l" x="189.33333333333334" y="131.0" text-anchor="middle">ths launcher</text>
+<text class="s" x="189.33333333333334" y="149.0" text-anchor="middle">starts and deletes it</text>
+<rect class="card" x="358.6666666666667" y="104" width="282.6666666666667" height="60" rx="8"/>
+<text class="l" x="500.0" y="131.0" text-anchor="middle">Browser</text>
+<text class="s" x="500.0" y="149.0" text-anchor="middle">the dashboard</text>
+<rect class="card" x="669.3333333333334" y="104" width="282.6666666666667" height="60" rx="8"/>
+<text class="l" x="810.6666666666667" y="131.0" text-anchor="middle">Your app or scripts</text>
+<text class="s" x="810.6666666666667" y="149.0" text-anchor="middle">HTTP, RPC, gRPC</text>
+<text class="s" x="500" y="220" text-anchor="middle">every published port binds 127.0.0.1 only</text>
+<path class="lead" d="M189.33333333333334 188 L189.33333333333334 236"/>
+<path class="lead" d="M810.6666666666667 188 L810.6666666666667 236"/>
+<rect class="zone" x="48" y="248" width="904" height="152" rx="12"/>
+<text class="k" x="64" y="270">PRIVATE DOCKER NETWORK  tsz-&lt;name&gt;</text>
+<rect class="card-a" x="48.0" y="284" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="189.33333333333334" y="313.0" text-anchor="middle">app</text>
+<text class="s" x="189.33333333333334" y="331.0" text-anchor="middle">tsz-server + React · :8080</text>
+<rect class="card" x="358.6666666666667" y="284" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="500.0" y="313.0" text-anchor="middle">lightwalletd</text>
+<text class="s" x="500.0" y="331.0" text-anchor="middle">compact blocks · :9067</text>
+<rect class="card" x="669.3333333333334" y="284" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="810.6666666666667" y="313.0" text-anchor="middle">zakura</text>
+<text class="s" x="810.6666666666667" y="331.0" text-anchor="middle">Regtest node · :18232</text>
+<path class="flow" d="M330.6666666666667 316 L350.6666666666667 316" marker-end="url(#ar-a)"/>
+<path class="flow" d="M641.3333333333334 316 L661.3333333333334 316" marker-end="url(#ar-a)"/>
+<text class="k" x="500" y="428" text-anchor="middle">VOLUMES — DELETED WITH THE INSTANCE</text>
+<rect class="note" x="48.0" y="444" width="211.0" height="52" rx="8"/>
+<text class="l" x="153.5" y="467.0" text-anchor="middle">wallet</text>
+<text class="s" x="153.5" y="485.0" text-anchor="middle">tsz.db + wallet.db</text>
+<rect class="note" x="279.0" y="444" width="211.0" height="52" rx="8"/>
+<text class="l" x="384.5" y="467.0" text-anchor="middle">lightwalletd</text>
+<text class="s" x="384.5" y="485.0" text-anchor="middle">block cache</text>
+<rect class="note" x="510.0" y="444" width="211.0" height="52" rx="8"/>
+<text class="l" x="615.5" y="467.0" text-anchor="middle">chain</text>
+<text class="s" x="615.5" y="485.0" text-anchor="middle">Zakura state</text>
+<rect class="note" x="741.0" y="444" width="211.0" height="52" rx="8"/>
+<text class="l" x="846.5" y="467.0" text-anchor="middle">config</text>
+<text class="s" x="846.5" y="485.0" text-anchor="middle">zakurad.toml</text>
+</svg>

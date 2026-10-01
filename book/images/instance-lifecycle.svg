@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 412" width="912" height="412" role="img" aria-label="Five startup stages left to right: ths start, checking Docker and images, claiming the fixed loopback ports, starting Zakura then lightwalletd then the app, and ready. A note records that a fresh chain opens near height 103. Below, Ctrl+C or any failure deletes only this instance.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">Starting an instance, and throwing it away</text>
+<rect class="card" x="48.0" y="96" width="161.6" height="64" rx="8"/>
+<text class="l" x="128.8" y="125.0" text-anchor="middle">ths start</text>
+<text class="s" x="128.8" y="143.0" text-anchor="middle">--name, --port-offset</text>
+<rect class="card" x="233.6" y="96" width="161.6" height="64" rx="8"/>
+<text class="l" x="314.4" y="125.0" text-anchor="middle">Check Docker</text>
+<text class="s" x="314.4" y="143.0" text-anchor="middle">all three images</text>
+<rect class="card" x="419.2" y="96" width="161.6" height="64" rx="8"/>
+<text class="l" x="500.0" y="125.0" text-anchor="middle">Claim ports</text>
+<text class="s" x="500.0" y="143.0" text-anchor="middle">fixed, or +offset</text>
+<rect class="card" x="604.8" y="96" width="161.6" height="64" rx="8"/>
+<text class="l" x="685.5999999999999" y="125.0" text-anchor="middle">Start services</text>
+<text class="s" x="685.5999999999999" y="143.0" text-anchor="middle">node, index, app</text>
+<rect class="card-a" x="790.4" y="96" width="161.6" height="64" rx="8"/>
+<text class="l" x="871.1999999999999" y="125.0" text-anchor="middle">Ready</text>
+<text class="s" x="871.1999999999999" y="143.0" text-anchor="middle">endpoints printed</text>
+<path class="flow" d="M209.6 128.0 L225.6 128.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M395.2 128.0 L411.2 128.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M580.8 128.0 L596.8 128.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M766.4 128.0 L782.4 128.0" marker-end="url(#ar-a)"/>
+<rect class="note" x="516" y="202" width="436" height="54" rx="8"/>
+<text class="l" x="734.0" y="226.0" text-anchor="middle">The chain opens near height 103, not 1</text>
+<text class="s" x="734.0" y="244.0" text-anchor="middle">coinbase maturity first, then Account 1 is funded</text>
+<path class="lead" d="M685.5999999999999 160 L685.5999999999999 202"/>
+<path class="lead" d="M871.1999999999999 160 L871.1999999999999 202"/>
+<rect class="card" x="48.0" y="304" width="436.0" height="64" rx="8"/>
+<text class="l" x="266.0" y="333.0" text-anchor="middle">Ctrl+C, or any failure</text>
+<text class="s" x="266.0" y="351.0" text-anchor="middle">at any stage above</text>
+<rect class="card" x="516.0" y="304" width="436.0" height="64" rx="8"/>
+<text class="l" x="734.0" y="333.0" text-anchor="middle">Deletes this instance only</text>
+<text class="s" x="734.0" y="351.0" text-anchor="middle">its containers, its four volumes, its network</text>
+<path class="flow" d="M484.0 336 L508.0 336" marker-end="url(#ar-a)"/>
+<path class="lead" d="M500.0 160 L500.0 276 L128.0 276 L128.0 296"/>
+</svg>

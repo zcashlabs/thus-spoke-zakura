@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 440" width="912" height="440" role="img" aria-label="The web and server sources build the app image, the lightwalletd Dockerfile builds the lightwalletd image, and Zakura is pinned and pulled. ths start refuses to run until all three exist. Editing source changes neither a running container nor an existing image.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">Source reaches a run only through an image</text>
+<rect class="zone" x="48" y="72" width="904" height="116" rx="12"/>
+<text class="k" x="64" y="94">SOURCE IN THIS REPOSITORY</text>
+<rect class="card" x="48.0" y="104" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="189.33333333333334" y="132.0" text-anchor="middle">web/</text>
+<text class="s" x="189.33333333333334" y="150.0" text-anchor="middle">React dashboard</text>
+<rect class="card" x="358.6666666666667" y="104" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="500.0" y="132.0" text-anchor="middle">crates/tsz-server/</text>
+<text class="s" x="500.0" y="150.0" text-anchor="middle">HTTP API and wallet</text>
+<rect class="card" x="669.3333333333334" y="104" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="810.6666666666667" y="139.0" text-anchor="middle">docker/lightwalletd.Dockerfile</text>
+<path class="flow" d="M189.33333333333334 166 L189.33333333333334 236" marker-end="url(#ar-a)"/>
+<path class="flow" d="M500.0 166 L500.0 236" marker-end="url(#ar-a)"/>
+<path class="flow" d="M810.6666666666667 166 L810.6666666666667 236" marker-end="url(#ar-a)"/>
+<text class="a" x="259.33333333333337" y="206" text-anchor="middle">ths build</text>
+<text class="a" x="880.6666666666667" y="206" text-anchor="middle">ths build</text>
+<rect class="zone" x="48" y="236" width="904" height="172" rx="12"/>
+<text class="k" x="64" y="258">IMAGES — THE ONLY THING A RUN USES</text>
+<rect class="card" x="48.0" y="268" width="593.3333333333334" height="60" rx="8"/>
+<text class="l" x="344.6666666666667" y="295.0" text-anchor="middle">app:&lt;version&gt;</text>
+<text class="s" x="344.6666666666667" y="313.0" text-anchor="middle">web/ and the server crate, together</text>
+<rect class="card" x="669.3333333333334" y="268" width="282.6666666666667" height="60" rx="8"/>
+<text class="l" x="810.6666666666667" y="295.0" text-anchor="middle">lightwalletd:&lt;version&gt;</text>
+<text class="s" x="810.6666666666667" y="313.0" text-anchor="middle">from that Dockerfile</text>
+<rect class="card" x="358.6666666666667" y="344" width="282.6666666666667" height="52" rx="8"/>
+<text class="l" x="500.0" y="367.0" text-anchor="middle">zakuracore/zakura:1.4.0</text>
+<text class="s" x="500.0" y="385.0" text-anchor="middle">pinned — ths pull, never built</text>
+<text class="s" x="500" y="432" text-anchor="middle">editing source changes neither a running container nor an existing image</text>
+</svg>

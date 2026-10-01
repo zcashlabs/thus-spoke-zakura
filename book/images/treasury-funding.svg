@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 392" width="912" height="392" role="img" aria-label="A faucet request proposes a payment from the treasury's Orchard pool. With enough spendable funds it broadcasts, records and confirms. Otherwise it mines for maturity, discovers and shields a reward, and retries the proposal.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">A faucet payment, and the detour when funds are short</text>
+<rect class="card" x="48.0" y="92" width="205.0" height="64" rx="8"/>
+<text class="l" x="150.5" y="121.0" text-anchor="middle">Faucet request</text>
+<text class="s" x="150.5" y="139.0" text-anchor="middle">account, pool, amount</text>
+<rect class="card" x="281.0" y="92" width="205.0" height="64" rx="8"/>
+<text class="l" x="383.5" y="121.0" text-anchor="middle">Propose from treasury</text>
+<text class="s" x="383.5" y="139.0" text-anchor="middle">the SDK decides</text>
+<rect class="card" x="514.0" y="92" width="205.0" height="64" rx="8"/>
+<text class="l" x="616.5" y="121.0" text-anchor="middle">Broadcast</text>
+<text class="s" x="616.5" y="139.0" text-anchor="middle">through lightwalletd</text>
+<rect class="card" x="747.0" y="92" width="205.0" height="64" rx="8"/>
+<text class="l" x="849.5" y="121.0" text-anchor="middle">Record + confirm</text>
+<text class="s" x="849.5" y="139.0" text-anchor="middle">txid, then a block</text>
+<path class="flow" d="M253.0 124 L273.0 124" marker-end="url(#ar-a)"/>
+<path class="flow" d="M486.0 124 L506.0 124" marker-end="url(#ar-a)"/>
+<text class="s" x="500.0" y="80" text-anchor="middle">enough funds</text>
+<path class="flow" d="M719.0 124 L739.0 124" marker-end="url(#ar-a)"/>
+<rect class="card" x="48.0" y="244" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="189.33333333333334" y="273.0" text-anchor="middle">Mine for maturity</text>
+<text class="s" x="189.33333333333334" y="291.0" text-anchor="middle">100 confirmations</text>
+<rect class="card" x="358.6666666666667" y="244" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="500.0" y="273.0" text-anchor="middle">Discover the reward</text>
+<text class="s" x="500.0" y="291.0" text-anchor="middle">match the coinbase output</text>
+<rect class="card" x="669.3333333333334" y="244" width="282.6666666666667" height="64" rx="8"/>
+<text class="l" x="810.6666666666667" y="273.0" text-anchor="middle">Shield it</text>
+<text class="s" x="810.6666666666667" y="291.0" text-anchor="middle">into the treasury's Orchard</text>
+<path class="flow" d="M330.6666666666667 276 L350.6666666666667 276" marker-end="url(#ar-a)"/>
+<path class="flow" d="M641.3333333333334 276 L661.3333333333334 276" marker-end="url(#ar-a)"/>
+<path class="flow" d="M341.0 156 L341.0 202 L189.33333333333334 202 L189.33333333333334 236" marker-end="url(#ar-a)"/>
+<text class="s" x="360" y="194" text-anchor="middle">insufficient spendable Orchard funds</text>
+<path class="flow" d="M810.6666666666667 244 L810.6666666666667 218 L426.0 218 L426.0 162" marker-end="url(#ar-a)"/>
+<text class="s" x="700" y="210" text-anchor="middle">retry the proposal</text>
+<text class="s" x="500" y="372" text-anchor="middle">so one faucet call can move the chain by more than one block</text>
+</svg>

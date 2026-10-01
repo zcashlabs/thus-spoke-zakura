@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 428" width="912" height="428" role="img" aria-label="Four triage steps: does the launcher run at all, is this instance up and where, is the node healthy but the wallet stale, and only then a payment you are unsure of.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">Work down the layers; stop at the first one that is wrong</text>
+<rect class="card" x="48.0" y="84" width="436.0" height="62" rx="8"/>
+<text class="l" x="266.0" y="112.0" text-anchor="middle">Does the launcher run?</text>
+<text class="s" x="266.0" y="130.0" text-anchor="middle">ths doctor · ths pull</text>
+<rect class="note" x="516.0" y="84" width="436.0" height="62" rx="8"/>
+<text class="l" x="734.0" y="119.0" text-anchor="middle">Docker daemon, then the images</text>
+<path class="thin" d="M484.0 115 L508.0 115" marker-end="url(#ar-n)"/>
+<path class="lead" d="M138.0 146 L138.0 168"/>
+<rect class="card" x="48.0" y="168" width="436.0" height="62" rx="8"/>
+<text class="l" x="266.0" y="196.0" text-anchor="middle">Is this instance up, and where?</text>
+<text class="s" x="266.0" y="214.0" text-anchor="middle">ths status · ths endpoints --json</text>
+<rect class="note" x="516.0" y="168" width="436.0" height="62" rx="8"/>
+<text class="l" x="734.0" y="203.0" text-anchor="middle">each name is its own instance</text>
+<path class="thin" d="M484.0 199 L508.0 199" marker-end="url(#ar-n)"/>
+<path class="lead" d="M138.0 230 L138.0 252"/>
+<rect class="card" x="48.0" y="252" width="436.0" height="62" rx="8"/>
+<text class="l" x="266.0" y="280.0" text-anchor="middle">Node healthy, balances stale?</text>
+<text class="s" x="266.0" y="298.0" text-anchor="middle">wallet_sync in /api/v1/status</text>
+<rect class="note" x="516.0" y="252" width="436.0" height="62" rx="8"/>
+<text class="l" x="734.0" y="287.0" text-anchor="middle">usually lightwalletd lagging behind</text>
+<path class="thin" d="M484.0 283 L508.0 283" marker-end="url(#ar-n)"/>
+<path class="lead" d="M138.0 314 L138.0 336"/>
+<rect class="card-a" x="48.0" y="336" width="436.0" height="62" rx="8"/>
+<text class="l" x="266.0" y="364.0" text-anchor="middle">Only then: a payment you doubt</text>
+<text class="s" x="266.0" y="382.0" text-anchor="middle">/api/v1/activity, then the chain</text>
+<rect class="note" x="516.0" y="336" width="436.0" height="62" rx="8"/>
+<text class="l" x="734.0" y="371.0" text-anchor="middle">only a keyed payment is safe to repeat</text>
+<path class="thin" d="M484.0 367 L508.0 367" marker-end="url(#ar-n)"/>
+</svg>

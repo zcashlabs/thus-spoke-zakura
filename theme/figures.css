@@ -1,0 +1,18 @@
+/* Figures are drawn a little wider than mdBook's 750px text column. Keep them
+   flush with the column's left edge, so a figure and the numbered list under it
+   share one margin, and let them reach right only as far as the page has room.
+   Centring them with a transform broke that alignment and clipped the last box
+   on the right. */
+.content img {
+  display: block;
+  width: auto;
+  max-width: min(820px, calc(100vw - 38rem));
+  margin: 1.75rem 0 2rem;
+}
+
+/* Narrow windows, or a collapsed sidebar: fall back to the column width. */
+@media (max-width: 1360px) {
+  .content img {
+    max-width: 100%;
+  }
+}

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 412" width="912" height="412" role="img" aria-label="If the call was a send or faucet you chose the idempotency key, so look at the activity: a row with your key can be resent safely, while no row does not prove nothing was broadcast. Mine and address-faucet take no key, so compare the chain instead.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">What a lost response lets you conclude</text>
+<rect class="card-a" x="290" y="80" width="420" height="54" rx="8"/>
+<text class="l" x="500.0" y="104.0" text-anchor="middle">The response never arrived</text>
+<text class="s" x="500.0" y="122.0" text-anchor="middle">which call was it?</text>
+<path class="flow" d="M500 134 L500 158 L266.0 158 L266.0 178" marker-end="url(#ar-a)"/>
+<path class="flow" d="M500 134 L500 158 L734.0 158 L734.0 178" marker-end="url(#ar-a)"/>
+<rect class="card" x="48.0" y="186" width="436.0" height="60" rx="8"/>
+<text class="l" x="266.0" y="213.0" text-anchor="middle">send or faucet</text>
+<text class="s" x="266.0" y="231.0" text-anchor="middle">you chose the idempotency key</text>
+<rect class="card" x="516.0" y="186" width="436.0" height="60" rx="8"/>
+<text class="l" x="734.0" y="213.0" text-anchor="middle">mine or faucet/address</text>
+<text class="s" x="734.0" y="231.0" text-anchor="middle">no key, nothing to replay</text>
+<rect class="card" x="48.0" y="290" width="205.0" height="64" rx="8"/>
+<text class="l" x="150.5" y="319.0" text-anchor="middle">Row with your key</text>
+<text class="s" x="150.5" y="337.0" text-anchor="middle">resend it — no second pay</text>
+<rect class="note" x="281.0" y="290" width="205.0" height="64" rx="8"/>
+<text class="l" x="383.5" y="319.0" text-anchor="middle">No row</text>
+<text class="s" x="383.5" y="337.0" text-anchor="middle">not proof nothing was sent</text>
+<rect class="card" x="516.0" y="290" width="436.0" height="64" rx="8"/>
+<text class="l" x="734.0" y="319.0" text-anchor="middle">Compare the chain</text>
+<text class="s" x="734.0" y="337.0" text-anchor="middle">tip height, or the destination balance</text>
+<path class="lead" d="M150.5 246 L150.5 282"/>
+<path class="lead" d="M383.5 246 L383.5 282"/>
+<path class="lead" d="M734.0 246 L734.0 282"/>
+<text class="s" x="500" y="392" text-anchor="middle">look at GET /api/v1/activity and the chain before calling again</text>
+</svg>

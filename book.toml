@@ -1,0 +1,24 @@
+[book]
+title = "Thus Spoke Zakura"
+description = "A disposable Zcash Regtest network for local development."
+authors = ["Thus Spoke Zakura contributors"]
+language = "en"
+src = "book"
+
+[build]
+build-dir = "site"
+create-missing = false
+
+[output.html]
+additional-css = ["theme/figures.css"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/zcashlabs/thus-spoke-zakura"
+edit-url-template = "https://github.com/zcashlabs/thus-spoke-zakura/edit/main/{path}"
+site-url = "/thus-spoke-zakura-book/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.markdown]

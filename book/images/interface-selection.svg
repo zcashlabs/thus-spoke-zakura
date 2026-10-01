@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 368" width="912" height="368" role="img" aria-label="Wallet facts come from the dashboard HTTP API, node facts from Zakura's JSON-RPC, and compact blocks from lightwalletd's plaintext gRPC. Read the addresses from ths endpoints --json rather than hard-coding the ports.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">Pick the interface that owns the answer</text>
+<rect class="card-a" x="290" y="76" width="420" height="50" rx="8"/>
+<text class="l" x="500.0" y="105.0" text-anchor="middle">Who owns the answer you need?</text>
+<rect class="card" x="48.0" y="164" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="189.33333333333334" y="192.0" text-anchor="middle">Balances and activity</text>
+<text class="s" x="189.33333333333334" y="210.0" text-anchor="middle">accounts, sync state, faucet</text>
+<rect class="card-a" x="48.0" y="262" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="189.33333333333334" y="290.0" text-anchor="middle">Dashboard HTTP API</text>
+<text class="s" x="189.33333333333334" y="308.0" text-anchor="middle">/api/v1/… on :32805</text>
+<path class="lead" d="M189.33333333333334 126 L189.33333333333334 156"/>
+<path class="flow" d="M189.33333333333334 226 L189.33333333333334 254" marker-end="url(#ar-a)"/>
+<rect class="card" x="358.6666666666667" y="164" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="500.0" y="192.0" text-anchor="middle">Chain facts</text>
+<text class="s" x="500.0" y="210.0" text-anchor="middle">tip, blocks, mempool</text>
+<rect class="card-a" x="358.6666666666667" y="262" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="500.0" y="290.0" text-anchor="middle">Zakura JSON-RPC</text>
+<text class="s" x="500.0" y="308.0" text-anchor="middle">on :18232</text>
+<path class="lead" d="M500.0 126 L500.0 156"/>
+<path class="flow" d="M500.0 226 L500.0 254" marker-end="url(#ar-a)"/>
+<rect class="card" x="669.3333333333334" y="164" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="810.6666666666667" y="192.0" text-anchor="middle">Compact blocks</text>
+<text class="s" x="810.6666666666667" y="210.0" text-anchor="middle">for your own light client</text>
+<rect class="card-a" x="669.3333333333334" y="262" width="282.6666666666667" height="62" rx="8"/>
+<text class="l" x="810.6666666666667" y="290.0" text-anchor="middle">lightwalletd gRPC</text>
+<text class="s" x="810.6666666666667" y="308.0" text-anchor="middle">:9067, plaintext</text>
+<path class="lead" d="M810.6666666666667 126 L810.6666666666667 156"/>
+<path class="flow" d="M810.6666666666667 226 L810.6666666666667 254" marker-end="url(#ar-a)"/>
+<text class="s" x="500" y="350" text-anchor="middle">read the real addresses each run from ths endpoints --json</text>
+</svg>

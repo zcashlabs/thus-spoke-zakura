@@ -7,3 +7,6 @@
 *.db-wal
 .DS_Store
 
+/site
+__pycache__/
+.superpowers/

@@ -29,6 +29,28 @@ jobs:
             ([.packages[].name] | any(. == "zcash_keys") | not) and
             ([.packages[].name] | any(. == "zcash_primitives") | not)'
 
+  book:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install mdBook
+        run: |
+          set -euo pipefail
+          version=0.5.2
+          url="https://github.com/rust-lang/mdBook/releases/download/v${version}"
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "${url}/mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" mdbook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: mdbook build
+      - run: python3 tools/build_site.py
+      - run: python3 tests/book_links.py
+      - name: Figures match diagrams/build.py
+        run: |
+          python3 diagrams/build.py
+          git diff --exit-code -- book/images
+
   web:
     runs-on: ubuntu-latest
     defaults:

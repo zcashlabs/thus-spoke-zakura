@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 308" width="912" height="308" role="img" aria-label="ths mine N posts to the mine endpoint, which validates the count, asks Zakura to generate the blocks, waits for lightwalletd to index and the wallet to scan, then returns the block hashes. A failure after generate is not a rollback.">
+<style>
+svg {
+  --bg: #fdfaf8;
+  --ink: #2c2430;
+  --muted: #7a6a7a;
+  --rule: #e0d3da;
+  --surface: #ffffff;
+  --zone: #f7f0f3;
+  --accent: #b24a6e;
+  --accent-soft: #fceef3;
+}
+@media (prefers-color-scheme: dark) {
+  svg {
+    --bg: #1b171f;
+    --ink: #efe8f0;
+    --muted: #a695a6;
+    --rule: #3d3442;
+    --surface: #252030;
+    --zone: #201b27;
+    --accent: #e79ab7;
+    --accent-soft: #3a2331;
+  }
+}
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+       "Helvetica Neue", Arial, sans-serif; fill: var(--ink); }
+.t { font-size: 16px; font-weight: 600; }
+.k { font-size: 11px; font-weight: 600; letter-spacing: .1em; fill: var(--muted); }
+.l { font-size: 14px; }
+.s { font-size: 12px; fill: var(--muted); }
+.a { font-size: 13px; font-weight: 600; fill: var(--accent); }
+.card { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+.card-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.zone { fill: var(--zone); stroke: none; }
+.note { fill: none; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 3; }
+.flow { stroke: var(--accent); stroke-width: 2; fill: none; }
+.thin { stroke: var(--rule); stroke-width: 1.5; fill: none; }
+.lead { stroke: var(--rule); stroke-width: 1; fill: none; stroke-dasharray: 2 4; }
+</style>
+<defs><marker id="ar-a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"/></marker><marker id="ar-n" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7" markerHeight="6" orient="auto"><path d="M0 0 L10 4 L0 8 z" fill="var(--rule)"/></marker></defs>
+<text class="t" x="48" y="46">An explicit mine request</text>
+<rect class="card" x="48.0" y="96" width="161.6" height="68" rx="8"/>
+<text class="l" x="128.8" y="127.0" text-anchor="middle">ths mine N</text>
+<text class="s" x="128.8" y="145.0" text-anchor="middle">or the Mine dialog</text>
+<rect class="card" x="233.6" y="96" width="161.6" height="68" rx="8"/>
+<text class="l" x="314.4" y="127.0" text-anchor="middle">Validate</text>
+<text class="s" x="314.4" y="145.0" text-anchor="middle">1 to 10,000</text>
+<rect class="card-a" x="419.2" y="96" width="161.6" height="68" rx="8"/>
+<text class="l" x="500.0" y="127.0" text-anchor="middle">Zakura generates</text>
+<text class="s" x="500.0" y="145.0" text-anchor="middle">blocks + hashes</text>
+<rect class="card" x="604.8" y="96" width="161.6" height="68" rx="8"/>
+<text class="l" x="685.5999999999999" y="127.0" text-anchor="middle">Index + scan</text>
+<text class="s" x="685.5999999999999" y="145.0" text-anchor="middle">then reconcile</text>
+<rect class="card" x="790.4" y="96" width="161.6" height="68" rx="8"/>
+<text class="l" x="871.1999999999999" y="127.0" text-anchor="middle">Return</text>
+<text class="s" x="871.1999999999999" y="145.0" text-anchor="middle">blocks and hashes</text>
+<path class="flow" d="M209.6 130.0 L225.6 130.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M395.2 130.0 L411.2 130.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M580.8 130.0 L596.8 130.0" marker-end="url(#ar-a)"/>
+<path class="flow" d="M766.4 130.0 L782.4 130.0" marker-end="url(#ar-a)"/>
+<rect class="note" x="240" y="218" width="520" height="54" rx="8"/>
+<text class="l" x="500.0" y="242.0" text-anchor="middle">A failure after generate is not a rollback</text>
+<text class="s" x="500.0" y="260.0" text-anchor="middle">the blocks stay on the chain; the call returns an error</text>
+<path class="lead" d="M500.0 164 L500.0 218"/>
+</svg>

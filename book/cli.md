@@ -1,10 +1,15 @@
-# `ths` CLI reference
+# Appendix A: `ths` CLI reference
 
 `ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
 environment and, once an environment is running, talks to its dashboard API on
 your behalf. This page documents every command in detail, with examples.
 
-For a quick tour of the dashboard itself, see the [README](../README.md).
+Read [Chapter 1](getting-started.md) for an instance's lifecycle, [Chapter
+3](accounts-and-balances.md) for accounts and pools, and [Chapter
+6](architecture/operations.md) before retrying a payment or mine request.
+The examples below demonstrate individual commands; they are not one script
+to run in order. For a worked dashboard flow, see [Chapter
+4](using-the-dashboard.md).
 
 ## Conventions used below
 
@@ -21,9 +26,9 @@ For a quick tour of the dashboard itself, see the [README](../README.md).
   CLI.)
 - Amounts are ZEC decimal strings with up to 8 decimal places, e.g. `1`,
   `0.5`, `2.25000001`. These are disposable Regtest coins with no value.
-- Every command in this reference (other than `start`, `build`, `pull`,
-  `update`, `uninstall`, `list`, and `doctor`) requires a running environment.
-  Start one first with `ths` (or `ths --name <NAME>`).
+- Commands that call the app (`mine`, `faucet`, and `wallet` subcommands) require
+  a running environment. Start one first with `ths` (or `ths --name <NAME>`).
+  `stop` and `reset --force` can remove resources left by an interrupted run.
 
 ---
 
@@ -114,6 +119,12 @@ Stops the named environment and deletes its containers, volumes, and network.
 ths stop
 ```
 
+> Note: `stop` removes the Docker resources but does not signal a `ths start`
+> running in another terminal. That launcher stays in the foreground
+> supervising nothing until you press Ctrl+C there. Prefer Ctrl+C in the
+> launcher's own terminal; use `stop` for an environment whose launcher is
+> already gone.
+
 ### `ths reset --force`
 
 Same as `stop`, but named explicitly as a destructive action; requires
@@ -151,6 +162,24 @@ ths update              # install the latest verified release
 ths update v0.2.0       # install (or roll back to) an exact version
 ths uninstall
 ```
+
+`ths --version` prints the installed version. This book documents `0.2.1`.
+
+`uninstall` removes **only** the executable, and says so. Two things survive
+it: roughly 1.7 GB of Docker images, and the launcher's configuration
+directory, whose path `ths doctor` prints. To remove everything:
+
+```console
+ths stop                 # for each environment still defined; see `ths list`
+ths uninstall
+docker image rm ghcr.io/zcashlabs/thus-spoke-zakura-app:0.2.1 \
+                ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:0.2.1 \
+                zakuracore/zakura:1.4.0
+rm -rf "$(ths doctor --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["config_dir"])')"
+```
+
+Read the config directory path before uninstalling — `ths doctor` will not
+run afterwards.
 
 ### `ths mine <BLOCKS>`
 
@@ -191,9 +220,10 @@ and Send dialogs, from a script or terminal:
 | `ths wallet shield` | Spend one account's transparent funds into another account's Orchard balance |
 | `ths wallet unshield` | Spend one account's Orchard funds into another account's transparent balance |
 
-Every subcommand mines the confirming block automatically and prints the
-resulting transaction ID (and, for `send`, `shield`, and `unshield`, the
-confirming block hash). Pass `--json` for machine-readable output.
+Every subcommand attempts to mine a confirming block and prints the resulting
+transaction ID. If auto-mining fails, activity may remain in `broadcast`
+state; `send`, `shield`, and `unshield` print a confirming block hash when one
+is available. Pass `--json` for machine-readable output.
 
 ### `ths wallet faucet --accounts <LIST> [--amount <ZEC>] [--pool <POOL>]`
 
@@ -318,14 +348,25 @@ account's keys can read it.
   accounts. A viewing-only wallet imported with one account's viewing key can
   decrypt only the memos sent to that account.
 
+Memos here are **write-only**. This environment can send one and can never
+show it to you again: there is no memo column in the activity table, no memo
+field in any API response, and no place in the dashboard that displays one.
+The memo is genuinely in the Orchard output — reading it just has to happen
+elsewhere. `GET /api/v1/accounts` returns a `unified_full_viewing_key` for
+each of Accounts 1–5; import that into a wallet that can decrypt memos, and
+it will show the memos sent to that account.
+
 ### Putting it together: seeding a fresh environment
 
-A typical setup script for a fresh environment might look like:
+A typical setup starts the environment in one terminal:
 
 ```console
-ths --name demo start --no-open &
-sleep 5   # or poll `ths status --name demo` until it reports "running"
+ths --name demo start --no-open
+```
 
+Wait for `demo is ready`, then run these commands in a second terminal:
+
+```console
 ths --name demo wallet faucet --accounts 1,2,3,4,5 --amount 5
 ths --name demo wallet faucet --accounts 2 --amount 1 --pool transparent
 ths --name demo wallet shield --from 2 --to 4 --amount 0.5
@@ -364,6 +405,10 @@ account 1 to account 3, all without opening the dashboard.
 | `ths update [--check]` | Check for or install a newer release |
 | `ths uninstall` | Remove the installed launcher executable |
 
-Every command accepts `--name` for isolated environments; see the
-[README](../README.md#useful-commands) for more on running multiple named
-environments side by side.
+Every command accepts `--name` for isolated environments. For more on running
+them side by side, see [Chapter
+1](getting-started.md#give-another-experiment-its-own-name).
+
+The [troubleshooting appendix](troubleshooting.md) starts from observable
+symptoms; [Chapter 7](connect-an-app.md) shows how to use the same live
+endpoints from your own code.
