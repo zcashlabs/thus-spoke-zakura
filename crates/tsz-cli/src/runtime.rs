@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 const APP_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura-app";
 const ZAKURA_IMAGE: &str = "zakuracore/zakura:1.6.0";
 const LIGHTWALLETD_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd";
+const INSTANCE_LABEL: &str = "com.zakura.tsz.instance";
 
 fn app_image() -> String {
     format!("{APP_IMAGE_REPOSITORY}:{}", env!("CARGO_PKG_VERSION"))
@@ -477,40 +478,81 @@ impl Runtime {
     }
 
     fn delete_instance_resources(&self, name: &InstanceName) -> Result<()> {
+        self.delete_instance_resources_with(name, &DockerCli)
+    }
+
+    fn delete_partial_instance_resources(&self, name: &InstanceName) -> Result<()> {
+        self.delete_instance_resources_with_mode(name, &DockerCli, true)
+    }
+
+    fn delete_instance_resources_with(
+        &self,
+        name: &InstanceName,
+        docker: &impl DockerResourceCommands,
+    ) -> Result<()> {
+        self.delete_instance_resources_with_mode(name, docker, false)
+    }
+
+    fn delete_instance_resources_with_mode(
+        &self,
+        name: &InstanceName,
+        docker: &impl DockerResourceCommands,
+        partial: bool,
+    ) -> Result<()> {
         let prefix = prefix(name);
         let mut failures = Vec::new();
-        for service in ["app", "lightwalletd", "zakura", "init"] {
-            let target = format!("{prefix}-{service}");
-            match container_exists(&target) {
-                Ok(true) => {
-                    if let Err(error) = docker(["rm", "-f", &target]) {
-                        failures.push(format!("container {target}: {error}"));
+        let mut inspect = |kind: &str, target: &str| {
+            let result = owned_resource(docker, kind, target, name)
+                .with_context(|| format!("{kind} {target}"));
+            if partial {
+                match result {
+                    Ok(resource) => Ok(resource),
+                    Err(error) => {
+                        failures.push(format!("{error:#}"));
+                        Ok(None)
                     }
                 }
-                Ok(false) => {}
-                Err(error) => failures.push(format!("container {target}: {error}")),
+            } else {
+                result
+            }
+        };
+        let containers = ["app", "lightwalletd", "zakura", "init"]
+            .into_iter()
+            .map(|service| {
+                let target = format!("{prefix}-{service}");
+                inspect("container", &target)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let volumes = ["chain", "wallet", "lightwalletd", "config"]
+            .into_iter()
+            .map(|suffix| {
+                let volume = format!("{prefix}-{suffix}");
+                inspect("volume", &volume)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let network = inspect("network", &prefix)?;
+
+        for id in containers.into_iter().flatten() {
+            if let Err(error) = docker.run(&["rm", "-f", &id]) {
+                failures.push(format!("container {id}: {error}"));
             }
         }
-        for suffix in ["chain", "wallet", "lightwalletd", "config"] {
-            let volume = format!("{prefix}-{suffix}");
-            if docker_output(["volume", "inspect", &volume]).is_ok()
-                && let Err(error) = docker(["volume", "rm", &volume])
-            {
+        for volume in volumes.into_iter().flatten() {
+            if let Err(error) = docker.run(&["volume", "rm", &volume]) {
                 failures.push(format!("volume {volume}: {error}"));
             }
         }
-        if docker_output(["network", "inspect", &prefix]).is_ok()
-            && let Err(error) = docker(["network", "rm", &prefix])
+        if let Some(id) = network
+            && let Err(error) = docker.run(&["network", "rm", &id])
         {
             failures.push(format!("network {prefix}: {error}"));
         }
-        let dir = self.instance_dir(name);
-        if dir.exists()
-            && let Err(error) = fs::remove_dir_all(&dir)
-        {
-            failures.push(format!("metadata {}: {error}", dir.display()));
-        }
         if failures.is_empty() {
+            let dir = self.instance_dir(name);
+            if dir.exists() {
+                fs::remove_dir_all(&dir)
+                    .with_context(|| format!("removing metadata {}", dir.display()))?;
+            }
             Ok(())
         } else {
             bail!(
@@ -582,24 +624,115 @@ fn prefix(name: &InstanceName) -> String {
     format!("tsz-{name}")
 }
 fn label(name: &InstanceName) -> String {
-    format!("com.zakura.tsz.instance={name}")
+    format!("{INSTANCE_LABEL}={name}")
 }
 
-fn ensure_network(prefix: &str) -> Result<()> {
-    if docker_output(["network", "inspect", prefix]).is_err() {
-        docker(["network", "create", prefix])?;
+trait DockerResourceCommands {
+    fn output(&self, args: &[&str]) -> Result<String>;
+    fn run(&self, args: &[&str]) -> Result<()>;
+}
+
+struct DockerCli;
+
+impl DockerResourceCommands for DockerCli {
+    fn output(&self, args: &[&str]) -> Result<String> {
+        docker_output_args(args)
+    }
+
+    fn run(&self, args: &[&str]) -> Result<()> {
+        docker_inherit(args)
+    }
+}
+
+fn owned_resource(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+) -> Result<Option<String>> {
+    let names = match kind {
+        "container" => docker.output(&["container", "ls", "-a", "--format", "{{.Names}}"])?,
+        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
+        "network" => docker.output(&["network", "ls", "--format", "{{.Name}}"])?,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    };
+    let matches = names
+        .lines()
+        .filter(|candidate| candidate.trim() == target)
+        .count();
+    if matches == 0 {
+        return Ok(None);
+    }
+    if matches > 1 {
+        bail!(
+            "Docker has multiple {kind} resources named {target}; refusing to reuse or delete them"
+        );
+    }
+    let details = docker.output(&[kind, "inspect", target])?;
+    let resources: serde_json::Value = serde_json::from_str(&details)
+        .with_context(|| format!("decoding Docker {kind} {target}"))?;
+    let items = resources
+        .as_array()
+        .with_context(|| format!("Docker returned invalid {kind} {target}"))?;
+    if items.len() != 1 {
+        bail!(
+            "Docker returned {} {kind} resources named {target}",
+            items.len()
+        );
+    }
+    let resource = &items[0];
+    let labels = if kind == "container" {
+        &resource["Config"]["Labels"]
+    } else {
+        &resource["Labels"]
+    };
+    if labels[INSTANCE_LABEL].as_str() != Some(name.0.as_str()) {
+        bail!(
+            "Docker {kind} {target} is not owned by ths instance {name}; refusing to reuse or delete it"
+        );
+    }
+    // Containers and networks have stable IDs; Docker identifies volumes by name.
+    let id_field = if kind == "volume" { "Name" } else { "Id" };
+    let id = resource[id_field]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .with_context(|| format!("Docker {kind} {target} has no {id_field}"))?;
+    Ok(Some(id.to_owned()))
+}
+
+fn ensure_network(prefix: &str, name: &InstanceName) -> Result<()> {
+    ensure_network_with(prefix, name, &DockerCli)
+}
+fn ensure_network_with(
+    prefix: &str,
+    name: &InstanceName,
+    docker: &impl DockerResourceCommands,
+) -> Result<()> {
+    if owned_resource(docker, "network", prefix, name)?.is_none() {
+        docker.run(&["network", "create", "--label", &label(name), prefix])?;
+        owned_resource(docker, "network", prefix, name)?
+            .with_context(|| format!("Docker did not create network {prefix}"))?;
     }
     Ok(())
 }
 fn ensure_volume(volume: &str, name: &InstanceName) -> Result<()> {
-    if docker_output(["volume", "inspect", volume]).is_err() {
-        docker(["volume", "create", "--label", &label(name), volume])?;
+    ensure_volume_with(volume, name, &DockerCli)
+}
+fn ensure_volume_with(
+    volume: &str,
+    name: &InstanceName,
+    docker: &impl DockerResourceCommands,
+) -> Result<()> {
+    if owned_resource(docker, "volume", volume, name)?.is_none() {
+        docker.run(&["volume", "create", "--label", &label(name), volume])?;
+        owned_resource(docker, "volume", volume, name)?
+            .with_context(|| format!("Docker did not create volume {volume}"))?;
     }
     Ok(())
 }
 fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
     let target = format!("{prefix}-zakura");
-    if !container_exists(&target)? {
+    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
         let rpc_bind = loopback_publish(ports.rpc, 18232);
         let p2p_bind = loopback_publish(ports.p2p, 18233);
         docker([
@@ -631,7 +764,7 @@ fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result
 }
 fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
     let target = format!("{prefix}-lightwalletd");
-    if !container_exists(&target)? {
+    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
         let image = lightwalletd_image();
         let lightwalletd_bind = loopback_publish(ports.lightwalletd, 9067);
         docker([
@@ -672,7 +805,7 @@ fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> 
 }
 fn ensure_app(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
     let target = format!("{prefix}-app");
-    if !container_exists(&target)? {
+    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
         let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
         let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
         let public_p2p = format!("127.0.0.1:{}", ports.p2p);
@@ -755,9 +888,6 @@ fn published_port(container: &str, port: &str) -> Result<u16> {
     ])?
     .parse()
     .context("Docker returned an invalid published port")
-}
-fn container_exists(name: &str) -> Result<bool> {
-    Ok(docker_output(["container", "inspect", name]).is_ok())
 }
 fn ensure_image(image: &str) -> Result<()> {
     if docker_output(["image", "inspect", image]).is_err() {
@@ -892,6 +1022,9 @@ impl Shutdown {
 
 trait StartHost {
     fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()>;
+    fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
+        self.delete(runtime, name)
+    }
     fn allocate(
         &self,
         runtime: &Runtime,
@@ -917,6 +1050,10 @@ impl StartHost for DockerHost {
         runtime.delete_instance_resources(name)
     }
 
+    fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
+        runtime.delete_partial_instance_resources(name)
+    }
+
     fn allocate(
         &self,
         runtime: &Runtime,
@@ -931,14 +1068,14 @@ impl StartHost for DockerHost {
         require_free_loopback(ports.rpc)?;
         require_free_loopback(ports.p2p)?;
         require_free_loopback(ports.lightwalletd)?;
-        ensure_network(&prefix)?;
+        ensure_network(&prefix, name)?;
         shutdown.check()?;
         for suffix in ["chain", "wallet", "lightwalletd", "config"] {
             ensure_volume(&format!("{prefix}-{suffix}"), name)?;
         }
         shutdown.check()?;
 
-        if !container_exists(&format!("{prefix}-init"))? {
+        if owned_resource(&DockerCli, "container", &format!("{prefix}-init"), name)?.is_none() {
             docker([
                 "create",
                 "--name",
@@ -1020,7 +1157,7 @@ impl Drop for CleanupOnDrop<'_> {
         if !self.active {
             return;
         }
-        if let Err(error) = self.host.delete(self.runtime, self.name) {
+        if let Err(error) = self.host.delete_partial(self.runtime, self.name) {
             eprintln!("could not delete {}: {error:#}", self.name);
         }
     }
@@ -1040,10 +1177,11 @@ impl Runtime {
             runtime: self,
             name,
             host,
-            active: true,
+            active: false,
         };
         println!("Preparing a fresh {name} environment…");
         host.delete(self, name)?;
+        cleanup.active = true;
         println!("Starting {name}…");
         let endpoints = host.allocate(self, name, shutdown, port_offset)?;
         shutdown.check()?;
@@ -1066,8 +1204,8 @@ impl Runtime {
         }
         host.wait_for_shutdown(shutdown)?;
         println!("\nStopping and deleting {name}…");
-        host.delete(self, name)?;
         cleanup.active = false;
+        host.delete(self, name)?;
         println!("Deleted {name} and all of its development data.");
         Ok(())
     }
@@ -1211,6 +1349,9 @@ fn docker_command(args: &[&str], current_dir: Option<&std::path::Path>) -> Resul
     Ok(())
 }
 fn docker_output<const N: usize>(args: [&str; N]) -> Result<String> {
+    docker_output_args(&args)
+}
+fn docker_output_args(args: &[&str]) -> Result<String> {
     let output = Command::new("docker")
         .args(args)
         .output()
@@ -1236,10 +1377,320 @@ fn docker_logs(container: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    struct RecordingDocker {
+        output: HashMap<String, String>,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl RecordingDocker {
+        fn new(containers: &str, volumes: &str, networks: &str) -> Self {
+            Self {
+                output: HashMap::from([
+                    (
+                        "container ls -a --format {{.Names}}".into(),
+                        containers.into(),
+                    ),
+                    ("volume ls --format {{.Name}}".into(), volumes.into()),
+                    ("network ls --format {{.Name}}".into(), networks.into()),
+                ]),
+                runs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn inspect(&mut self, kind: &str, target: &str, body: &str) {
+            self.output
+                .insert(format!("{kind} inspect {target}"), body.into());
+        }
+    }
+
+    impl DockerResourceCommands for RecordingDocker {
+        fn output(&self, args: &[&str]) -> Result<String> {
+            let command = args.join(" ");
+            self.output
+                .get(&command)
+                .cloned()
+                .ok_or_else(|| anyhow!("unexpected Docker read: {command}"))
+        }
+
+        fn run(&self, args: &[&str]) -> Result<()> {
+            self.runs.lock().unwrap().push(args.join(" "));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn foreign_volume_collision_preserves_all_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let mut docker = RecordingDocker::new("tsz-alpha-app", "tsz-alpha-wallet", "");
+        docker.inspect(
+            "container",
+            "tsz-alpha-app",
+            r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.tsz.instance":"alpha"}}}]"#,
+        );
+        docker.inspect(
+            "volume",
+            "tsz-alpha-wallet",
+            r#"[{"Name":"tsz-alpha-wallet","Labels":{"com.zakura.tsz.instance":"other"}}]"#,
+        );
+
+        let error = runtime
+            .delete_instance_resources_with(&name("alpha"), &docker)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+        assert!(docker.runs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_startup_cleanup_removes_only_owned_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let metadata = runtime.instance_dir(&name("alpha"));
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(metadata.join("instance.json"), "partial startup").unwrap();
+        let mut docker = RecordingDocker::new("", "tsz-alpha-chain\ntsz-alpha-wallet", "tsz-alpha");
+        docker.inspect(
+            "volume",
+            "tsz-alpha-chain",
+            r#"[{"Name":"tsz-alpha-chain","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#,
+        );
+        docker.inspect(
+            "volume",
+            "tsz-alpha-wallet",
+            r#"[{"Name":"tsz-alpha-wallet","Labels":{"com.zakura.tsz.instance":"other"}}]"#,
+        );
+        docker.inspect(
+            "network",
+            "tsz-alpha",
+            r#"[{"Id":"owned-network","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#,
+        );
+
+        let error = runtime
+            .delete_instance_resources_with_mode(&name("alpha"), &docker, true)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+        assert_eq!(
+            *docker.runs.lock().unwrap(),
+            ["volume rm tsz-alpha-chain", "network rm owned-network"]
+        );
+        assert_eq!(
+            fs::read_to_string(metadata.join("instance.json")).unwrap(),
+            "partial startup"
+        );
+    }
+
+    #[test]
+    fn foreign_container_collision_is_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let mut docker = RecordingDocker::new("tsz-alpha-app", "", "");
+        docker.inspect(
+            "container",
+            "tsz-alpha-app",
+            r#"[{"Id":"foreign-container","Config":{"Labels":{"com.zakura.tsz.instance":"other"}}}]"#,
+        );
+
+        let error = runtime
+            .delete_instance_resources_with(&name("alpha"), &docker)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+        assert!(docker.runs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn owned_resources_still_clean_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let mut docker = RecordingDocker::new("tsz-alpha-app", "tsz-alpha-wallet", "tsz-alpha");
+        docker.inspect(
+            "container",
+            "tsz-alpha-app",
+            r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.tsz.instance":"alpha"}}}]"#,
+        );
+        docker.inspect(
+            "volume",
+            "tsz-alpha-wallet",
+            r#"[{"Name":"tsz-alpha-wallet","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#,
+        );
+        docker.inspect(
+            "network",
+            "tsz-alpha",
+            r#"[{"Id":"owned-network","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#,
+        );
+
+        runtime
+            .delete_instance_resources_with(&name("alpha"), &docker)
+            .unwrap();
+
+        assert_eq!(
+            *docker.runs.lock().unwrap(),
+            [
+                "rm -f owned-container",
+                "volume rm tsz-alpha-wallet",
+                "network rm owned-network",
+            ]
+        );
+    }
+
+    #[test]
+    fn unlabeled_network_collision_preserves_data_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let metadata = runtime.instance_dir(&name("alpha"));
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(metadata.join("instance.json"), "important data").unwrap();
+        let mut docker = RecordingDocker::new("tsz-alpha-app", "tsz-alpha-wallet", "tsz-alpha");
+        docker.inspect(
+            "container",
+            "tsz-alpha-app",
+            r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.tsz.instance":"alpha"}}}]"#,
+        );
+        docker.inspect(
+            "volume",
+            "tsz-alpha-wallet",
+            r#"[{"Name":"tsz-alpha-wallet","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#,
+        );
+        docker.inspect(
+            "network",
+            "tsz-alpha",
+            r#"[{"Id":"old-network","Labels":{}}]"#,
+        );
+
+        let error = runtime
+            .delete_instance_resources_with(&name("alpha"), &docker)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+        assert!(docker.runs.lock().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(metadata.join("instance.json")).unwrap(),
+            "important data"
+        );
+    }
+
+    #[test]
+    fn new_networks_are_labeled_for_owned_cleanup() {
+        struct NewNetwork(AtomicBool);
+
+        impl DockerResourceCommands for NewNetwork {
+            fn output(&self, args: &[&str]) -> Result<String> {
+                match args {
+                    ["network", "ls", "--format", "{{.Name}}"] => {
+                        Ok(if self.0.load(Ordering::SeqCst) {
+                            "tsz-alpha".into()
+                        } else {
+                            String::new()
+                        })
+                    }
+                    ["network", "inspect", "tsz-alpha"] => Ok(
+                        r#"[{"Id":"owned-network","Labels":{"com.zakura.tsz.instance":"alpha"}}]"#
+                            .into(),
+                    ),
+                    _ => bail!("unexpected Docker read: {args:?}"),
+                }
+            }
+
+            fn run(&self, args: &[&str]) -> Result<()> {
+                assert_eq!(
+                    args,
+                    [
+                        "network",
+                        "create",
+                        "--label",
+                        "com.zakura.tsz.instance=alpha",
+                        "tsz-alpha"
+                    ]
+                );
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let docker = NewNetwork(AtomicBool::new(false));
+
+        ensure_network_with("tsz-alpha", &name("alpha"), &docker).unwrap();
+        assert!(docker.0.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn duplicate_network_names_are_rejected() {
+        let docker = RecordingDocker::new("", "", "tsz-alpha\ntsz-alpha");
+
+        let error = ensure_network_with("tsz-alpha", &name("alpha"), &docker).unwrap_err();
+
+        assert!(
+            error.to_string().contains("multiple network resources"),
+            "{error:#}"
+        );
+        assert!(docker.runs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn volume_create_does_not_accept_a_racing_foreign_volume() {
+        struct RacingVolume(AtomicBool);
+
+        impl DockerResourceCommands for RacingVolume {
+            fn output(&self, args: &[&str]) -> Result<String> {
+                match args {
+                    ["volume", "ls", "--format", "{{.Name}}"] => Ok(if self.0.load(Ordering::SeqCst) {
+                        "tsz-alpha-wallet".into()
+                    } else {
+                        String::new()
+                    }),
+                    ["volume", "inspect", "tsz-alpha-wallet"] => Ok(
+                        r#"[{"Name":"tsz-alpha-wallet","Labels":{"com.zakura.tsz.instance":"other"}}]"#.into(),
+                    ),
+                    _ => bail!("unexpected Docker read: {args:?}"),
+                }
+            }
+
+            fn run(&self, args: &[&str]) -> Result<()> {
+                assert_eq!(
+                    args,
+                    [
+                        "volume",
+                        "create",
+                        "--label",
+                        "com.zakura.tsz.instance=alpha",
+                        "tsz-alpha-wallet"
+                    ]
+                );
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let error = ensure_volume_with(
+            "tsz-alpha-wallet",
+            &name("alpha"),
+            &RacingVolume(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not owned"), "{error:#}");
+    }
 
     struct RecordingHost {
         events: Arc<Mutex<Vec<String>>>,
+        initial_delete_error: bool,
         wait_ready_result: Result<(), String>,
         open_url_result: Result<(), String>,
         interrupt_before_ready: bool,
@@ -1251,6 +1702,7 @@ mod tests {
             (
                 Self {
                     events: events.clone(),
+                    initial_delete_error: false,
                     wait_ready_result: Ok(()),
                     open_url_result: Ok(()),
                     interrupt_before_ready: false,
@@ -1267,6 +1719,9 @@ mod tests {
     impl StartHost for RecordingHost {
         fn delete(&self, _runtime: &Runtime, name: &InstanceName) -> Result<()> {
             self.push(&format!("delete:{name}"));
+            if self.initial_delete_error {
+                bail!("resource collision");
+            }
             Ok(())
         }
 
@@ -1329,6 +1784,21 @@ mod tests {
 
     fn name(value: &str) -> InstanceName {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn initial_cleanup_failure_does_not_retry_on_drop() {
+        let (mut host, events) = RecordingHost::new();
+        host.initial_delete_error = true;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+
+        let error = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("resource collision"));
+        assert_eq!(*events.lock().unwrap(), ["delete:alpha"]);
     }
 
     #[test]
