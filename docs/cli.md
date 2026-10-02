@@ -1,8 +1,10 @@
 # `ths` CLI reference
 
-`ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
-environment and, once an environment is running, talks to its dashboard API on
-your behalf. This page documents every command in detail, with examples.
+`ths` is the Thus Spoke Zakura launcher. It manages a local Regtest environment
+using a Docker node, a local Zakura executable, or a node you started on
+localhost. The app and lightwalletd run in Docker in all modes. Once an
+environment is running, the launcher talks to its dashboard API on your behalf.
+This page documents every command in detail, with examples.
 
 For a quick tour of the dashboard itself, see the [README](../README.md).
 
@@ -21,9 +23,9 @@ For a quick tour of the dashboard itself, see the [README](../README.md).
   CLI.)
 - Amounts are ZEC decimal strings with up to 8 decimal places, e.g. `1`,
   `0.5`, `2.25000001`. These are disposable Regtest coins with no value.
-- Every command in this reference (other than `start`, `build`, `pull`,
-  `update`, `uninstall`, `list`, and `doctor`) requires a running environment.
-  Start one first with `ths` (or `ths --name <NAME>`).
+- Wallet, mining, faucet, and dashboard commands require a running environment.
+  Start one first with `ths` (or `ths --name <NAME>`). Lifecycle and diagnostic
+  commands can also operate on stopped or prepared environments.
 
 ---
 
@@ -32,8 +34,10 @@ For a quick tour of the dashboard itself, see the [README](../README.md).
 ### `ths` / `ths start`
 
 Starts a fresh environment in the foreground and opens the dashboard in your
-browser. Interrupting with Ctrl+C stops the environment and deletes its chain,
-wallet, keys, and Docker volumes.
+browser. By default, interrupting with Ctrl+C stops the environment and deletes
+its chain, wallet, keys, and Docker volumes. Local-binary mode has the same
+managed lifecycle; attaching to a self-managed localhost node instead preserves
+that node and the prepared wallet for reattachment.
 
 ```console
 ths
@@ -46,7 +50,30 @@ The default loopback ports are dashboard `32805`, Zakura RPC `18232`, P2P
 each host port (default: `0`). Startup fails and names an occupied port
 instead of selecting a random port.
 
-### `ths build [--dev]`
+Use `--zakura-bin /path/to/zakurad` to launch your own build, or
+`--zakura-rpc http://127.0.0.1:<port>` to attach to a previously prepared local
+node. These flags are mutually exclusive. In attach mode, `--port-offset`
+shifts only dashboard and lightwalletd ports, not the node's existing RPC/P2P
+ports. Remote nodes are not supported. See
+[Test a local Zakura build](../README.md#test-a-local-zakura-build) for setup
+and compatibility requirements.
+
+### `ths prepare --zakura-rpc <URL>`
+
+Prepares a persistent wallet and matching configuration for a node you will
+start yourself. Accepts only `http://127.0.0.1:<port>` or
+`http://localhost:<port>`. Start Zakura with the printed configuration, then
+attach using the same instance name and RPC URL:
+
+```console
+ths --name local prepare --zakura-rpc http://127.0.0.1:18232
+/path/to/zakurad --config /printed/path/zakurad.toml start
+ths --name local start --zakura-rpc http://127.0.0.1:18232
+```
+
+`--json` emits only instance metadata on stdout; setup details go to stderr.
+
+### `ths build [--dev] [--without-zakura]`
 
 Builds the runtime Docker images from the current source checkout (for
 development from a clone, not needed for the installed release).
@@ -54,15 +81,17 @@ development from a clone, not needed for the installed release).
 ```console
 ths build             # release-optimized images
 ths build --dev       # keep workspace Rust code unoptimized for faster rebuilds
+ths build --dev --without-zakura # build only companions for a local node
 ```
 
-### `ths pull`
+### `ths pull [--without-zakura]`
 
 Pulls the exact runtime images that match this launcher's version, instead of
 building them locally.
 
 ```console
 ths pull
+ths pull --without-zakura # only the app and lightwalletd images
 ```
 
 ### `ths status [--json]`
@@ -106,9 +135,14 @@ ths logs zakura -f             # follow node logs
 ths logs lightwalletd --follow # follow lightwalletd logs
 ```
 
+In local-binary mode, `logs zakura` reads the native node log. For a
+self-managed node, use the terminal or debugger that launched it.
+
 ### `ths stop`
 
 Stops the named environment and deletes its containers, volumes, and network.
+For an attached localhost node, it removes only companion containers/network;
+the node and prepared wallet/indexing data remain available for reattachment.
 
 ```console
 ths stop
@@ -118,6 +152,9 @@ ths stop
 
 Same as `stop`, but named explicitly as a destructive action; requires
 `--force` since it permanently deletes chain, wallet, and seed data.
+For an attached localhost node, it deletes only the ths wallet/indexing data,
+never the self-managed node's process, configuration, or chain. Prepare again
+and restart your node with the new configuration before attaching.
 
 ```console
 ths reset --force

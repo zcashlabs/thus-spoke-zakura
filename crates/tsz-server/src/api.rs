@@ -70,13 +70,13 @@ struct WalletSyncStatus {
 }
 
 impl AppState {
-    pub fn new(store: Store, wallet: RealWallet, rpc: String, instance: String) -> Self {
+    pub fn new(store: Store, wallet: RealWallet, rpc: NodeRpc, instance: String) -> Self {
         let (events, _) = broadcast::channel(128);
         let accounts = store.accounts().unwrap_or_default();
         Self(Arc::new(Inner {
             store,
             wallet,
-            rpc: NodeRpc::new(rpc),
+            rpc,
             instance,
             events,
             payments: Mutex::new(()),
@@ -105,9 +105,22 @@ impl AppState {
         self.0.wallet_snapshot.read().await.status.clone()
     }
 
+    async fn validate_chain_identity(&self) -> anyhow::Result<()> {
+        let result = self.0.rpc.validate_chain_anchor().await;
+        if let Err(error) = &result {
+            let mut snapshot = self.0.wallet_snapshot.write().await;
+            snapshot.status.state = "error";
+            snapshot.status.error = Some(error.to_string());
+            drop(snapshot);
+            notify(self, "sync");
+        }
+        result
+    }
+
     async fn synchronize_wallet(&self, target_height: Option<u64>) -> anyhow::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(120);
         let _guard = tokio::time::timeout_at(deadline, self.0.wallet_sync.lock()).await?;
+        self.validate_chain_identity().await?;
 
         {
             let mut snapshot = self.0.wallet_snapshot.write().await;
@@ -154,6 +167,7 @@ impl AppState {
     }
 
     async fn refresh_wallet_snapshot(&self) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         let mut accounts = self.0.store.accounts()?;
         self.0.wallet.apply_balances(&mut accounts).await?;
         let scanned = self.0.wallet.scanned_checkpoint().await?;
@@ -186,6 +200,7 @@ impl AppState {
     }
 
     async fn sync_if_chain_advanced(&self) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         let observed = self.0.rpc.checkpoint().await?;
         let status = self.0.wallet_snapshot.read().await.status.clone();
         let settled = status.state == "ready"
@@ -305,16 +320,21 @@ pub async fn dependencies_ready(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn health(State(state): State<AppState>) -> Response {
+    let identity_valid = state.validate_chain_identity().await.is_ok();
     let node = state.0.rpc.chain_info().await.ok();
     let wallet = state.wallet_sync_status().await;
-    let status = if node.is_some() && wallet.last_success_at.is_some() {
+    let ok = identity_valid
+        && node.is_some()
+        && wallet.state != "error"
+        && wallet.last_success_at.is_some();
+    let status = if ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
         status,
-        Json(json!({"ok": node.is_some() && wallet.last_success_at.is_some(), "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
+        Json(json!({"ok": ok, "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
     )
         .into_response()
 }
@@ -326,6 +346,7 @@ struct Status {
     account_count: usize,
     auto_mine: bool,
     network: &'static str,
+    node_mode: String,
     endpoints: PublicEndpoints,
     wallet_sync: WalletSyncStatus,
 }
@@ -349,6 +370,7 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         account_count: usize::from(USER_ACCOUNT_COUNT),
         auto_mine: true,
         network: "Regtest",
+        node_mode: std::env::var("TSZ_NODE_MODE").unwrap_or_else(|_| "docker".into()),
         endpoints: PublicEndpoints {
             dashboard: format!("http://{dashboard_host}"),
             zakura_rpc: std::env::var("TSZ_PUBLIC_ZAKURA_RPC")
@@ -393,6 +415,7 @@ async fn send(
     Json(req): Json<SendRequest>,
 ) -> ApiResult<Json<Activity>> {
     let memo = validate_send(&req)?;
+    state.validate_chain_identity().await?;
     let _payment = state.0.payments.lock().await;
     let mut pending = state.0.store.claim_transfer(
         req.from_account,
@@ -581,6 +604,7 @@ async fn fund_from_treasury(
     amount_zatoshi: u64,
     idempotency_key: &str,
 ) -> anyhow::Result<Activity> {
+    state.validate_chain_identity().await?;
     let _payment = state.0.payments.lock().await;
     let mut pending =
         state
@@ -797,6 +821,7 @@ impl FaucetRuntime for AppState {
         destination: &str,
         amount_zatoshi: u64,
     ) -> anyhow::Result<PreparedPayment> {
+        self.validate_chain_identity().await?;
         self.0
             .wallet
             .prepare(
@@ -849,6 +874,7 @@ impl FaucetRuntime for AppState {
         treasury: &Account,
         minimum_net: u64,
     ) -> anyhow::Result<()> {
+        self.validate_chain_identity().await?;
         self.0
             .wallet
             .shield_coinbase(
@@ -1117,6 +1143,7 @@ fn coinbase_candidate(block: &Value, receiver: &str) -> anyhow::Result<Option<Co
 }
 
 async fn mine_and_sync(state: &AppState, blocks: u32) -> anyhow::Result<Vec<String>> {
+    state.validate_chain_identity().await?;
     let hashes = state.0.rpc.generate(blocks).await?;
     let tip_hash = hashes
         .last()
@@ -1138,6 +1165,7 @@ async fn mine_and_sync(state: &AppState, blocks: u32) -> anyhow::Result<Vec<Stri
 }
 
 pub async fn provision_initial_balance(state: &AppState) -> anyhow::Result<()> {
+    state.validate_chain_identity().await?;
     const INITIAL_FUNDING_KEY: &str = "startup-account-1-ironwood-v1";
     let existing = state.0.store.activity_for_key(INITIAL_FUNDING_KEY)?;
     if existing
@@ -1383,6 +1411,7 @@ fn apply_confirmation(store: &Store, pending: &Activity, tx: &Value) -> anyhow::
 }
 
 async fn confirm_from_chain(state: &AppState, pending: Activity) -> anyhow::Result<Activity> {
+    state.validate_chain_identity().await?;
     if pending.status == "confirmed" {
         return Ok(pending);
     }
@@ -1583,6 +1612,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::rpc::testing::{MockRpc, regtest_reply};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -1672,15 +1702,202 @@ mod tests {
     }
 
     fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+        state_with_rpc(NodeRpc::new("http://127.0.0.1:1".into()))
+    }
+
+    #[tokio::test]
+    async fn managed_wallet_retries_failed_sync_without_a_new_block() {
+        let server = MockRpc::start(regtest_reply).await;
+        let (state, _dir) = state_with_rpc(server.rpc.clone());
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.status.state = "ready";
+            snapshot.status.fully_scanned_height = Some(10);
+            snapshot.status.fully_scanned_hash = Some("01".repeat(32));
+        }
+        state.sync_if_chain_advanced().await.unwrap();
+        state.0.wallet_snapshot.write().await.status.state = "error";
+        assert!(state.sync_if_chain_advanced().await.is_err());
+        assert_eq!(state.wallet_sync_status().await.state, "error");
+    }
+
+    fn state_with_rpc(rpc: NodeRpc) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Store::open(dir.path().join("server.db")).expect("open store");
         store.initialize().expect("initialize store");
         let wallet =
             RealWallet::open(dir.path(), &store.seed().expect("wallet seed")).expect("open wallet");
-        (
-            AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
-            dir,
-        )
+        (AppState::new(store, wallet, rpc, "test".into()), dir)
+    }
+
+    #[tokio::test]
+    async fn replaced_external_chain_invalidates_health_and_blocks_mutations() {
+        let replaced = Arc::new(AtomicBool::new(false));
+        let node = replaced.clone();
+        let server = MockRpc::start(move |request| {
+            if request["method"] == "getblockhash"
+                && request["params"][0] == 1
+                && node.load(Ordering::SeqCst)
+            {
+                Ok(json!("replacement-anchor"))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let (state, _dir) = state_with_rpc(
+            server
+                .rpc
+                .clone()
+                .with_chain_anchor("original-anchor".into()),
+        );
+        {
+            let mut snapshot = state.0.wallet_snapshot.write().await;
+            snapshot.status.state = "ready";
+            snapshot.status.last_success_at = Some(123);
+            snapshot.status.fully_scanned_height = Some(100);
+            snapshot.accounts[0].ironwood_zatoshi = 500_000_000;
+        }
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::OK);
+        // Routine synchronization after the first successful scan is healthy;
+        // only an actual failure should make readiness flap to unavailable.
+        state.0.wallet_snapshot.write().await.status.state = "syncing";
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::OK);
+        replaced.store(true, Ordering::SeqCst);
+        assert!(state.sync_if_chain_advanced().await.is_err());
+        assert_eq!(state.wallet_sync_status().await.state, "error");
+        assert_eq!(
+            health(State(state.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(mine_and_sync(&state, 1).await.is_err());
+        assert!(
+            send(
+                State(state.clone()),
+                Json(SendRequest {
+                    from_account: 1,
+                    to_account: 2,
+                    source_pool: "ironwood".into(),
+                    destination_pool: "ironwood".into(),
+                    amount_zatoshi: 1,
+                    idempotency_key: "review-send".into(),
+                    memo: None,
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            fund_from_treasury(&state, 1, "ironwood", 1, "review-faucet")
+                .await
+                .is_err()
+        );
+        assert_eq!(server.count("generate"), 0);
+        assert!(state.0.store.activities(100).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_wallet_does_not_skip_sync_at_equal_or_lower_heights() {
+        let server = MockRpc::start(regtest_reply).await;
+        let (state, _dir) = state_with_rpc(
+            server
+                .rpc
+                .clone()
+                .with_chain_anchor("original-anchor".into()),
+        );
+        state
+            .0
+            .wallet_snapshot
+            .write()
+            .await
+            .status
+            .fully_scanned_height = Some(100);
+        for height in [100, 99] {
+            // No indexer is running: reaching it must fail, rather than returning
+            // success from the old height-only fast path.
+            assert!(state.synchronize_wallet(Some(height)).await.is_err());
+            assert_eq!(state.wallet_sync_status().await.state, "error");
+        }
+    }
+
+    fn prepared_startup(state: &AppState) -> Activity {
+        let pending = state
+            .0
+            .store
+            .claim_faucet(1, "ironwood", 500_000_000, "startup-account-1-ironwood-v1")
+            .unwrap();
+        state
+            .0
+            .store
+            .record_prepared(&pending.id, "original-payment", b"original-transaction", 0)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_startup_funding_is_not_treated_as_completed() {
+        let server = MockRpc::start(|request| {
+            if request["method"] == "getrawtransaction" {
+                Err(json!({"code":-1,"message":"node unavailable"}))
+            } else {
+                regtest_reply(request)
+            }
+        })
+        .await;
+        let (state, _dir) = state_with_rpc(server.rpc.clone());
+        let pending = prepared_startup(&state);
+        for _ in 0..2 {
+            assert!(provision_initial_balance(&state).await.is_err());
+            let retained = state
+                .0
+                .store
+                .activity_for_key("startup-account-1-ironwood-v1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.id, pending.id);
+            assert_eq!(retained.txid, pending.txid);
+            assert_eq!(retained.status, "prepared");
+        }
+        assert_eq!(state.0.store.activities(100).unwrap().len(), 1);
+        assert_eq!(server.count("generate"), 0);
+        assert_eq!(server.count("sendrawtransaction"), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_retries_confirm_existing_payment_without_rebroadcast() {
+        let confirmed = Arc::new(AtomicBool::new(false));
+        let mined = confirmed.clone();
+        let server = MockRpc::start(move |request| match request["method"].as_str().unwrap() {
+            "getrawtransaction" => {
+                assert_eq!(request["params"][0], "original-payment");
+                Ok(if mined.load(Ordering::SeqCst) {
+                    json!({"txid":"original-payment","confirmations":1,"blockhash":"funding-block"})
+                } else {
+                    json!({"txid":"original-payment","confirmations":0})
+                })
+            }
+            "generate" => Err(json!({"code":-1,"message":"interrupted mining"})),
+            _ => regtest_reply(request),
+        })
+        .await;
+        let (state, _dir) = state_with_rpc(server.rpc.clone());
+        let pending = prepared_startup(&state);
+        assert!(provision_initial_balance(&state).await.is_err());
+        confirmed.store(true, Ordering::SeqCst);
+        state.0.wallet_snapshot.write().await.accounts[0].ironwood_zatoshi = 500_000_000;
+        provision_initial_balance(&state).await.unwrap();
+        provision_initial_balance(&state).await.unwrap();
+        let retained = state
+            .0
+            .store
+            .activity_for_key("startup-account-1-ironwood-v1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.id, pending.id);
+        assert_eq!(retained.txid, pending.txid);
+        assert_eq!(retained.status, "confirmed");
+        assert_eq!(server.count("generate"), 1);
+        assert_eq!(server.count("sendrawtransaction"), 0);
+        assert_eq!(state.0.store.activities(100).unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2082,7 +2299,12 @@ mod tests {
         store.initialize().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
-        let state = AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into());
+        let state = AppState::new(
+            store,
+            wallet,
+            NodeRpc::new("http://127.0.0.1:1".into()),
+            "test".into(),
+        );
         (state, dir)
     }
 

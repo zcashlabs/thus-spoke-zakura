@@ -1699,7 +1699,7 @@ mod tests {
     fn synchronous_command_output_does_not_wait_for_descendant_held_pipes() {
         let timeout = Duration::from_millis(150);
         let started = Instant::now();
-        let output = synchronous_command_output_with_timeout(
+        let output = super::synchronous_command_output_with_timeout(
             "sh",
             &["-c".to_owned(), "sleep 1 & exit 0".to_owned()],
             timeout,
