@@ -314,8 +314,10 @@ The server owns wallet synchronization and exposes the latest confirmed wallet
 snapshot to the dashboard. A hidden sixth account acts as the mining and faucet
 treasury. Account 1 starts with 5 Ironwood ZEC, so you can experiment immediately.
 
-The local chain activates every network upgrade through NU6.3 at height 1, so it
-follows mainnet's current consensus rules. Shielded funds live in the Ironwood
+The local chain activates every network upgrade through NU7 at height 1.
+NU7 applies a 25-second block target, shielded action limits, and transaction
+fee recycling into the network sustainability mechanism (NSM). `ths mine`
+still generates blocks on demand. Shielded funds live in the Ironwood
 pool. The Orchard pool stopped accepting deposits at NU6.3, so the wallet API
 rejects `orchard` as a pool.
 

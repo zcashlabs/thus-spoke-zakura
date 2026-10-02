@@ -256,10 +256,9 @@ impl BlockSource for MemoryBlockCache {
     }
 }
 
-/// Every upgrade through NU6.3 activates at height 1, so the Orchard pool never
+/// Every upgrade through NU7 activates at height 1, so the Orchard pool never
 /// accepts deposits on this chain and all new shielded value lives in Ironwood.
-/// NU7 is not activated here. Keep these heights in sync with the Zakura
-/// configuration in `main.rs`.
+/// Keep these heights in sync with the Zakura configuration in `main.rs`.
 pub fn regtest_network() -> LocalNetwork {
     let one = Some(BlockHeight::from_u32(1));
     LocalNetwork {
@@ -273,7 +272,7 @@ pub fn regtest_network() -> LocalNetwork {
         nu6_1: one,
         nu6_2: one,
         nu6_3: one,
-        nu7: None,
+        nu7: one,
     }
 }
 
@@ -1203,7 +1202,7 @@ mod prepared_tests {
 
     type TestState = testing::TestState<BlockCache, TestDb, LocalNetwork>;
 
-    /// The SDK's default test network with every upgrade through NU6.3 active from
+    /// The SDK's default test network with every upgrade through NU7 active from
     /// Sapling activation, like the local chain, so shielded value lives in Ironwood.
     fn test_state() -> TestState {
         let activation = Some(BlockHeight::from_u32(100_000));
@@ -1212,6 +1211,7 @@ mod prepared_tests {
             nu6_1: activation,
             nu6_2: activation,
             nu6_3: activation,
+            nu7: activation,
             ..TestBuilder::<(), ()>::DEFAULT_NETWORK
         };
         TestBuilder::new()
