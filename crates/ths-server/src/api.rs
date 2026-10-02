@@ -537,9 +537,105 @@ struct FaucetAddressResponse {
     block_hash: String,
 }
 
-async fn faucet_address(
-    State(state): State<AppState>,
-    Json(req): Json<FaucetAddressRequest>,
+fn internal_faucet_destination(
+    store: &Store,
+    address: &str,
+) -> anyhow::Result<Option<(u8, &'static str)>> {
+    for account in store.accounts()? {
+        if !(1..=USER_ACCOUNT_COUNT).contains(&account.id) {
+            continue;
+        }
+        if account.transparent_address == address {
+            return Ok(Some((account.id, "transparent")));
+        }
+        if account.unified_address == address {
+            return Ok(Some((account.id, "ironwood")));
+        }
+    }
+    Ok(None)
+}
+
+fn faucet_address_response(
+    req: FaucetAddressRequest,
+    activity: Activity,
+) -> anyhow::Result<FaucetAddressResponse> {
+    let block_hash = activity.block_hash.filter(|hash| !hash.is_empty());
+    anyhow::ensure!(
+        activity.status == "confirmed",
+        "faucet transaction was not included in a block"
+    );
+    let block_hash = block_hash.context("faucet transaction was not included in a block")?;
+    Ok(FaucetAddressResponse {
+        address: req.address,
+        amount_zatoshi: req.amount_zatoshi,
+        txid: activity.txid,
+        block_hash,
+    })
+}
+
+#[async_trait::async_trait]
+trait AddressFaucetRuntime: Sync {
+    async fn fund_internal(
+        &self,
+        account_id: u8,
+        pool: &str,
+        amount_zatoshi: u64,
+        key: &str,
+    ) -> anyhow::Result<Activity>;
+    async fn fund_external(
+        &self,
+        req: FaucetAddressRequest,
+    ) -> anyhow::Result<FaucetAddressResponse>;
+}
+
+#[async_trait::async_trait]
+impl AddressFaucetRuntime for AppState {
+    async fn fund_internal(
+        &self,
+        account_id: u8,
+        pool: &str,
+        amount_zatoshi: u64,
+        key: &str,
+    ) -> anyhow::Result<Activity> {
+        fund_from_treasury(self, account_id, pool, amount_zatoshi, key).await
+    }
+
+    async fn fund_external(
+        &self,
+        req: FaucetAddressRequest,
+    ) -> anyhow::Result<FaucetAddressResponse> {
+        self.synchronize_latest().await?;
+        let seed = self.0.store.seed()?;
+        let treasury = self.0.store.account(TREASURY_ACCOUNT_ID)?;
+        let _replenishment = self.0.treasury_replenishment.lock().await;
+        let prepared = prepare_with_replenishment(
+            self,
+            None,
+            &seed,
+            &treasury,
+            &req.address,
+            req.amount_zatoshi,
+        )
+        .await?;
+        self.0.wallet.broadcast(&prepared.raw_transaction).await?;
+        mine_and_sync(self, 1).await?;
+        let mined = self.0.rpc.transaction(&prepared.txid).await?;
+        let block_hash = confirmed_block_hash(&mined)
+            .context("faucet transaction was not included in a block")?
+            .to_owned();
+        Ok(FaucetAddressResponse {
+            address: req.address,
+            amount_zatoshi: req.amount_zatoshi,
+            txid: prepared.txid,
+            block_hash,
+        })
+    }
+}
+
+async fn execute_address_faucet<R: AddressFaucetRuntime>(
+    store: &Store,
+    runtime: &R,
+    req: FaucetAddressRequest,
 ) -> ApiResult<Json<FaucetAddressResponse>> {
     require_faucet_address(&req.address)?;
     if req.amount_zatoshi == 0 || req.amount_zatoshi > 5 * ZATOSHIS_PER_ZEC {
@@ -547,31 +643,22 @@ async fn faucet_address(
             "amount must be greater than zero and no more than 5 ZEC",
         ));
     }
-    state.synchronize_latest().await?;
-    let seed = state.0.store.seed()?;
-    let treasury = state.0.store.account(TREASURY_ACCOUNT_ID)?;
-    let _replenishment = state.0.treasury_replenishment.lock().await;
-    let prepared = prepare_with_replenishment(
-        &state,
-        None,
-        &seed,
-        &treasury,
-        &req.address,
-        req.amount_zatoshi,
-    )
-    .await?;
-    state.0.wallet.broadcast(&prepared.raw_transaction).await?;
-    mine_and_sync(&state, 1).await?;
-    let mined = state.0.rpc.transaction(&prepared.txid).await?;
-    let block_hash = confirmed_block_hash(&mined)
-        .context("faucet transaction was not included in a block")?
-        .to_owned();
-    Ok(Json(FaucetAddressResponse {
-        address: req.address,
-        amount_zatoshi: req.amount_zatoshi,
-        txid: prepared.txid,
-        block_hash,
-    }))
+    if let Some((account_id, pool)) = internal_faucet_destination(store, &req.address)? {
+        let key = format!("ths-address-faucet-{}", uuid::Uuid::new_v4());
+        let activity = runtime
+            .fund_internal(account_id, pool, req.amount_zatoshi, &key)
+            .await?;
+        Ok(Json(faucet_address_response(req, activity)?))
+    } else {
+        Ok(Json(runtime.fund_external(req).await?))
+    }
+}
+
+async fn faucet_address(
+    State(state): State<AppState>,
+    Json(req): Json<FaucetAddressRequest>,
+) -> ApiResult<Json<FaucetAddressResponse>> {
+    execute_address_faucet(&state.0.store, &state, req).await
 }
 
 async fn fund_from_treasury(
@@ -1708,6 +1795,328 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let (status, _) = get(&dir, "/wallet").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn address_faucet_resolves_only_published_user_addresses() {
+        let (state, _dir) = state_with_local_wallet();
+        for id in 1..=USER_ACCOUNT_COUNT {
+            let account = state.0.store.account(id).unwrap();
+            assert_eq!(
+                internal_faucet_destination(&state.0.store, &account.transparent_address).unwrap(),
+                Some((id, "transparent"))
+            );
+            assert_eq!(
+                internal_faucet_destination(&state.0.store, &account.unified_address).unwrap(),
+                Some((id, "ironwood"))
+            );
+            assert_eq!(
+                internal_faucet_destination(
+                    &state.0.store,
+                    &format!("{} ", account.transparent_address)
+                )
+                .unwrap(),
+                None
+            );
+        }
+        let treasury = state.0.store.account(TREASURY_ACCOUNT_ID).unwrap();
+        for address in [
+            treasury.transparent_address,
+            treasury.unified_address,
+            "unmatched".into(),
+        ] {
+            assert_eq!(
+                internal_faucet_destination(&state.0.store, &address).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn address_faucet_resolver_propagates_store_errors() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(internal_faucet_destination(&store, "unmatched").is_err());
+    }
+
+    fn address_faucet_activity(store: &Store) -> Activity {
+        let row = store
+            .claim_faucet(2, "transparent", 100_000_000, "adapter-test")
+            .unwrap();
+        let row = store
+            .record_prepared(&row.id, "faucet-txid", b"prepared bytes", 140)
+            .unwrap();
+        store.mark_broadcast(&row.id, &row.txid).unwrap()
+    }
+
+    #[test]
+    fn address_faucet_response_requires_confirmation() {
+        let (state, _dir) = state_with_local_wallet();
+        let address = state.0.store.account(2).unwrap().transparent_address;
+        let request = || FaucetAddressRequest {
+            address: address.clone(),
+            amount_zatoshi: 100_000_000,
+        };
+        let row = address_faucet_activity(&state.0.store);
+        assert!(faucet_address_response(request(), row.clone()).is_err());
+        let row = state
+            .0
+            .store
+            .confirm(&row.id, &row.txid, "inclusion-hash")
+            .unwrap();
+        let value =
+            serde_json::to_value(faucet_address_response(request(), row.clone()).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "faucet-txid", "block_hash": "inclusion-hash"})
+        );
+        for block_hash in [None, Some(String::new())] {
+            let mut invalid = row.clone();
+            invalid.block_hash = block_hash;
+            assert!(faucet_address_response(request(), invalid).is_err());
+        }
+    }
+
+    struct RecordingAddressFaucetRuntime {
+        internal_calls: std::sync::Mutex<Vec<(u8, String, u64, String)>>,
+        external_calls: std::sync::Mutex<Vec<(String, u64)>>,
+        activity: Activity,
+        fail_internal: bool,
+        fail_external: bool,
+    }
+
+    impl RecordingAddressFaucetRuntime {
+        fn new(store: &Store) -> Self {
+            let row = address_faucet_activity(store);
+            Self {
+                internal_calls: Default::default(),
+                external_calls: Default::default(),
+                activity: store.confirm(&row.id, &row.txid, "inclusion-hash").unwrap(),
+                fail_internal: false,
+                fail_external: false,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AddressFaucetRuntime for RecordingAddressFaucetRuntime {
+        async fn fund_internal(
+            &self,
+            id: u8,
+            pool: &str,
+            amount: u64,
+            key: &str,
+        ) -> anyhow::Result<Activity> {
+            self.internal_calls
+                .lock()
+                .unwrap()
+                .push((id, pool.into(), amount, key.into()));
+            anyhow::ensure!(!self.fail_internal, "internal funding failed");
+            Ok(self.activity.clone())
+        }
+
+        async fn fund_external(
+            &self,
+            req: FaucetAddressRequest,
+        ) -> anyhow::Result<FaucetAddressResponse> {
+            self.external_calls
+                .lock()
+                .unwrap()
+                .push((req.address.clone(), req.amount_zatoshi));
+            anyhow::ensure!(!self.fail_external, "external funding failed");
+            Ok(FaucetAddressResponse {
+                address: req.address,
+                amount_zatoshi: req.amount_zatoshi,
+                txid: "external-txid".into(),
+                block_hash: "external-block".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn address_faucet_dispatches_internal_transparent_and_unified() {
+        let (state, _dir) = state_with_local_wallet();
+        let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
+        let account = state.0.store.account(2).unwrap();
+        for (address, pool) in [
+            (account.transparent_address, "transparent"),
+            (account.unified_address, "ironwood"),
+        ] {
+            let Json(response) = execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: address.clone(),
+                    amount_zatoshi: 100_000_000,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "faucet-txid", "block_hash": "inclusion-hash"})
+            );
+            let calls = runtime.internal_calls.lock().unwrap();
+            let call = calls.last().unwrap();
+            assert_eq!((call.0, call.1.as_str(), call.2), (2, pool, 100_000_000));
+        }
+        assert!(runtime.external_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn address_faucet_repeated_requests_use_distinct_keys() {
+        let (state, _dir) = state_with_local_wallet();
+        let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
+        let address = state.0.store.account(2).unwrap().transparent_address;
+        for _ in 0..2 {
+            let Json(_response) = execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: address.clone(),
+                    amount_zatoshi: 100_000_000,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        }
+        let calls = runtime.internal_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0].3, calls[1].3);
+        assert!(calls.iter().all(|call| require_key(&call.3).is_ok()));
+        assert!(runtime.external_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn address_faucet_validation_precedes_dispatch() {
+        let (state, _dir) = state_with_local_wallet();
+        let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
+        let address = state.0.store.account(2).unwrap().transparent_address;
+        for (address, amount) in [
+            ("not-an-address".into(), 1),
+            (address.clone(), 0),
+            (address.clone(), 500_000_001),
+        ] {
+            let error = execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address,
+                    amount_zatoshi: amount,
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(runtime.internal_calls.lock().unwrap().is_empty());
+        assert!(runtime.external_calls.lock().unwrap().is_empty());
+        let Json(_response) = execute_address_faucet(
+            &state.0.store,
+            &runtime,
+            FaucetAddressRequest {
+                address,
+                amount_zatoshi: 500_000_000,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(runtime.internal_calls.lock().unwrap()[0].2, 500_000_000);
+    }
+
+    #[tokio::test]
+    async fn address_faucet_dispatch_preserves_external_behavior() {
+        let (state, _dir) = state_with_local_wallet();
+        let mut runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
+        let treasury = state.0.store.account(TREASURY_ACCOUNT_ID).unwrap();
+        for address in [
+            treasury.transparent_address.clone(),
+            treasury.unified_address,
+        ] {
+            let Json(response) = execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: address.clone(),
+                    amount_zatoshi: 100_000_000,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(
+                serde_json::to_value(response).unwrap(),
+                json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "external-txid", "block_hash": "external-block"})
+            );
+            assert_eq!(
+                runtime.external_calls.lock().unwrap().last().unwrap(),
+                &(address, 100_000_000)
+            );
+        }
+        runtime.fail_external = true;
+        assert!(
+            execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: treasury.transparent_address,
+                    amount_zatoshi: 1
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(runtime.internal_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn address_faucet_internal_errors_do_not_fall_back() {
+        let (state, _dir) = state_with_local_wallet();
+        let mut runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
+        let address = state.0.store.account(2).unwrap().transparent_address;
+        runtime.fail_internal = true;
+        assert!(
+            execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: address.clone(),
+                    amount_zatoshi: 100_000_000
+                }
+            )
+            .await
+            .is_err()
+        );
+        runtime.fail_internal = false;
+        runtime.activity.status = "broadcast".into();
+        runtime.activity.block_hash = None;
+        assert!(
+            execute_address_faucet(
+                &state.0.store,
+                &runtime,
+                FaucetAddressRequest {
+                    address: address.clone(),
+                    amount_zatoshi: 100_000_000
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(runtime.internal_calls.lock().unwrap().len(), 2);
+        let broken_store = Store::open(":memory:").unwrap();
+        assert!(
+            execute_address_faucet(
+                &broken_store,
+                &runtime,
+                FaucetAddressRequest {
+                    address,
+                    amount_zatoshi: 1
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(runtime.internal_calls.lock().unwrap().len(), 2);
+        assert!(runtime.external_calls.lock().unwrap().is_empty());
     }
 
     fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
