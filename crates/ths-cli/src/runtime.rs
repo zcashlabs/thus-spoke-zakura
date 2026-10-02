@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -77,6 +77,31 @@ struct Instance {
     name: String,
     version: u32,
     endpoints: Endpoints,
+    /// unix seconds; missing for environments created before it was recorded.
+    #[serde(default)]
+    created_at: Option<u64>,
+}
+
+/// the containers every environment has. `init` is one-shot, so it exits once setup is done.
+const SERVICES: [&str; 4] = ["app", "zakura", "lightwalletd", "init"];
+
+/// one container's docker state (`running`, `exited`, ...) or `missing`, with its unix-second
+/// creation and start times.
+#[derive(Debug, Serialize)]
+struct ContainerStatus {
+    service: &'static str,
+    state: String,
+    created_at: Option<u64>,
+    started_at: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct EnvironmentStatus {
+    #[serde(flatten)]
+    instance: Instance,
+    /// `running`, `degraded` (some services running) or `stopped`.
+    state: &'static str,
+    containers: Vec<ContainerStatus>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -432,23 +457,32 @@ impl Runtime {
     }
 
     pub fn list(&self, json: bool) -> Result<()> {
-        let mut instances = Vec::new();
+        let mut environments = Vec::new();
         if self.root.exists() {
             for entry in fs::read_dir(&self.root)? {
                 let path = entry?.path().join("instance.json");
                 if path.exists() {
-                    instances.push(serde_json::from_slice::<Instance>(&fs::read(path)?)?);
+                    let instance = serde_json::from_slice::<Instance>(&fs::read(&path)?)?;
+                    let name = instance.name.parse()?;
+                    let containers = SERVICES
+                        .into_iter()
+                        .map(|service| container_status(&name, service))
+                        .collect::<Result<Vec<_>>>()?;
+                    environments.push(EnvironmentStatus {
+                        state: environment_state(&containers),
+                        instance,
+                        containers,
+                    });
                 }
             }
         }
+        environments.sort_by(|left, right| left.instance.name.cmp(&right.instance.name));
         if json {
-            println!("{}", serde_json::to_string_pretty(&instances)?);
-        } else if instances.is_empty() {
+            println!("{}", serde_json::to_string_pretty(&environments)?);
+        } else if environments.is_empty() {
             println!("No environments yet.");
         } else {
-            for i in instances {
-                println!("{:<20} {}", i.name, i.endpoints.dashboard);
-            }
+            print!("{}", render_list(&environments, now_unix()?));
         }
         Ok(())
     }
@@ -461,6 +495,7 @@ impl Runtime {
             name: name.to_string(),
             version: 1,
             endpoints: endpoints.clone(),
+            created_at: Some(now_unix()?),
         };
         fs::write(
             self.instance_dir(name).join("instance.json"),
@@ -1175,6 +1210,128 @@ fn endpoint_lines(e: &Endpoints) -> String {
         e.dashboard, e.rpc, e.lightwalletd, e.network, e.tls, e.p2p
     )
 }
+/// an environment's state from its long-running services; `init` is not one of them.
+fn environment_state(containers: &[ContainerStatus]) -> &'static str {
+    let services = containers.iter().filter(|c| c.service != "init");
+    let running = services.clone().filter(|c| c.state == "running").count();
+    match running {
+        0 => "stopped",
+        n if n == services.count() => "running",
+        _ => "degraded",
+    }
+}
+fn container_status(name: &InstanceName, service: &'static str) -> Result<ContainerStatus> {
+    let container = format!("{}-{service}", prefix(name));
+    let output = match docker_output([
+        "container",
+        "inspect",
+        "--format",
+        "{{.State.Status}} {{.Created}} {{.State.StartedAt}}",
+        &container,
+    ]) {
+        Ok(output) => output,
+        Err(error) if error.to_string().contains("No such container") => {
+            return Ok(ContainerStatus {
+                service,
+                state: "missing".into(),
+                created_at: None,
+                started_at: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let mut fields = output.split_whitespace();
+    Ok(ContainerStatus {
+        service,
+        state: fields.next().unwrap_or("unknown").to_owned(),
+        created_at: fields.next().and_then(parse_docker_time),
+        started_at: fields.next().and_then(parse_docker_time),
+    })
+}
+/// unix seconds from docker's utc rfc 3339 timestamps. docker reports a container that never
+/// started as started in year one, which gives nothing.
+fn parse_docker_time(value: &str) -> Option<u64> {
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
+    let time = time.strip_suffix('Z')?;
+    let mut time = time.split(['.', ':']).map(str::parse::<i64>);
+    let (hour, minute, second) = (time.next()?.ok()?, time.next()?.ok()?, time.next()?.ok()?);
+    if year < 1970 {
+        return None;
+    }
+    // days since the epoch for a proleptic gregorian date.
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
+}
+fn now_unix() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before 1970")?
+        .as_secs())
+}
+fn ago(now: u64, then: u64) -> String {
+    let seconds = now.saturating_sub(then);
+    match seconds {
+        0..60 => format!("{seconds}s ago"),
+        60..3_600 => format!("{}m ago", seconds / 60),
+        3_600..86_400 => format!("{}h ago", seconds / 3_600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+fn render_list(environments: &[EnvironmentStatus], now: u64) -> String {
+    let (active, inactive): (Vec<_>, Vec<_>) =
+        environments.iter().partition(|e| e.state != "stopped");
+    let has_inactive = !inactive.is_empty();
+    let mut out = String::new();
+    for (title, section) in [("ACTIVE", active), ("INACTIVE", inactive)] {
+        if section.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(title);
+        out.push('\n');
+        for e in section {
+            let mut line = format!(
+                "{:<16} {:<26} {:<8}",
+                e.instance.name, e.instance.endpoints.dashboard, e.state
+            );
+            if let Some(created) = e.instance.created_at {
+                line.push_str(&format!("   created {}", ago(now, created)));
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+            for c in &e.containers {
+                let mut line = format!("  {:<13} {:<9}", c.service, c.state);
+                if let Some(created) = c.created_at {
+                    line.push_str(&format!(" created {:<9}", ago(now, created)));
+                }
+                if let Some(started) = c.started_at {
+                    line.push_str(&format!(" started {}", ago(now, started)));
+                }
+                out.push_str(line.trim_end());
+                out.push('\n');
+            }
+        }
+    }
+    if has_inactive {
+        out.push_str(
+            "\nRemove an inactive environment and all of its data with:\n  ths --name <name> stop\n",
+        );
+    }
+    out
+}
 fn open_url(url: &str) -> Result<()> {
     let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
@@ -1237,6 +1394,153 @@ fn docker_logs(container: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    fn environment(name: &str, states: [&str; 4]) -> EnvironmentStatus {
+        let containers = SERVICES
+            .into_iter()
+            .zip(states)
+            .map(|(service, state)| ContainerStatus {
+                service,
+                state: state.into(),
+                created_at: (state != "missing").then_some(1_000),
+                started_at: (state == "running" || state == "exited").then_some(1_060),
+            })
+            .collect::<Vec<_>>();
+        EnvironmentStatus {
+            instance: Instance {
+                name: name.into(),
+                version: 1,
+                endpoints: endpoints_for(&HostPorts {
+                    dashboard: 8080,
+                    rpc: 18232,
+                    lightwalletd: 9067,
+                    p2p: 18233,
+                }),
+                created_at: Some(1_000),
+            },
+            state: environment_state(&containers),
+            containers,
+        }
+    }
+
+    #[test]
+    fn environments_are_classified_by_their_long_running_services() {
+        let state = |states| environment("e", states).state;
+        assert_eq!(
+            state(["running", "running", "running", "exited"]),
+            "running"
+        );
+        assert_eq!(
+            state(["exited", "running", "running", "exited"]),
+            "degraded"
+        );
+        assert_eq!(
+            state(["missing", "running", "missing", "missing"]),
+            "degraded"
+        );
+        assert_eq!(state(["exited", "exited", "exited", "exited"]), "stopped");
+        assert_eq!(
+            state(["missing", "missing", "missing", "missing"]),
+            "stopped"
+        );
+        // init is one-shot: running or not, it does not decide the state.
+        assert_eq!(state(["exited", "exited", "exited", "running"]), "stopped");
+    }
+
+    #[test]
+    fn the_list_groups_active_before_inactive_and_hints_only_for_inactive() {
+        let active = environment("default", ["running", "running", "running", "exited"]);
+        let degraded = environment("partial", ["exited", "running", "running", "exited"]);
+        let stopped = environment("old", ["missing", "missing", "missing", "missing"]);
+        let rendered = render_list(&[stopped, active, degraded], 1_000 + 7_200);
+        assert_eq!(
+            rendered,
+            concat!(
+                "ACTIVE\n",
+                "default          http://127.0.0.1:8080      running    created 2h ago\n",
+                "  app           running   created 2h ago    started 1h ago\n",
+                "  zakura        running   created 2h ago    started 1h ago\n",
+                "  lightwalletd  running   created 2h ago    started 1h ago\n",
+                "  init          exited    created 2h ago    started 1h ago\n",
+                "partial          http://127.0.0.1:8080      degraded   created 2h ago\n",
+                "  app           exited    created 2h ago    started 1h ago\n",
+                "  zakura        running   created 2h ago    started 1h ago\n",
+                "  lightwalletd  running   created 2h ago    started 1h ago\n",
+                "  init          exited    created 2h ago    started 1h ago\n",
+                "\n",
+                "INACTIVE\n",
+                "old              http://127.0.0.1:8080      stopped    created 2h ago\n",
+                "  app           missing\n",
+                "  zakura        missing\n",
+                "  lightwalletd  missing\n",
+                "  init          missing\n",
+                "\n",
+                "Remove an inactive environment and all of its data with:\n",
+                "  ths --name <name> stop\n",
+            )
+        );
+        // no inactive environment: no empty section and no hint.
+        let only_active = render_list(
+            &[environment(
+                "default",
+                ["running", "running", "running", "exited"],
+            )],
+            1_000,
+        );
+        assert!(!only_active.contains("INACTIVE") && !only_active.contains("ths --name"));
+        let only_inactive = render_list(
+            &[environment("old", ["exited", "exited", "exited", "exited"])],
+            1_000,
+        );
+        assert!(only_inactive.starts_with("INACTIVE\n") && only_inactive.contains("ths --name"));
+    }
+
+    #[test]
+    fn the_json_list_keeps_its_fields_and_adds_absolute_status() {
+        let json = serde_json::to_value(environment(
+            "default",
+            ["running", "exited", "missing", "exited"],
+        ))
+        .unwrap();
+        assert_eq!(json["name"], "default");
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["endpoints"]["dashboard"], "http://127.0.0.1:8080");
+        assert_eq!(json["state"], "degraded");
+        assert_eq!(json["created_at"], 1_000);
+        assert_eq!(json["containers"][0]["service"], "app");
+        assert_eq!(json["containers"][0]["started_at"], 1_060);
+        assert_eq!(json["containers"][2]["state"], "missing");
+        assert!(json["containers"][2]["created_at"].is_null());
+    }
+
+    #[test]
+    fn environments_recorded_before_creation_times_still_list() {
+        let mut old = environment("old", ["missing", "missing", "missing", "missing"]);
+        let mut legacy = serde_json::to_value(&old.instance).unwrap();
+        legacy.as_object_mut().unwrap().remove("created_at");
+        old.instance = serde_json::from_value(legacy).unwrap();
+        assert_eq!(old.instance.created_at, None);
+        assert!(
+            render_list(&[old], 1_000)
+                .starts_with("INACTIVE\nold              http://127.0.0.1:8080      stopped\n")
+        );
+    }
+
+    #[test]
+    fn docker_timestamps_parse_to_unix_seconds() {
+        assert_eq!(parse_docker_time("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_docker_time("2026-10-02T21:58:53.061174304Z"),
+            Some(1_790_978_333)
+        );
+        assert_eq!(
+            parse_docker_time("2024-02-29T12:00:00Z"),
+            Some(1_709_208_000)
+        );
+        // docker's zero time for a container that never started.
+        assert_eq!(parse_docker_time("0001-01-01T00:00:00Z"), None);
+        assert_eq!(parse_docker_time("not a time"), None);
+    }
 
     struct RecordingHost {
         events: Arc<Mutex<Vec<String>>>,

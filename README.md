@@ -212,7 +212,7 @@ Running `ths` with no command starts the default environment.
 | `ths logs app -f` | Follow dashboard/server logs |
 | `ths logs zakura -f` | Follow node logs |
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
-| `ths list` | List known environments |
+| `ths list` | List environments and their container status |
 | `ths stop` | Stop and delete the environment |
 | `ths reset --force` | Force-delete one environment and all its data |
 | `ths doctor` | Check Docker and local configuration |
