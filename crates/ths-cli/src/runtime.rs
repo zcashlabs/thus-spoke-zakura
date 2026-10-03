@@ -859,15 +859,30 @@ impl Shutdown {
         Ok(())
     }
 
-    fn wait(&self) -> Result<()> {
-        if self.try_interrupted() {
-            return Ok(());
+    /// Waits for a shutdown signal, or until `gone` reports that the environment was
+    /// deleted elsewhere (`ths stop` or `ths reset` from another shell), checked every `poll`.
+    fn wait_or_gone(&self, poll: Duration, mut gone: impl FnMut() -> bool) -> Result<Ended> {
+        loop {
+            if self.try_interrupted() {
+                return Ok(Ended::Interrupted);
+            }
+            match self.receiver.recv_timeout(poll) {
+                Ok(()) => {
+                    self.flag.store(true, Ordering::SeqCst);
+                    return Ok(Ended::Interrupted);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    if self.try_interrupted() {
+                        return Ok(Ended::Interrupted);
+                    }
+                    return Err(anyhow!("waiting for a shutdown signal"));
+                }
+            }
+            if gone() {
+                return Ok(Ended::DeletedElsewhere);
+            }
         }
-        self.receiver
-            .recv()
-            .context("waiting for a shutdown signal")?;
-        self.flag.store(true, Ordering::SeqCst);
-        Ok(())
     }
 
     fn wait_timeout(&self, timeout: Duration) -> Result<()> {
@@ -890,6 +905,18 @@ impl Shutdown {
     }
 }
 
+/// How a running environment's foreground `start` ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// Ctrl+C or a termination signal: `start` deletes the environment itself.
+    Interrupted,
+    /// Another command already deleted it.
+    DeletedElsewhere,
+}
+
+/// How often a running `start` checks that its environment still exists.
+const DELETED_ELSEWHERE_POLL: Duration = Duration::from_secs(1);
+
 trait StartHost {
     fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()>;
     fn allocate(
@@ -907,7 +934,7 @@ trait StartHost {
         shutdown: &Shutdown,
     ) -> Result<()>;
     fn open_url(&self, url: &str) -> Result<()>;
-    fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()>;
+    fn wait_for_shutdown(&self, app_container: &str, shutdown: &Shutdown) -> Result<Ended>;
 }
 
 struct DockerHost;
@@ -1003,8 +1030,11 @@ impl StartHost for DockerHost {
         open_url(url)
     }
 
-    fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
-        shutdown.wait()
+    fn wait_for_shutdown(&self, app_container: &str, shutdown: &Shutdown) -> Result<Ended> {
+        // A Docker error is not proof of deletion: keep waiting.
+        shutdown.wait_or_gone(DELETED_ELSEWHERE_POLL, || {
+            matches!(container_exists(app_container), Ok(false))
+        })
     }
 }
 
@@ -1047,9 +1077,10 @@ impl Runtime {
         println!("Starting {name}…");
         let endpoints = host.allocate(self, name, shutdown, port_offset)?;
         shutdown.check()?;
+        let app_container = format!("{}-app", prefix(name));
         host.wait_ready(
             &endpoints,
-            &format!("{}-app", prefix(name)),
+            &app_container,
             Duration::from_secs(120),
             shutdown,
         )?;
@@ -1064,11 +1095,18 @@ impl Runtime {
         if !json {
             println!("\nPress Ctrl+C to stop and delete this development environment.");
         }
-        host.wait_for_shutdown(shutdown)?;
-        println!("\nStopping and deleting {name}…");
-        host.delete(self, name)?;
-        cleanup.active = false;
-        println!("Deleted {name} and all of its development data.");
+        match host.wait_for_shutdown(&app_container, shutdown)? {
+            Ended::Interrupted => {
+                println!("\nStopping and deleting {name}…");
+                host.delete(self, name)?;
+                cleanup.active = false;
+                println!("Deleted {name} and all of its development data.");
+            }
+            Ended::DeletedElsewhere => {
+                cleanup.active = false;
+                println!("\n{name} was stopped and deleted by another command.");
+            }
+        }
         Ok(())
     }
 }
@@ -1243,6 +1281,7 @@ mod tests {
         wait_ready_result: Result<(), String>,
         open_url_result: Result<(), String>,
         interrupt_before_ready: bool,
+        deleted_elsewhere: bool,
     }
 
     impl RecordingHost {
@@ -1254,6 +1293,7 @@ mod tests {
                     wait_ready_result: Ok(()),
                     open_url_result: Ok(()),
                     interrupt_before_ready: false,
+                    deleted_elsewhere: false,
                 },
                 events,
             )
@@ -1315,9 +1355,9 @@ mod tests {
                 .map_err(|e| anyhow!("{e}"))
         }
 
-        fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
-            self.push("wait_for_shutdown");
-            shutdown.wait()
+        fn wait_for_shutdown(&self, app_container: &str, shutdown: &Shutdown) -> Result<Ended> {
+            self.push(&format!("wait_for_shutdown:{app_container}"));
+            shutdown.wait_or_gone(Duration::from_millis(5), || self.deleted_elsewhere)
         }
     }
 
@@ -1357,7 +1397,7 @@ mod tests {
                 .iter()
                 .any(|e| e.starts_with("delete:") && !e.ends_with("alpha"))
         );
-        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+        assert!(!events.iter().any(|e| e.starts_with("wait_for_shutdown")));
     }
 
     #[test]
@@ -1373,7 +1413,7 @@ mod tests {
         let events = events.lock().unwrap().clone();
         assert!(events.iter().any(|e| e.starts_with("open_url:")));
         assert!(events.iter().any(|e| e == "delete:alpha"));
-        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+        assert!(!events.iter().any(|e| e.starts_with("wait_for_shutdown")));
     }
 
     #[test]
@@ -1390,8 +1430,28 @@ mod tests {
             .unwrap();
         let events = events.lock().unwrap().clone();
         assert!(!events.iter().any(|e| e.starts_with("open_url:")));
-        assert!(events.iter().any(|e| e == "wait_for_shutdown"));
+        assert!(events.iter().any(|e| e.starts_with("wait_for_shutdown")));
         assert!(events.iter().any(|e| e == "delete:alpha"));
+    }
+
+    #[test]
+    fn deletion_elsewhere_ends_start_without_deleting_again() {
+        let (mut host, events) = RecordingHost::new();
+        host.deleted_elsewhere = true;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        runtime_for_tests()
+            .start_with(&name("alpha"), true, false, 0, &host, &shutdown)
+            .unwrap();
+        let events = events.lock().unwrap().clone();
+        let waited = events
+            .iter()
+            .position(|e| e == "wait_for_shutdown:ths-alpha-app")
+            .expect("waited on the app container");
+        assert!(
+            !events[waited..].iter().any(|e| e.starts_with("delete:")),
+            "deleted again after another command deleted it: {events:?}"
+        );
     }
 
     #[test]
@@ -1407,7 +1467,7 @@ mod tests {
         let events = events.lock().unwrap().clone();
         assert!(events.iter().any(|e| e == "allocate:alpha"));
         assert!(events.iter().any(|e| e == "delete:alpha"));
-        assert!(!events.iter().any(|e| e == "wait_for_shutdown"));
+        assert!(!events.iter().any(|e| e.starts_with("wait_for_shutdown")));
     }
 
     #[test]
@@ -1461,7 +1521,12 @@ mod tests {
         sender.send(()).unwrap();
         assert!(shutdown.try_interrupted());
         assert!(shutdown.try_interrupted());
-        shutdown.wait().unwrap();
+        assert_eq!(
+            shutdown
+                .wait_or_gone(Duration::from_secs(2), || false)
+                .unwrap(),
+            Ended::Interrupted
+        );
     }
 
     #[test]
@@ -1502,7 +1567,28 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         sender.send(()).unwrap();
-        shutdown.wait().unwrap();
+        assert_eq!(
+            shutdown
+                .wait_or_gone(Duration::from_secs(2), || false)
+                .unwrap(),
+            Ended::Interrupted
+        );
+    }
+
+    #[test]
+    fn shutdown_wait_returns_when_the_environment_is_gone() {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let mut checks = 0;
+        let ended = shutdown
+            .wait_or_gone(Duration::from_millis(1), || {
+                checks += 1;
+                checks == 3
+            })
+            .unwrap();
+        assert_eq!(ended, Ended::DeletedElsewhere);
+        assert_eq!(checks, 3);
+        assert!(!shutdown.try_interrupted());
     }
 
     #[test]
