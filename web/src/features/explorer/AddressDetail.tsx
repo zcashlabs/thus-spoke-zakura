@@ -68,7 +68,7 @@ export function AddressDetail() {
           <DataRow label="Address">
             <code className="font-mono">{info.data.address}</code>
           </DataRow>
-          <DataRow label="Type">Transparent (P2PKH)</DataRow>
+          <DataRow label="Type">Transparent</DataRow>
         </dl>
         <PanelNote>
           Only transparent addresses have public balances. Shielded funds held by this account are

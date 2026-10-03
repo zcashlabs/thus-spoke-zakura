@@ -9,9 +9,9 @@ export type QueryTarget = { path: string } | { hash: string } | { error: string 
 export function classifyQuery(raw: string): QueryTarget {
   const query = raw.trim();
   if (!query) return { error: 'Enter a block height, block hash, transaction ID, or address.' };
+  if (/^[0-9a-fA-F]{64}$/.test(query)) return { hash: query.toLowerCase() };
   if (/^\d+$/.test(query)) return { path: `/explorer/block/${query}` };
   if (/^t[a-zA-Z0-9]{20,}$/.test(query)) return { path: `/explorer/address/${query}` };
-  if (/^[0-9a-fA-F]{64}$/.test(query)) return { hash: query.toLowerCase() };
   if (/^u(regtest)?1[a-z0-9]+$/i.test(query)) {
     return { error: 'Unified addresses are shielded and have no public chain history.' };
   }
