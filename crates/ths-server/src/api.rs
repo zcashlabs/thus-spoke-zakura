@@ -146,7 +146,7 @@ impl AppState {
                 );
             }
             crate::reconcile::sync_wallet(&self.0.wallet, &self.0.rpc, &target, deadline).await?;
-            self.refresh_wallet_snapshot().await
+            self.refresh_wallet_snapshot(&target).await
         }
         .await;
 
@@ -163,14 +163,18 @@ impl AppState {
         self.synchronize_wallet(None).await
     }
 
-    async fn refresh_wallet_snapshot(&self) -> anyhow::Result<()> {
+    async fn refresh_wallet_snapshot(&self, target: &ChainCheckpoint) -> anyhow::Result<()> {
         let mut accounts = self.0.store.accounts()?;
         self.0.wallet.apply_balances(&mut accounts).await?;
         let scanned = self.0.wallet.scanned_checkpoint().await?;
-        let observed = self.0.rpc.checkpoint().await?;
+        let rpc = &self.0.rpc;
+        let observed = rpc.checkpoint().await?;
+        let publishable = scan_is_publishable(scanned.as_ref(), target, &observed, |height| {
+            rpc.block_hash(height)
+        })
+        .await?;
         anyhow::ensure!(
-            scanned.as_ref() == Some(&observed)
-                || (observed.height < u64::from(WALLET_BIRTHDAY_HEIGHT) && scanned.is_none()),
+            publishable,
             "chain checkpoint changed before wallet publication"
         );
         let changed = self.0.wallet_snapshot.read().await.accounts != accounts;
@@ -216,6 +220,28 @@ impl AppState {
         }
         Ok(())
     }
+}
+
+/// a scan that reached its target stays publishable after other requests mine past it, as long as
+/// the node still has the scanned block.
+async fn scan_is_publishable<F, Fut>(
+    scanned: Option<&ChainCheckpoint>,
+    target: &ChainCheckpoint,
+    observed: &ChainCheckpoint,
+    canonical_hash: F,
+) -> anyhow::Result<bool>
+where
+    F: FnOnce(u32) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    Ok(match scanned {
+        Some(scanned) if scanned == observed => true,
+        Some(scanned) if (target.height..observed.height).contains(&scanned.height) => {
+            canonical_hash(u32::try_from(scanned.height)?).await? == scanned.hash
+        }
+        Some(_) => false,
+        None => observed.height < u64::from(WALLET_BIRTHDAY_HEIGHT),
+    })
 }
 
 fn now_unix() -> u64 {
@@ -2377,6 +2403,44 @@ mod tests {
                     .is_some_and(|key| !key.is_empty())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_scan_behind_the_tip_publishes_only_while_it_is_canonical() {
+        let checkpoint = |height, hash: &str| ChainCheckpoint {
+            height,
+            hash: hash.into(),
+        };
+        let (target, tip) = (checkpoint(10, "a"), checkpoint(12, "c"));
+        let publishable = |scanned: Option<ChainCheckpoint>, canonical: &'static str| {
+            let (target, tip) = (target.clone(), tip.clone());
+            async move {
+                scan_is_publishable(scanned.as_ref(), &target, &tip, |_| async move {
+                    Ok(canonical.to_owned())
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert!(publishable(Some(checkpoint(12, "c")), "c").await);
+        // mined past after reaching the target.
+        assert!(publishable(Some(checkpoint(10, "a")), "a").await);
+        assert!(publishable(Some(checkpoint(11, "b")), "b").await);
+        // reorganized.
+        assert!(!publishable(Some(checkpoint(10, "a")), "x").await);
+        // short of the target.
+        assert!(!publishable(Some(checkpoint(9, "z")), "z").await);
+        assert!(!publishable(Some(checkpoint(12, "z")), "c").await);
+        assert!(!publishable(Some(checkpoint(13, "d")), "c").await);
+        assert!(!publishable(None, "c").await);
+        let below_birthday = checkpoint(u64::from(WALLET_BIRTHDAY_HEIGHT) - 1, "a");
+        assert!(
+            scan_is_publishable(None, &below_birthday, &below_birthday, |_| async {
+                unreachable!()
+            })
+            .await
+            .unwrap()
+        );
     }
 
     #[tokio::test]
