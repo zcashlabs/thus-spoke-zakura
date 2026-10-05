@@ -6,4 +6,7 @@
 *.db-shm
 *.db-wal
 .DS_Store
-
+__pycache__/
+*.py[cod]
+/triage-report.json
+/triage-report.md

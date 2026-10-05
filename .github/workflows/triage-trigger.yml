@@ -1,0 +1,16 @@
+name: Triage event relay
+run-name: "Triage relay for PR #${{ github.event.pull_request.number }}"
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Signal trusted triage workflow
+        run: echo "The trusted workflow will fetch pull request metadata through the GitHub API."

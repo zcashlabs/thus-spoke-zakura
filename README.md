@@ -422,6 +422,10 @@ Release binaries and checksums are available on the
 [GitHub Releases page](https://github.com/zcashlabs/thus-spoke-zakura/releases).
 Maintainer instructions live in [RELEASING.md](RELEASING.md).
 
+Maintainers can configure the event-driven [triage bot](docs/triage-bot.md) to
+correlate issues and pull requests, assess proposed fixes, and send structured
+reports to Telegram.
+
 ## License
 
 MIT
