@@ -277,32 +277,6 @@ npm test --prefix web
 npm run build --prefix web
 ```
 
-### Ironwood action-limit integration test
-
-Prepare the node and lightwalletd images using the commands below, then run:
-
-```console
-./tests/ironwood-action-limit.sh
-```
-
-The wrapper selects the ignored `ironwood_action_limit_boundaries` Cargo test
-with the source-built server. It creates and cleans up an isolated Regtest
-fixture with NU7 active at height 1. Real V6 proofs exercise single transactions
-with 329, 330, and 331 Ironwood actions, plus two transactions totaling 330 and
-331 actions. Submission uses direct node RPC after funding, and mining is
-explicit; no 25-second mining schedule is used. The isolated fixture raises
-`mempool.max_transaction_bytes` to 2,000,000 because the default 250,000-byte
-policy would reject these transactions before consensus action validation.
-
-Accepted cases verify decoded block counts, transaction inclusion, canonical
-wallet scan checkpoints, and exact Account 2 balance increases. The aggregate
-331 case uses `getblocktemplate` proposal validation with recomputed commitments
-and NU7 coinbase fees; a valid 330-action proposal checks the same assembler
-first. Rejections must identify the action limit. This covers pure Ironwood,
-not mixed-pool limits or upgrade transitions. The live test requires Unix signal
-support, Docker, and substantial CPU/memory for large proofs; ordinary workspace
-tests only run its Docker-free helper coverage.
-
 ### Activity-recovery integration test
 
 The `activity-recovery` CI job runs the real recovery regression on Linux for
@@ -385,24 +359,10 @@ The server owns wallet synchronization and exposes the latest confirmed wallet
 snapshot to the dashboard. A hidden sixth account acts as the mining and faucet
 treasury. Account 1 starts with 5 Ironwood ZEC, so you can experiment immediately.
 
-The local chain activates every network upgrade through NU7 at height 1. This
-includes NU7's shielded action limits, transaction-version restrictions, and
-fee/subsidy rules; it does not reproduce mainnet's current upgrade schedule.
-Mining remains on demand, including automatic mining after wallet payments;
-NU7's 25-second target spacing does not schedule blocks in Regtest.
-
-Shielded payments between THS development accounts use the Ironwood pool. The
-Orchard pool stopped accepting deposits at NU6.3, so the wallet API rejects
-`orchard` as a pool. NU7 does not reopen Orchard. Account transfers support
-transparent and Ironwood payments, so testing Sapling or mixed-pool action limits
-requires dedicated transaction/block fixtures rather than ordinary dashboard
-transfers. Activating
-NU7 at height 1 also leaves no pre-upgrade Orchard funds to spend or activation
-transition to test.
-
-Use fresh chain and wallet data when moving from a pre-NU7 THS environment;
-changing the wallet parameters does not migrate an existing chain's consensus
-history. Rebuild the app image after this source change before starting THS.
+The local chain activates every network upgrade through NU6.3 at height 1, so it
+follows mainnet's current consensus rules. Shielded funds live in the Ironwood
+pool. The Orchard pool stopped accepting deposits at NU6.3, so the wallet API
+rejects `orchard` as a pool.
 
 The launcher chooses exact versioned images, labels every Docker resource by
 instance, and never binds a service beyond loopback.

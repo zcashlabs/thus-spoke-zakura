@@ -290,7 +290,6 @@ pub struct RegtestStack {
     temporary_directory: Option<TempDir>,
     data_dir: PathBuf,
     config_dir: PathBuf,
-    large_transaction_policy: bool,
     names: OwnedNames,
     executor: Arc<dyn CommandExecutor>,
     fallback_cleanup_enabled: bool,
@@ -343,7 +342,6 @@ impl RegtestStack {
             temporary_directory: Some(temporary_directory),
             data_dir,
             config_dir,
-            large_transaction_policy: false,
             names: OwnedNames::new(),
             executor,
             fallback_cleanup_enabled,
@@ -359,13 +357,6 @@ impl RegtestStack {
             cleanup_errors: Vec::new(),
             server_exit_code: None,
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn allow_large_transactions(&mut self) -> Result<()> {
-        ensure!(!self.start_attempted, "policy must be set before startup");
-        self.large_transaction_policy = true;
-        Ok(())
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -398,19 +389,6 @@ impl RegtestStack {
             "initializing the isolated server data",
         )
         .await?;
-
-        if self.large_transaction_policy {
-            let path = self.config_dir.join("zakurad.toml");
-            let mut config = std::fs::read_to_string(&path)
-                .map_err(|_| anyhow::anyhow!("reading fixture node config"))?;
-            ensure!(
-                !config.contains("[mempool]"),
-                "unexpected existing mempool section"
-            );
-            config.push_str("\n[mempool]\nmax_transaction_bytes = 2000000\n");
-            std::fs::write(path, config)
-                .map_err(|_| anyhow::anyhow!("writing fixture mempool policy"))?;
-        }
 
         let network = DockerResource::Network(self.names.network.clone());
         let chain_volume = DockerResource::Volume(self.names.chain_volume.clone());
@@ -1232,17 +1210,17 @@ impl RecoveryFailureReporter {
     }
 }
 
-/// Unix Tokio signal registration for the ignored live target.
+/// Linux-only Tokio signal registration for the ignored live target.
 pub struct TerminationSignals {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     interrupt: tokio::signal::unix::Signal,
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     terminate: tokio::signal::unix::Signal,
 }
 
 impl TerminationSignals {
     pub fn install() -> Result<Self> {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             use tokio::signal::unix::{SignalKind, signal};
             let interrupt = signal(SignalKind::interrupt())
@@ -1254,14 +1232,14 @@ impl TerminationSignals {
                 terminate,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         {
-            bail!("fixture interruption support requires Unix Tokio signals")
+            bail!("fixture interruption support requires Linux Tokio signals")
         }
     }
 
     pub async fn cancelled(&mut self) {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             tokio::select! {
                 _ = self.interrupt.recv() => {}
