@@ -14,11 +14,21 @@ import { describe, expect, it } from 'vitest';
 // jsdom rewrites import.meta.url to an http URL, so resolve from the cwd.
 const css = readFileSync(join(process.cwd(), 'src/styles/globals.css'), 'utf8');
 
+function directiveBlock(header: string): string {
+  const start = css.indexOf(header);
+  if (start < 0) throw new Error(`${header} should exist`);
+  const openingBrace = css.indexOf('{', start);
+  let depth = 0;
+  for (let i = openingBrace; i < css.length; i += 1) {
+    if (css[i] === '{') depth += 1;
+    if (css[i] === '}') depth -= 1;
+    if (depth === 0) return css.slice(openingBrace + 1, i);
+  }
+  throw new Error(`${header} should have a closing brace`);
+}
+
 function tokens(scope: 'light' | 'dark'): Record<string, string> {
-  const block =
-    scope === 'light'
-      ? css.slice(css.indexOf('@theme {'), css.indexOf('@custom-variant'))
-      : css.slice(css.indexOf("[data-theme='dark'] {"));
+  const block = directiveBlock(scope === 'light' ? '@theme {' : '@utility theme-dark {');
   const found: Record<string, string> = {};
   for (const match of block.matchAll(/--color-([a-z0-9-]+):\s*(#[0-9a-fA-F]{6})/g)) {
     const name = match[1];

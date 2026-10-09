@@ -197,8 +197,6 @@ export const transactionSchema = z.looseObject({
 });
 export type Transaction = z.infer<typeof transactionSchema>;
 
-export const mempoolSchema = z.object({ transactions: z.array(z.string()) });
-
 export const addressSchema = z.object({
   address: z.string(),
   balance: z.looseObject({
@@ -220,8 +218,6 @@ export interface SendQuoteInput {
   source_pool: Pool;
   destination_pool: Pool;
 }
-
-export const seedSchema = z.object({ seed_hex: z.string(), warning: z.string() });
 
 export const apiErrorSchema = z.object({
   error: z.object({ message: z.string(), status: z.number().int() }),

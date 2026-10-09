@@ -271,6 +271,7 @@ impl Runtime {
         json: bool,
         port_offset: u16,
     ) -> Result<()> {
+        host_ports(port_offset)?;
         self.doctor(false)?;
         for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
             require_image(&image)?;
@@ -312,27 +313,27 @@ impl Runtime {
         open_url(&self.read_instance(name)?.endpoints.dashboard)
     }
 
-    pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
+    fn instance_client(&self, name: &InstanceName) -> Result<(String, reqwest::blocking::Client)> {
         let app_container = format!("{}-app", prefix(name));
         if !container_running(&app_container).unwrap_or(false) {
             bail!("environment {name} is not running; start it with `ths --name {name}`");
         }
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
-        let response = reqwest::blocking::Client::builder()
+        let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(300))
-            .build()?
+            .build()?;
+        Ok((dashboard, client))
+    }
+
+    pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let result: MineResult = client
             .post(format!("{dashboard}/api/v1/mine"))
             .json(&serde_json::json!({"blocks": blocks}))
             .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
             .with_context(|| format!("asking environment {name} to mine {blocks} blocks"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response
-                .text()
-                .unwrap_or_else(|_| "response body was unreadable".to_owned());
-            bail!("environment {name} rejected mining ({status}): {detail}");
-        }
-        let result: MineResult = response.json().context("decoding mining response")?;
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
@@ -351,17 +352,11 @@ impl Runtime {
         amount_zatoshi: u64,
         json: bool,
     ) -> Result<()> {
-        let app_container = format!("{}-app", prefix(name));
-        if !container_running(&app_container).unwrap_or(false) {
-            bail!("environment {name} is not running; start it with `ths --name {name}`");
-        }
-        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let (dashboard, client) = self.instance_client(name)?;
         let journal = FaucetJournal::open(&self.instance_dir(name))?;
         let intent = format!("address:{address}:{amount_zatoshi}");
         let idempotency_key = journal.key_for(&intent)?;
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?
+        let result: FaucetResult = client
             .post(format!("{dashboard}/api/v1/faucet/address"))
             .json(&serde_json::json!({
                 "address": address,
@@ -369,15 +364,9 @@ impl Runtime {
                 "idempotency_key": idempotency_key,
             }))
             .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
             .with_context(|| format!("asking environment {name} to fund {address}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response
-                .text()
-                .unwrap_or_else(|_| "response body was unreadable".to_owned());
-            bail!("environment {name} rejected faucet request ({status}): {detail}");
-        }
-        let result: FaucetResult = response.json().context("decoding faucet response")?;
         if result.status == "confirmed" && result.block_hash.is_none() {
             bail!("faucet reported confirmation without a block hash; retry the same command");
         }
@@ -417,17 +406,32 @@ impl Runtime {
         pool: &str,
         json: bool,
     ) -> Result<()> {
-        let app_container = format!("{}-app", prefix(name));
-        if !container_running(&app_container).unwrap_or(false) {
-            bail!("environment {name} is not running; start it with `ths --name {name}`");
-        }
-        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_faucet_with(
+            name,
+            &dashboard,
+            &client,
+            accounts,
+            amount_zatoshi,
+            pool,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wallet_faucet_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        accounts: &[u8],
+        amount_zatoshi: u64,
+        pool: &str,
+        json: bool,
+    ) -> Result<()> {
         let journal = FaucetJournal::open(&self.instance_dir(name))?;
         let batch = journal.wallet_batch(pool, amount_zatoshi, accounts)?;
         let intents: Vec<_> = accounts.iter().map(|id| format!("{batch}:{id}")).collect();
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?;
         let mut funded = Vec::new();
         let mut pending = Vec::new();
         let mut failures = Vec::new();
@@ -443,7 +447,7 @@ impl Runtime {
                 }))
                 .send()
                 .with_context(|| format!("asking environment {name} to fund account {account_id}"));
-            match outcome.and_then(decode_activity) {
+            match outcome.and_then(decode_response::<Activity>) {
                 Ok(activity) if activity.status == "confirmed" => funded.push(activity),
                 Ok(activity) => pending.push(activity),
                 Err(error) => failures.push(format!("account {account_id}: {error:#}")),
@@ -502,15 +506,9 @@ impl Runtime {
         memo: Option<&str>,
         json: bool,
     ) -> Result<()> {
-        let app_container = format!("{}-app", prefix(name));
-        if !container_running(&app_container).unwrap_or(false) {
-            bail!("environment {name} is not running; start it with `ths --name {name}`");
-        }
-        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let (dashboard, client) = self.instance_client(name)?;
         let idempotency_key = format!("ths-wallet-send-{}", uuid::Uuid::new_v4());
-        let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()?
+        let activity: Activity = client
             .post(format!("{dashboard}/api/v1/send"))
             .json(&serde_json::json!({
                 "from_account": from,
@@ -522,10 +520,11 @@ impl Runtime {
                 "memo": memo,
             }))
             .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
             .with_context(|| {
                 format!("asking environment {name} to send from account {from} to account {to}")
             })?;
-        let activity = decode_activity(response)?;
         if json {
             println!("{}", serde_json::to_string_pretty(&activity)?);
         } else {
@@ -548,15 +547,21 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn logs(&self, name: &InstanceName, service: Option<&str>, follow: bool) -> Result<()> {
+    pub fn logs(
+        &self,
+        name: &InstanceName,
+        service: Option<&str>,
+        follow: bool,
+        tail: Option<u64>,
+        head: Option<u64>,
+    ) -> Result<()> {
         let service = service.unwrap_or("app");
-        let mut args = vec!["logs"];
-        if follow {
-            args.push("--follow");
-        }
         let container = format!("{}-{service}", prefix(name));
-        args.push(&container);
-        docker_inherit(&args)
+        if let Some(lines) = head {
+            return print_log_head(&container, lines);
+        }
+        let args = logs_args(&container, follow, tail);
+        docker_inherit(&args.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     pub fn stop(&self, name: &InstanceName) -> Result<()> {
@@ -705,7 +710,9 @@ impl Runtime {
     }
 }
 
-fn decode_activity(response: reqwest::blocking::Response) -> Result<Activity> {
+fn decode_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+) -> Result<T> {
     let status = response.status();
     if !status.is_success() {
         let detail = response
@@ -741,10 +748,18 @@ fn host_ports(offset: u16) -> Result<HostPorts> {
         bail!("--port-offset must be a multiple of 10 (got {offset})");
     }
     Ok(HostPorts {
-        dashboard: 32805 + offset,
-        rpc: 18232 + offset,
-        p2p: 18233 + offset,
-        lightwalletd: 9067 + offset,
+        dashboard: 32805u16
+            .checked_add(offset)
+            .with_context(|| format!("--port-offset {offset} overflows the dashboard port"))?,
+        rpc: 18232u16
+            .checked_add(offset)
+            .with_context(|| format!("--port-offset {offset} overflows the Zakura RPC port"))?,
+        p2p: 18233u16
+            .checked_add(offset)
+            .with_context(|| format!("--port-offset {offset} overflows the P2P port"))?,
+        lightwalletd: 9067u16
+            .checked_add(offset)
+            .with_context(|| format!("--port-offset {offset} overflows the lightwalletd port"))?,
     })
 }
 
@@ -1315,6 +1330,7 @@ impl Runtime {
         host: &dyn StartHost,
         shutdown: &Shutdown,
     ) -> Result<()> {
+        host_ports(port_offset)?;
         let mut cleanup = CleanupOnDrop {
             runtime: self,
             name,
@@ -1472,6 +1488,62 @@ fn open_url(url: &str) -> Result<()> {
 fn docker<const N: usize>(args: [&str; N]) -> Result<()> {
     docker_inherit(&args)
 }
+fn logs_args(container: &str, follow: bool, tail: Option<u64>) -> Vec<String> {
+    let mut args = vec!["logs".to_owned()];
+    if follow {
+        args.push("--follow".to_owned());
+    }
+    if let Some(lines) = tail {
+        args.extend(["--tail".to_owned(), lines.to_string()]);
+    }
+    args.push(container.to_owned());
+    args
+}
+
+/// docker has no head option, so stream both of its output streams through
+/// one pipe and stop the `docker logs` process once enough lines have been printed.
+fn print_log_head(container: &str, lines: u64) -> Result<()> {
+    let (reader, writer) = std::io::pipe().context("creating log pipe")?;
+    let mut child = Command::new("docker")
+        .args(["logs", container])
+        .stdout(writer.try_clone()?)
+        .stderr(writer)
+        .spawn()
+        .context("running Docker")?;
+    let printed = copy_lines(
+        std::io::BufReader::new(reader),
+        std::io::stdout().lock(),
+        lines,
+    )?;
+    if printed == lines {
+        child.kill().context("stopping docker logs")?;
+    }
+    // a killed `docker logs` leaves no exit code, so only its own failures count
+    if child.wait()?.code().is_some_and(|code| code != 0) {
+        bail!("docker logs {container} failed");
+    }
+    Ok(())
+}
+
+fn copy_lines(
+    mut reader: impl std::io::BufRead,
+    mut out: impl std::io::Write,
+    limit: u64,
+) -> std::io::Result<u64> {
+    let mut line = Vec::new();
+    let mut copied = 0;
+    while copied < limit {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        out.write_all(&line)?;
+        copied += 1;
+    }
+    out.flush()?;
+    Ok(copied)
+}
+
 fn docker_inherit(args: &[&str]) -> Result<()> {
     docker_command(args, None)
 }
@@ -1523,6 +1595,46 @@ mod tests {
         collections::HashMap,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn builds_docker_logs_arguments() {
+        assert_eq!(
+            logs_args("ths-default-app", false, None),
+            ["logs", "ths-default-app"]
+        );
+        assert_eq!(
+            logs_args("ths-default-zakura", true, None),
+            ["logs", "--follow", "ths-default-zakura"]
+        );
+        assert_eq!(
+            logs_args("ths-default-app", false, Some(200)),
+            ["logs", "--tail", "200", "ths-default-app"]
+        );
+        assert_eq!(
+            logs_args("ths-default-lightwalletd", true, Some(200)),
+            [
+                "logs",
+                "--follow",
+                "--tail",
+                "200",
+                "ths-default-lightwalletd"
+            ]
+        );
+    }
+
+    #[test]
+    fn copies_only_the_requested_leading_lines() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new("one\ntwo\nthree\n");
+        assert_eq!(copy_lines(&mut input, &mut out, 2).unwrap(), 2);
+        assert_eq!(out, b"one\ntwo\n");
+        assert_eq!(input.position(), 8, "read past the requested lines");
+
+        let mut out = Vec::new();
+        let input = std::io::Cursor::new("one\ntwo");
+        assert_eq!(copy_lines(input, &mut out, 5).unwrap(), 2);
+        assert_eq!(out, b"one\ntwo");
+    }
 
     struct RecordingDocker {
         output: HashMap<String, String>,
@@ -2127,6 +2239,112 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// answers loopback requests in turn with canned statuses and bodies, passing on each
+    /// request body.
+    fn serve(responses: Vec<(&'static str, &'static str)>) -> (String, mpsc::Receiver<String>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (requests, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                requests.send(String::from_utf8(request).unwrap()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (url, received)
+    }
+
+    #[test]
+    fn responses_decode_or_report_their_status_and_body() {
+        let (url, _requests) = serve(vec![
+            ("200 OK", r#"{"blocks":1,"hashes":["tip"]}"#),
+            ("409 Conflict", "already claimed"),
+            ("200 OK", "not json"),
+        ]);
+        let client = reqwest::blocking::Client::new();
+        let get = || client.get(&url).send().unwrap();
+
+        let mined: MineResult = decode_response(get()).unwrap();
+        assert_eq!(mined.hashes, ["tip"]);
+        let rejected = decode_response::<MineResult>(get())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(rejected, "rejected (409 Conflict): already claimed");
+        let malformed = format!("{:#}", decode_response::<MineResult>(get()).unwrap_err());
+        assert!(malformed.starts_with("decoding response: "), "{malformed}");
+    }
+
+    #[test]
+    fn wallet_faucet_keeps_funding_after_a_failed_account_and_keeps_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let alpha = name("alpha");
+        fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
+        let pending = r#"{"id":"a","kind":"faucet","from_account":null,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":100,"txid":"t","block_hash":null,"status":"broadcast"}"#;
+        let funded = r#"{"id":"b","kind":"faucet","from_account":null,"to_account":3,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":100,"txid":"u","block_hash":"b","status":"confirmed"}"#;
+        let (url, requests) = serve(vec![
+            ("422 Unprocessable Entity", "no funds"),
+            ("200 OK", pending),
+            ("200 OK", funded),
+        ]);
+
+        let error = runtime
+            .wallet_faucet_with(
+                &alpha,
+                &url,
+                &reqwest::blocking::Client::new(),
+                &[1, 2, 3],
+                100,
+                "ironwood",
+                true,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "2 of 3 faucet requests are pending or failed"
+        );
+
+        let requests: Vec<serde_json::Value> = requests
+            .try_iter()
+            .map(|request| serde_json::from_str(&request).unwrap())
+            .collect();
+        assert_eq!(requests.len(), 3);
+        let journal = FaucetJournal::open(&runtime.instance_dir(&alpha)).unwrap();
+        for (account, request) in (1..=3).zip(&requests) {
+            assert_eq!(request["account_id"], account);
+            // the unfinished batch keeps every key, so a retry submits the same ones.
+            assert_eq!(
+                request["idempotency_key"],
+                journal
+                    .key_for(&format!("wallet:ironwood:100:1,2,3:{account}"))
+                    .unwrap()
+            );
+        }
+    }
+
     #[test]
     fn readiness_failure_deletes_the_started_instance() {
         let (mut host, events) = RecordingHost::new();
@@ -2359,6 +2577,33 @@ mod tests {
     fn port_offset_rejects_values_that_are_not_multiples_of_ten() {
         let err = host_ports(1).unwrap_err();
         assert!(err.to_string().contains('1'));
+    }
+
+    #[test]
+    fn port_offset_accepts_the_largest_value_that_keeps_every_port_in_range() {
+        let ports = host_ports(32730).unwrap();
+        assert_eq!(ports.dashboard, 65535);
+    }
+
+    #[test]
+    fn port_offset_rejects_values_that_overflow_a_host_port() {
+        let err = host_ports(32740).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn invalid_port_offset_is_rejected_before_any_deletion_or_allocation() {
+        let (mut host, events) = RecordingHost::new();
+        host.initial_delete_error = true;
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+
+        let error = runtime_for_tests()
+            .start_with(&name("alpha"), false, false, 32740, &host, &shutdown)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("overflow"));
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]

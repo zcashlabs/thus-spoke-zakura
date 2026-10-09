@@ -54,6 +54,18 @@ describe('formatZec', () => {
     expect(formatZec(250_000_000n, { trailingZeros: true })).toBe('2.50000000');
   });
 
+  it('leaves thousands ungrouped on request so the result parses back exactly', () => {
+    for (const [value, text] of [
+      [99_999_999_999n, '999.99999999'],
+      [100_000_000_000n, '1000'],
+      [100_000_000_001n, '1000.00000001'],
+      [1n, '0.00000001'],
+    ] as const) {
+      expect(formatZec(value, { grouping: false })).toBe(text);
+      expect(parseZec(text)).toBe(value);
+    }
+  });
+
   it('round-trips through parseZec', () => {
     for (const value of [0n, 1n, 54n, 500_000_000n, 267_500_000n, 8_140_000_000n]) {
       expect(parseZec(formatZec(value))).toBe(value);

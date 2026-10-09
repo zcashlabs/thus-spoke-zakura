@@ -147,7 +147,10 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         match api::dependencies_ready(&state).await {
             Ok(()) => break,
             Err(error) if Instant::now() < deadline => {
-                tracing::info!(%error, "waiting for Zakura and lightwalletd");
+                tracing::info!(
+                    error = %format_args!("{error:#}"),
+                    "waiting for Zakura and lightwalletd"
+                );
                 tokio::time::sleep(Duration::from_millis(750)).await;
             }
             Err(error) => return Err(error).context("waiting for startup dependencies"),

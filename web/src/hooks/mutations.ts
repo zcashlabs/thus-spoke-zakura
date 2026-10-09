@@ -153,14 +153,6 @@ export function useFaucet(): UseMutationResult<FaucetOperationResult, Error, Fau
   });
 }
 
-export function useMine(): UseMutationResult<{ blocks: number }, Error, number> {
-  const invalidate = useInvalidateWallet();
-  return useMutation({
-    mutationFn: (blocks: number) => api.mine(blocks),
-    onSuccess: invalidate,
-  });
-}
-
 export function useStartMining(): UseMutationResult<MiningJob, Error, number> {
   const queryClient = useQueryClient();
   const operation = operationKey('mine', (blocks: number) => String(blocks));

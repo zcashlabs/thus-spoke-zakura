@@ -185,7 +185,7 @@ export function SendDialog({
                 onClick={() => {
                   const max = quote.data?.max_zatoshi;
                   if (max === undefined) return;
-                  form.setValue('amount', formatZec(max), {
+                  form.setValue('amount', formatZec(max, { grouping: false }), {
                     shouldDirty: true,
                     shouldValidate: true,
                   });

@@ -19,12 +19,18 @@ export function applyTheme(preference: ThemePreference): void {
   else root.setAttribute('data-theme', preference);
 }
 
-export function readStoredTheme(): ThemePreference {
+/**
+ * Reads the stored preference.
+ *
+ * `null` means storage would not answer — private browsing, a blocked storage
+ * partition. That is not the same as "nothing saved", which is `system`: the
+ * caller keeps its own selection in the first case, and drops it in the second.
+ */
+export function readStoredTheme(): ThemePreference | null {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
     return isThemePreference(stored) ? stored : 'system';
   } catch {
-    // Private browsing or a blocked storage partition: fall back to system.
-    return 'system';
+    return null;
   }
 }

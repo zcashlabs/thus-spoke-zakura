@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyTheme, isThemePreference, readStoredTheme, THEME_STORAGE_KEY } from './theme';
 
 describe('theme preference', () => {
@@ -7,8 +7,21 @@ describe('theme preference', () => {
     document.documentElement.removeAttribute('data-theme');
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('defaults to following the system', () => {
     expect(readStoredTheme()).toBe('system');
+  });
+
+  it('reports a refusal to read rather than following the system', () => {
+    // Private browsing or a blocked partition: the caller keeps its own
+    // selection, so this must not look like "nothing saved".
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('storage is blocked', 'SecurityError');
+    });
+    expect(readStoredTheme()).toBeNull();
   });
 
   it('round-trips an explicit choice', () => {

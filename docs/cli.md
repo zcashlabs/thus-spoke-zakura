@@ -95,7 +95,7 @@ ths endpoints --json
 JSON output includes `"network": "regtest"` and `"tls": false`; lightwalletd
 uses plaintext HTTP on loopback.
 
-### `ths logs [app|zakura|lightwalletd] [-f|--follow]`
+### `ths logs [app|zakura|lightwalletd] [-f|--follow] [--tail N | --head N]`
 
 Prints or streams logs for a service in the named environment. Defaults to the
 `app` (dashboard/server) service.
@@ -104,6 +104,8 @@ Prints or streams logs for a service in the named environment. Defaults to the
 ths logs                       # last logs from the app service
 ths logs zakura -f             # follow node logs
 ths logs lightwalletd --follow # follow lightwalletd logs
+ths logs --tail 200 -f         # last 200 app lines, then follow
+ths logs zakura --head 200     # first 200 node lines
 ```
 
 ### `ths stop`
@@ -399,7 +401,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths wallet send --from --to --amount [--source-pool] [--destination-pool] [--memo]` | Send between accounts or pools, optionally with an Ironwood memo |
 | `ths wallet shield --from --to --amount [--memo]` | Spend transparent funds into the same or another account's Ironwood balance |
 | `ths wallet unshield --from --to --amount` | Spend Ironwood funds into the same or another account's transparent balance |
-| `ths logs [service] [-f]` | Stream or print service logs |
+| `ths logs [service] [-f] [--tail N \| --head N]` | Stream or print service logs |
 | `ths list` | List known environments |
 | `ths stop` | Stop and delete the environment |
 | `ths reset --force` | Force-delete one environment and all its data |

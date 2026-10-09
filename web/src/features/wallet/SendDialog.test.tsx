@@ -345,6 +345,33 @@ describe('SendDialog', () => {
     expect(body(fetchMock).amount_zatoshi).toBe(499_990_000);
   });
 
+  it('fills a maximum of 1,000 ZEC without separators and sends it exactly', async () => {
+    fetchMock.mockImplementation(
+      sendImpl({
+        available_zatoshi: 100_000_010_000,
+        fee_zatoshi: 10_000,
+        max_zatoshi: 100_000_000_000,
+      }),
+    );
+    const accounts = testAccounts.map((account) => ({
+      ...account,
+      ironwood_zatoshi: account.id === 1 ? 100_000_010_000n : 0n,
+    }));
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={accounts} />);
+
+    const max = await screen.findByRole('button', { name: 'Max' });
+    await waitFor(() => expect(max).toBeEnabled());
+    expect(
+      screen.getByText('1,000 ZEC spendable after a 0.0001 ZEC network fee.'),
+    ).toBeInTheDocument();
+    await userEvent.click(max);
+
+    expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1000');
+    await userEvent.click(screen.getByRole('button', { name: /Send ZEC/i }));
+    await waitFor(() => expect(sendCalls(fetchMock)).toHaveLength(1));
+    expect(body(fetchMock).amount_zatoshi).toBe(100_000_000_000);
+  });
+
   it('disables Max when nothing is spendable after the fee', async () => {
     fetchMock.mockImplementation(sendImpl({ ...QUOTE, available_zatoshi: 10_000, max_zatoshi: 0 }));
     renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);

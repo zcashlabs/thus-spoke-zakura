@@ -7,6 +7,7 @@ import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
 import { SakuraMark } from '@/components/ui/SakuraMark';
 import { useStatus } from '@/hooks/queries';
 import { errorMessage } from '@/lib/api';
+import type { WalletSync } from '@/lib/api/schemas';
 import { cn } from '@/lib/cn';
 import { Stat } from '@/components/ui/Stat';
 
@@ -18,6 +19,47 @@ const ENDPOINT_ROWS = [
   { key: 'p2p', label: 'P2P' },
 ] as const;
 
+type IndicatorTone = 'positive' | 'warning' | 'negative' | 'neutral';
+
+const DOT_TONE: Record<IndicatorTone, string> = {
+  positive: 'bg-positive',
+  warning: 'bg-warning',
+  negative: 'bg-negative',
+  neutral: 'bg-ink-subtle',
+};
+
+const TEXT_TONE: Record<IndicatorTone, string> = {
+  positive: 'text-positive',
+  warning: 'text-warning',
+  negative: 'text-negative',
+  neutral: 'text-ink-muted',
+};
+
+/** A labelled status dot. A lone coloured square is decoration, not
+ * information, and is invisible to a screen reader. */
+function StatusIndicator({ label, tone }: { label: string; tone: IndicatorTone }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className={cn('size-2 rounded-full', DOT_TONE[tone])} aria-hidden />
+      <span className={cn('text-[11px] font-bold tracking-[0.12em] uppercase', TEXT_TONE[tone])}>
+        {label}
+      </span>
+    </div>
+  );
+}
+
+const WALLET_LABEL: Record<WalletSync['state'], string> = {
+  ready: 'Wallet ready',
+  syncing: 'Wallet syncing',
+  error: 'Wallet error',
+};
+
+const WALLET_TONE: Record<WalletSync['state'], IndicatorTone> = {
+  ready: 'positive',
+  syncing: 'warning',
+  error: 'negative',
+};
+
 export function NetworkPage() {
   const status = useStatus();
 
@@ -27,6 +69,24 @@ export function NetworkPage() {
   const node = status.data.node;
   const online = node !== null;
   const endpoints = status.data.endpoints;
+  // Older servers omit wallet_sync entirely; render a neutral fallback
+  // instead of inventing a readiness state the server never reported.
+  const walletState = status.data.wallet_sync?.state;
+  const walletLabel = walletState ? WALLET_LABEL[walletState] : 'Wallet status unavailable';
+  const walletTone: IndicatorTone = walletState ? WALLET_TONE[walletState] : 'neutral';
+
+  // Node connectivity and wallet readiness are independent: a reachable node
+  // can still have a syncing or failed wallet, so "operational" only holds
+  // when both agree. A missing wallet_sync is treated as unknown, not ready.
+  const headline = !online
+    ? 'Waiting for Zakura'
+    : walletState === 'ready'
+      ? 'All systems operational'
+      : walletState === 'syncing'
+        ? 'Wallet is syncing'
+        : walletState === 'error'
+          ? 'Wallet synchronization failed'
+          : 'Node connected';
 
   return (
     <div className="grid gap-4">
@@ -35,21 +95,12 @@ export function NetworkPage() {
           <h1 className="text-2xl font-bold tracking-[-0.02em]">{status.data.instance}</h1>
           <Badge>{status.data.network}</Badge>
         </div>
-        {/* The status marker is labelled: a lone coloured square is decoration,
-            not information, and is invisible to a screen reader. */}
-        <div className="flex items-center gap-2">
-          <span
-            className={cn('size-2 rounded-full', online ? 'bg-positive' : 'bg-ink-subtle')}
-            aria-hidden
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <StatusIndicator
+            label={online ? 'Online' : 'Offline'}
+            tone={online ? 'positive' : 'neutral'}
           />
-          <span
-            className={cn(
-              'text-[11px] font-bold tracking-[0.12em] uppercase',
-              online ? 'text-positive' : 'text-ink-muted',
-            )}
-          >
-            {online ? 'Online' : 'Offline'}
-          </span>
+          <StatusIndicator label={walletLabel} tone={walletTone} />
         </div>
       </header>
 
@@ -58,9 +109,7 @@ export function NetworkPage() {
           <span className="text-ink-muted block text-[11px] font-bold tracking-[0.12em] uppercase">
             Node health
           </span>
-          <strong className="my-1.5 block text-xl font-bold tracking-[-0.02em]">
-            {online ? 'All systems operational' : 'Waiting for Zakura'}
-          </strong>
+          <strong className="my-1.5 block text-xl font-bold tracking-[-0.02em]">{headline}</strong>
           <small className="text-ink-muted block text-[12px]">
             Auto-mining is {status.data.auto_mine ? 'enabled' : 'disabled'} · blocks are produced on
             demand

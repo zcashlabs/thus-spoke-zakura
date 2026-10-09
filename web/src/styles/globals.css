@@ -280,102 +280,64 @@
   );
 }
 
+@utility theme-dark {
+  /* Surfaces stay neutral. Tinting them toward the accent — as the light
+     theme does — reads as a muddy colour cast at these luminances; on
+     dark the accent should be the only chromatic thing on screen. */
+  --color-canvas: #0e0f11;
+  --color-panel: #16181b;
+  --color-raised: #1e2126;
+  --color-sunken: #0a0b0c;
+
+  --color-line: #272a2f;
+  --color-line-strong: #3a3e45;
+  --color-bevel-light: #4d5460;
+  --color-bevel-dark: #0d0f11;
+  --color-face-top: #24272c;
+  --color-face-bottom: #131518;
+  --color-caption-top: #1f2227;
+
+  --color-ink: #eef0f3;
+  --color-ink-muted: #a6abb3;
+  --color-ink-subtle: #6e737b;
+
+  --color-accent: #e08aa0;
+  --color-accent-hover: #f0a8b9;
+  --color-accent-ink: #1a1013;
+  --color-accent-soft: #221b1e;
+  --color-accent-line: #453035;
+  --color-accent-strong: #f0a8b9;
+  --color-petal: #5c4753;
+  --color-petal-edge: #6b5261;
+  --color-shimmer: #383b45;
+  --color-flash: #403037;
+
+  --color-positive: #6cc48d;
+  --color-positive-soft: #14201a;
+  --color-warning: #d8b263;
+  --color-warning-soft: #221e14;
+  --color-negative: #e58a9a;
+  --color-negative-soft: #241a1d;
+
+  --shadow-pop: 2px 2px 6px rgb(0 0 0 / 0.5);
+  --shadow-float: 2px 2px 12px rgb(0 0 0 / 0.55);
+  --shadow-modal: 4px 4px 24px rgb(0 0 0 / 0.65);
+}
+
 /* An explicit choice always wins; otherwise follow the system. Both selectors
    set the same custom properties, so the whole interface re-themes from here
    and no component needs a dark: variant. */
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
 @layer theme {
-  [data-theme='dark'],
-  :root:not([data-theme]) {
-    @media (prefers-color-scheme: dark) {
-      /* Surfaces stay neutral. Tinting them toward the accent — as the light
-         theme does — reads as a muddy colour cast at these luminances; on
-         dark the accent should be the only chromatic thing on screen. */
-      --color-canvas: #0e0f11;
-      --color-panel: #16181b;
-      --color-raised: #1e2126;
-      --color-sunken: #0a0b0c;
-
-      --color-line: #272a2f;
-      --color-line-strong: #3a3e45;
-      --color-bevel-light: #4d5460;
-      --color-bevel-dark: #0d0f11;
-      --color-face-top: #24272c;
-      --color-face-bottom: #131518;
-      --color-caption-top: #1f2227;
-
-      --color-ink: #eef0f3;
-      --color-ink-muted: #a6abb3;
-      --color-ink-subtle: #6e737b;
-
-      --color-accent: #e08aa0;
-      --color-accent-hover: #f0a8b9;
-      --color-accent-ink: #1a1013;
-      --color-accent-soft: #221b1e;
-      --color-accent-line: #453035;
-      --color-accent-strong: #f0a8b9;
-      --color-petal: #5c4753;
-      --color-petal-edge: #6b5261;
-      --color-shimmer: #383b45;
-      --color-flash: #403037;
-
-      --color-positive: #6cc48d;
-      --color-positive-soft: #14201a;
-      --color-warning: #d8b263;
-      --color-warning-soft: #221e14;
-      --color-negative: #e58a9a;
-      --color-negative-soft: #241a1d;
-
-      --shadow-pop: 2px 2px 6px rgb(0 0 0 / 0.5);
-      --shadow-float: 2px 2px 12px rgb(0 0 0 / 0.55);
-      --shadow-modal: 4px 4px 24px rgb(0 0 0 / 0.65);
-    }
+  [data-theme='dark'] {
+    @apply theme-dark;
   }
 
-  /* The same values, applied unconditionally when dark is chosen explicitly. */
-  [data-theme='dark'] {
-    /* Surfaces stay neutral. Tinting them toward the accent — as the light
-       theme does — reads as a muddy colour cast at these luminances; on
-       dark the accent should be the only chromatic thing on screen. */
-    --color-canvas: #0e0f11;
-    --color-panel: #16181b;
-    --color-raised: #1e2126;
-    --color-sunken: #0a0b0c;
-
-    --color-line: #272a2f;
-    --color-line-strong: #3a3e45;
-    --color-bevel-light: #4d5460;
-    --color-bevel-dark: #0d0f11;
-    --color-face-top: #24272c;
-    --color-face-bottom: #131518;
-    --color-caption-top: #1f2227;
-
-    --color-ink: #eef0f3;
-    --color-ink-muted: #a6abb3;
-    --color-ink-subtle: #6e737b;
-
-    --color-accent: #e08aa0;
-    --color-accent-hover: #f0a8b9;
-    --color-accent-ink: #1a1013;
-    --color-accent-soft: #221b1e;
-    --color-accent-line: #453035;
-    --color-accent-strong: #f0a8b9;
-    --color-petal: #5c4753;
-    --color-petal-edge: #6b5261;
-    --color-shimmer: #383b45;
-    --color-flash: #403037;
-
-    --color-positive: #6cc48d;
-    --color-positive-soft: #14201a;
-    --color-warning: #d8b263;
-    --color-warning-soft: #221e14;
-    --color-negative: #e58a9a;
-    --color-negative-soft: #241a1d;
-
-    --shadow-pop: 2px 2px 6px rgb(0 0 0 / 0.5);
-    --shadow-float: 2px 2px 12px rgb(0 0 0 / 0.55);
-    --shadow-modal: 4px 4px 24px rgb(0 0 0 / 0.65);
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      @apply theme-dark;
+    }
   }
 }
 

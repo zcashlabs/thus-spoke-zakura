@@ -17,6 +17,20 @@ bin="$tmp/bin"
 install_dir="$tmp/install"
 mkdir -p "$fixtures/payload" "$bin" "$install_dir"
 
+write_checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash="$(sha256sum "$fixtures/$asset" | awk '{print $1}')"
+  else
+    hash="$(shasum -a 256 "$fixtures/$asset" | awk '{print $1}')"
+  fi
+  printf '%s  %s\n' "$hash" "$asset" > "$fixtures/SHA256SUMS"
+}
+
+package_payload() {
+  tar -czf "$fixtures/$asset" -C "$fixtures/payload" ths
+  write_checksum
+}
+
 cat > "$fixtures/payload/ths" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
@@ -26,13 +40,7 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$fixtures/payload/ths"
-tar -czf "$fixtures/$asset" -C "$fixtures/payload" ths
-if command -v sha256sum >/dev/null 2>&1; then
-  hash="$(sha256sum "$fixtures/$asset" | awk '{print $1}')"
-else
-  hash="$(shasum -a 256 "$fixtures/$asset" | awk '{print $1}')"
-fi
-printf '%s  %s\n' "$hash" "$asset" > "$fixtures/SHA256SUMS"
+package_payload
 
 cat > "$bin/curl" <<'EOF'
 #!/bin/sh
@@ -60,13 +68,7 @@ sed 's/9\.8\.7/8.0.0/' "$fixtures/payload/ths" \
   > "$fixtures/payload/ths.next"
 mv "$fixtures/payload/ths.next" "$fixtures/payload/ths"
 chmod +x "$fixtures/payload/ths"
-tar -czf "$fixtures/$asset" -C "$fixtures/payload" ths
-if command -v sha256sum >/dev/null 2>&1; then
-  hash="$(sha256sum "$fixtures/$asset" | awk '{print $1}')"
-else
-  hash="$(shasum -a 256 "$fixtures/$asset" | awk '{print $1}')"
-fi
-printf '%s  %s\n' "$hash" "$asset" > "$fixtures/SHA256SUMS"
+package_payload
 PATH="$bin:$PATH" FIXTURES="$fixtures" THS_INSTALL_DIR="$install_dir" \
   THS_VERSION=8.0.0 THS_SKIP_IMAGE_PULL=1 "$root/install.sh"
 test "$("$install_dir/ths" --version)" = "ths 8.0.0"
@@ -91,12 +93,7 @@ fi
 test "$(cat "$install_dir/ths")" = old
 
 printf '%s\n' incomplete > "$fixtures/$asset"
-if command -v sha256sum >/dev/null 2>&1; then
-  hash="$(sha256sum "$fixtures/$asset" | awk '{print $1}')"
-else
-  hash="$(shasum -a 256 "$fixtures/$asset" | awk '{print $1}')"
-fi
-printf '%s  %s\n' "$hash" "$asset" > "$fixtures/SHA256SUMS"
+write_checksum
 if PATH="$bin:$PATH" FIXTURES="$fixtures" THS_INSTALL_DIR="$install_dir" \
   THS_VERSION=v9.8.7 THS_SKIP_IMAGE_PULL=1 "$root/install.sh"; then
   echo "installer unexpectedly accepted an incomplete archive" >&2

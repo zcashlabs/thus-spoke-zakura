@@ -26,7 +26,10 @@ export function parseZec(input: string): bigint | null {
 }
 
 /** Formats zatoshi as a ZEC string, trimming insignificant trailing zeros. */
-export function formatZec(zatoshi: bigint, options?: { trailingZeros?: boolean }): string {
+export function formatZec(
+  zatoshi: bigint,
+  options?: { trailingZeros?: boolean; grouping?: boolean },
+): string {
   const negative = zatoshi < 0n;
   const absolute = negative ? -zatoshi : zatoshi;
 
@@ -34,7 +37,10 @@ export function formatZec(zatoshi: bigint, options?: { trailingZeros?: boolean }
   const fraction = (absolute % ZATOSHIS_PER_ZEC).toString().padStart(ZEC_DECIMALS, '0');
   const visible = options?.trailingZeros ? fraction : fraction.replace(/0+$/, '');
 
-  const grouped = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const grouped =
+    options?.grouping === false
+      ? whole.toString()
+      : whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${negative ? '-' : ''}${grouped}${visible ? `.${visible}` : ''}`;
 }
 

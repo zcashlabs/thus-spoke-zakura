@@ -25,7 +25,6 @@ export const queryKeys = {
   blocks: (before?: number) => ['blocks', before ?? 'tip'] as const,
   block: (id: string) => ['block', id] as const,
   transaction: (txid: string) => ['transaction', txid] as const,
-  mempool: ['mempool'] as const,
   address: (address: string) => ['address', address] as const,
   sendQuote: (params: SendQuoteInput) => ['send-quote', params] as const,
 };
