@@ -34,6 +34,11 @@ function PoolLabel({ pool }: { pool: Activity['source_pool'] }) {
   );
 }
 
+function recipientLabel(activity: Activity): string {
+  if (activity.to_account !== null) return `Account ${activity.to_account}`;
+  return shortHash(activity.to_address ?? '', 14, 6);
+}
+
 function ActivityRow({ activity, index }: { activity: Activity; index: number }) {
   const isFaucet = activity.kind === 'faucet';
 
@@ -56,8 +61,8 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
           >
             <span className="block truncate">
               {isFaucet
-                ? `Faucet → Account ${activity.to_account}`
-                : `Account ${activity.from_account ?? '?'} → Account ${activity.to_account}`}
+                ? `Faucet → ${recipientLabel(activity)}`
+                : `Account ${activity.from_account ?? '?'} → ${recipientLabel(activity)}`}
             </span>
           </Link>
         </div>

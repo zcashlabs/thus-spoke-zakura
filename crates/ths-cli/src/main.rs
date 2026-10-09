@@ -165,11 +165,21 @@ struct SendArgs {
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
     from: u8,
     /// Destination account index (1-5); may match --from when pools differ.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
-    to: u8,
-    /// Amount of ZEC to send, up to 8 decimal places.
-    #[arg(long)]
-    amount: SendAmount,
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u8).range(1..=5),
+        required_unless_present = "uri",
+        conflicts_with = "uri"
+    )]
+    to: Option<u8>,
+    /// ZIP-321 payment URI to pay instead of --to. It sets the destination,
+    /// pool, and memo, and the amount unless it omits one.
+    #[arg(long, conflicts_with_all = ["destination_pool", "memo"])]
+    uri: Option<String>,
+    /// Amount of ZEC to send, up to 8 decimal places. With --uri, only for a
+    /// URI that does not set an amount.
+    #[arg(long, required_unless_present = "uri")]
+    amount: Option<SendAmount>,
     /// Pool to spend from.
     #[arg(long = "source-pool", value_enum, default_value = "ironwood")]
     source_pool: Pool,
@@ -253,8 +263,9 @@ fn main() -> Result<ExitCode> {
                 &cli.name,
                 SendArgs {
                     from,
-                    to,
-                    amount,
+                    to: Some(to),
+                    uri: None,
+                    amount: Some(amount),
                     source_pool: Pool::Transparent,
                     destination_pool: Pool::Ironwood,
                     memo,
@@ -266,8 +277,9 @@ fn main() -> Result<ExitCode> {
                 &cli.name,
                 SendArgs {
                     from,
-                    to,
-                    amount,
+                    to: Some(to),
+                    uri: None,
+                    amount: Some(amount),
                     source_pool: Pool::Ironwood,
                     destination_pool: Pool::Transparent,
                     memo: None,
@@ -290,7 +302,7 @@ fn main() -> Result<ExitCode> {
 }
 
 fn check_send(args: &SendArgs) -> Result<()> {
-    if args.from == args.to && args.source_pool == args.destination_pool {
+    if args.to == Some(args.from) && args.source_pool == args.destination_pool {
         bail!("choose a different --to account or a different --destination-pool");
     }
     if args.memo.is_some() && args.destination_pool == Pool::Transparent {
@@ -303,13 +315,26 @@ fn check_send(args: &SendArgs) -> Result<()> {
 
 fn send(runtime: &Runtime, name: &InstanceName, args: SendArgs, json: bool) -> Result<()> {
     check_send(&args)?;
+    if let Some(uri) = &args.uri {
+        return runtime.wallet_send_uri(
+            name,
+            args.from,
+            args.source_pool.as_str(),
+            uri,
+            args.amount.map(SendAmount::zatoshi),
+            json,
+        );
+    }
+    let (Some(to), Some(amount)) = (args.to, args.amount) else {
+        bail!("--to and --amount are required unless --uri is given");
+    };
     runtime.wallet_send(
         name,
         args.from,
-        args.to,
+        to,
         args.source_pool.as_str(),
         args.destination_pool.as_str(),
-        args.amount.zatoshi(),
+        amount.zatoshi(),
         args.memo.as_deref(),
         json,
     )
@@ -572,8 +597,8 @@ mod tests {
         else {
             panic!("expected ths wallet send");
         };
-        assert_eq!((args.from, args.to), (1, 2));
-        assert_eq!(args.amount.zatoshi(), 150_000_000);
+        assert_eq!((args.from, args.to), (1, Some(2)));
+        assert_eq!(args.amount.map(SendAmount::zatoshi), Some(150_000_000));
         assert_eq!(args.source_pool, Pool::Transparent);
         assert_eq!(args.destination_pool, Pool::Ironwood);
         assert_eq!(args.memo.as_deref(), Some("hello"));
@@ -634,8 +659,9 @@ mod tests {
     fn send_args(from: u8, to: u8, destination_pool: Pool, memo: Option<&str>) -> SendArgs {
         SendArgs {
             from,
-            to,
-            amount: SendAmount(1),
+            to: Some(to),
+            uri: None,
+            amount: Some(SendAmount(1)),
             source_pool: Pool::Ironwood,
             destination_pool,
             memo: memo.map(str::to_owned),
@@ -658,6 +684,45 @@ mod tests {
         assert!(check_send(&shield).is_ok());
         assert!(check_send(&send_args(1, 1, Pool::Transparent, Some("hi"))).is_err());
         assert!(check_send(&send_args(1, 1, Pool::Transparent, Some(""))).is_err());
+    }
+
+    #[test]
+    fn wallet_send_takes_a_payment_uri_instead_of_a_destination() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["ths", "wallet", "send", "--from", "1"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv)
+        };
+        let Ok(Cli {
+            command:
+                Some(Command::Wallet {
+                    action: WalletCommand::Send(args),
+                }),
+            ..
+        }) = parse(&["--uri", "zcash:uregtest1abc?amount=1"])
+        else {
+            panic!("expected ths wallet send --uri");
+        };
+        assert_eq!(args.uri.as_deref(), Some("zcash:uregtest1abc?amount=1"));
+        assert_eq!((args.to, args.amount), (None, None));
+
+        // --amount is still accepted for a URI that omits one.
+        assert!(parse(&["--uri", "zcash:uregtest1abc", "--amount", "1"]).is_ok());
+        // The URI already names the destination, its pool, and any memo.
+        assert!(parse(&["--uri", "zcash:uregtest1abc", "--to", "2"]).is_err());
+        assert!(
+            parse(&[
+                "--uri",
+                "zcash:uregtest1abc",
+                "--destination-pool",
+                "ironwood"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--uri", "zcash:uregtest1abc", "--memo", "hi"]).is_err());
+        // Without a URI, a destination and an amount are required.
+        assert!(parse(&["--amount", "1"]).is_err());
+        assert!(parse(&["--to", "2"]).is_err());
     }
 
     #[test]

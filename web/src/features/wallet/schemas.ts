@@ -36,6 +36,9 @@ const amountField = z
     return zatoshi;
   });
 
+/** The destination select's value for "send to `to_address`" rather than an account. */
+export const ADDRESS_DESTINATION = 'address';
+
 /** ZIP-302 memo size; the limit is in UTF-8 bytes, not characters. */
 export const MEMO_MAX_BYTES = 512;
 
@@ -55,7 +58,8 @@ const memoField = z
 export const sendSchema = z
   .object({
     from_account: accountIdField,
-    to_account: accountIdField,
+    to_account: z.union([accountIdField, z.literal(ADDRESS_DESTINATION)]),
+    to_address: z.string().trim().default(''),
     source_pool: poolField,
     destination_pool: poolField,
     amount: amountField,
@@ -69,6 +73,10 @@ export const sendSchema = z
       path: ['to_account'],
     },
   )
+  .refine((values) => values.to_account !== ADDRESS_DESTINATION || values.to_address !== '', {
+    message: 'Enter a Regtest address.',
+    path: ['to_address'],
+  })
   .refine((values) => values.memo === '' || values.destination_pool === 'ironwood', {
     message: 'Transparent outputs cannot carry a memo. Choose the ironwood pool.',
     path: ['memo'],

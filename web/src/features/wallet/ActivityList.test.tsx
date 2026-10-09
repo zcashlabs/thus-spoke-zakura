@@ -23,6 +23,7 @@ describe('ActivityList same-account transfers', () => {
                 kind: 'send',
                 from_account: 1,
                 to_account: 1,
+                to_address: null,
                 source_pool: source,
                 destination_pool: destination,
                 amount_zatoshi: 1_000_000n,

@@ -1,6 +1,13 @@
 import { useRef } from 'react';
 import { useMutation, useQueryClient, type UseMutationResult } from '@tanstack/react-query';
-import { api, idempotencyKey, type Activity, type MiningJob, type Pool } from '@/lib/api';
+import {
+  api,
+  idempotencyKey,
+  type Activity,
+  type MiningJob,
+  type PaymentUri,
+  type Pool,
+} from '@/lib/api';
 import { queryKeys } from './queries';
 
 /** Everything a successful money movement invalidates. */
@@ -57,9 +64,11 @@ function withFaucetLock<T>(name: string, action: () => T | Promise<T>): Promise<
   return navigator.locks.request(name, action);
 }
 
+/** Exactly one of `to_account` or `to_address` is set. */
 export interface SendVariables {
   from_account: number;
-  to_account: number;
+  to_account?: number;
+  to_address?: string;
   source_pool: Pool;
   destination_pool: Pool;
   amount_zatoshi: bigint;
@@ -71,7 +80,8 @@ export function useSend(): UseMutationResult<Activity, Error, SendVariables> {
   const operation = operationKey('send', (variables: SendVariables) =>
     JSON.stringify([
       variables.from_account,
-      variables.to_account,
+      variables.to_account ?? null,
+      variables.to_address ?? null,
       variables.source_pool,
       variables.destination_pool,
       variables.amount_zatoshi.toString(),
@@ -86,6 +96,11 @@ export function useSend(): UseMutationResult<Activity, Error, SendVariables> {
       await invalidate();
     },
   });
+}
+
+/** Resolves a pasted `zcash:` URI; it moves no funds, so nothing is invalidated. */
+export function useParsePaymentUri(): UseMutationResult<PaymentUri, Error, string> {
+  return useMutation({ mutationFn: (uri: string) => api.parsePaymentUri(uri) });
 }
 
 export interface FaucetVariables {

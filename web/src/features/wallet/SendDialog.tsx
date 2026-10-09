@@ -1,16 +1,18 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { ArrowRight } from 'lucide-react';
 import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
 import { useToast } from '@/components/ui/toast-context';
-import { errorMessage, type Account } from '@/lib/api';
+import { errorMessage, type Account, type PaymentUri } from '@/lib/api';
+import { shortHash } from '@/lib/format';
 import { formatZec, formatZecAmount } from '@/lib/money';
-import { useSend } from '@/hooks/mutations';
+import { useParsePaymentUri, useSend } from '@/hooks/mutations';
 import { useSendQuote } from '@/hooks/queries';
 import {
+  ADDRESS_DESTINATION,
   MEMO_MAX_BYTES,
   memoByteLength,
   sendSchema,
@@ -35,6 +37,8 @@ export function SendDialog({
 }) {
   const toast = useToast();
   const send = useSend();
+  const parseUri = useParsePaymentUri();
+  const [paymentUri, setPaymentUri] = useState('');
   const fromAccountId = defaultAccountId ?? 1;
 
   const form = useForm<SendInput, unknown, SendValues>({
@@ -42,6 +46,7 @@ export function SendDialog({
     defaultValues: {
       from_account: String(fromAccountId),
       to_account: String(accounts.find((account) => account.id !== fromAccountId)?.id ?? 1),
+      to_address: '',
       source_pool: 'ironwood',
       destination_pool: 'ironwood',
       amount: '1',
@@ -50,6 +55,7 @@ export function SendDialog({
   });
 
   const fromAccount = useWatch({ control: form.control, name: 'from_account' });
+  const toAccount = useWatch({ control: form.control, name: 'to_account' });
   const sourcePool = useWatch({ control: form.control, name: 'source_pool' });
   const destinationPool = useWatch({ control: form.control, name: 'destination_pool' });
   const memo = useWatch({ control: form.control, name: 'memo' }) ?? '';
@@ -79,6 +85,30 @@ export function SendDialog({
     destination_pool: destinationPool,
   });
 
+  const applyPaymentUri = (parsed: PaymentUri) => {
+    const options = { shouldValidate: form.formState.isSubmitted };
+    form.setValue(
+      'to_account',
+      parsed.to_account === null ? ADDRESS_DESTINATION : String(parsed.to_account),
+      options,
+    );
+    form.setValue('to_address', parsed.address, options);
+    form.setValue('destination_pool', parsed.destination_pool, options);
+    // A URI without an amount must not inherit the form's default: the sender
+    // has to choose one rather than unknowingly send it.
+    form.setValue(
+      'amount',
+      parsed.amount_zatoshi === null ? '' : formatZec(parsed.amount_zatoshi).replaceAll(',', ''),
+      options,
+    );
+    form.setValue('memo', parsed.memo ?? '', options);
+  };
+
+  const submitPaymentUri = () => {
+    if (paymentUri.trim() === '') return;
+    parseUri.mutate(paymentUri, { onSuccess: applyPaymentUri });
+  };
+
   const submit = form.handleSubmit(async (values) => {
     if (values.amount > available) {
       form.setError('amount', {
@@ -97,7 +127,9 @@ export function SendDialog({
     send.mutate(
       {
         from_account: values.from_account,
-        to_account: values.to_account,
+        ...(values.to_account === ADDRESS_DESTINATION
+          ? { to_address: values.to_address }
+          : { to_account: values.to_account }),
         source_pool: values.source_pool,
         destination_pool: values.destination_pool,
         amount_zatoshi: values.amount,
@@ -106,11 +138,15 @@ export function SendDialog({
       {
         onSuccess: (activity) => {
           toast.success(
-            `Sent to Account ${activity.to_account}`,
+            activity.to_account === null
+              ? `Sent to ${shortHash(activity.to_address ?? '', 14, 6)}`
+              : `Sent to Account ${activity.to_account}`,
             'The transaction was mined into a new block.',
           );
           onOpenChange(false);
           form.reset();
+          setPaymentUri('');
+          parseUri.reset();
         },
         onError: (error) => toast.error('Transfer failed', errorMessage(error)),
       },
@@ -118,6 +154,7 @@ export function SendDialog({
   });
 
   const options = accountOptions(accounts);
+  const destinationOptions = [...options, { value: ADDRESS_DESTINATION, label: 'Other address' }];
 
   return (
     <Dialog
@@ -125,8 +162,42 @@ export function SendDialog({
       onOpenChange={onOpenChange}
       eyebrow="NEW TRANSACTION"
       title="Send ZEC"
-      description="Moves existing funds between development accounts or pools. One block is mined to confirm."
+      description="Sends from a development account to another account, another pool, or any Regtest address. One block is mined to confirm."
     >
+      <Field
+        label="Payment request (optional)"
+        hint="Paste a zcash: URI to fill in the destination, amount, and memo."
+        error={parseUri.isError ? errorMessage(parseUri.error) : undefined}
+      >
+        {(aria) => (
+          <div className="flex gap-2">
+            <input
+              {...aria}
+              value={paymentUri}
+              onChange={(event) => setPaymentUri(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  submitPaymentUri();
+                }
+              }}
+              placeholder="zcash:uregtest1…?amount=1"
+              autoComplete="off"
+              spellCheck={false}
+              className={controlStyles}
+            />
+            <Button
+              type="button"
+              onClick={submitPaymentUri}
+              loading={parseUri.isPending}
+              disabled={paymentUri.trim() === ''}
+            >
+              Apply
+            </Button>
+          </div>
+        )}
+      </Field>
+
       <form onSubmit={(event) => void submit(event)} noValidate>
         <div className="grid gap-x-3 sm:grid-cols-2">
           <SelectField
@@ -146,8 +217,8 @@ export function SendDialog({
           <SelectField
             control={form.control}
             name="to_account"
-            label="Destination account"
-            options={options}
+            label="Destination"
+            options={destinationOptions}
             error={form.formState.errors.to_account?.message}
           />
           <SelectField
@@ -158,6 +229,24 @@ export function SendDialog({
             error={form.formState.errors.destination_pool?.message}
           />
         </div>
+
+        {toAccount === ADDRESS_DESTINATION && (
+          <Field
+            label="Destination address"
+            hint="A unified (Ironwood) or transparent Regtest address."
+            error={form.formState.errors.to_address?.message}
+          >
+            {(aria) => (
+              <input
+                {...aria}
+                {...form.register('to_address')}
+                autoComplete="off"
+                spellCheck={false}
+                className={controlStyles}
+              />
+            )}
+          </Field>
+        )}
 
         <Field
           label="Amount (ZEC)"

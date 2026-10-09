@@ -16,6 +16,7 @@ function confirmed(id: string): Activity {
     kind: 'faucet',
     from_account: null,
     to_account: 1,
+    to_address: null,
     source_pool: 'ironwood',
     destination_pool: 'ironwood',
     amount_zatoshi: 100_000_000n,

@@ -24,12 +24,17 @@ use tokio::{
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use zcash_keys::{address::Address, encoding::AddressCodec};
-use zcash_protocol::{consensus::COINBASE_MATURITY_BLOCKS, memo::MemoBytes, value::MAX_MONEY};
+use zcash_protocol::{
+    consensus::COINBASE_MATURITY_BLOCKS,
+    memo::{Memo, MemoBytes},
+    value::MAX_MONEY,
+};
+use zip321::TransactionRequest;
 
 use crate::{
     db::{
-        Account, Activity, AddressFaucet, IdempotencyConflict, PreparedTransaction, Store,
-        TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC,
+        Account, Activity, AddressFaucet, IdempotencyConflict, PreparedTransaction, Recipient,
+        Store, TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC,
     },
     mining::{
         Admission, MiningAdmissionError, MiningCoordinator, MiningJob, MiningRuntime, MiningState,
@@ -321,6 +326,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/activity", get(activity))
         .route("/api/v1/send", post(send))
         .route("/api/v1/send/quote", post(send_quote))
+        .route("/api/v1/zip321/parse", post(parse_payment_uri))
         .route("/api/v1/faucet", post(faucet))
         .route("/api/v1/faucet/address", post(faucet_address))
         .route("/api/v1/mine", post(mine))
@@ -422,9 +428,11 @@ async fn activity(
 }
 
 #[derive(Deserialize)]
+/// Exactly one of `to_account` or `to_address` names the destination.
 struct SendRequest {
     from_account: u8,
-    to_account: u8,
+    to_account: Option<u8>,
+    to_address: Option<String>,
     source_pool: String,
     destination_pool: String,
     amount_zatoshi: u64,
@@ -436,11 +444,36 @@ async fn send(
     State(state): State<AppState>,
     Json(req): Json<SendRequest>,
 ) -> ApiResult<Json<Activity>> {
-    let memo = validate_send(&req)?;
+    let (recipient, memo) = validate_send(&req)?;
+    let address = match recipient {
+        Recipient::Account(id) => {
+            let destination = state.0.store.account(id)?;
+            match req.destination_pool.as_str() {
+                "transparent" => destination.transparent_address,
+                "ironwood" => destination.unified_address,
+                _ => unreachable!("validate_send checks destination_pool"),
+            }
+        }
+        Recipient::Address(address) => address.to_owned(),
+    };
+    // A pasted address that belongs to a development account is recorded as
+    // that account, before the claim, so a replay resolves to the same payment.
+    let recipient = match recipient {
+        Recipient::Address(address) => {
+            development_account_for(&state.0.store, address)?.map_or(recipient, Recipient::Account)
+        }
+        recipient => recipient,
+    };
+    if recipient == Recipient::Account(req.from_account) && req.source_pool == req.destination_pool
+    {
+        return Err(ApiError::bad_request(
+            "choose a different account or a different destination pool",
+        ));
+    }
     let _payment = state.0.payments.lock().await;
     let mut pending = state.0.store.claim_transfer(
         req.from_account,
-        req.to_account,
+        recipient,
         &req.source_pool,
         &req.destination_pool,
         req.amount_zatoshi,
@@ -461,12 +494,6 @@ async fn send(
             "preparing" => {
                 let prepared = async {
                     state.synchronize_latest().await?;
-                    let destination = state.0.store.account(req.to_account)?;
-                    let address = match req.destination_pool.as_str() {
-                        "transparent" => destination.transparent_address,
-                        "ironwood" => destination.unified_address,
-                        _ => unreachable!("claim_transfer validates destination_pool"),
-                    };
                     state
                         .0
                         .wallet
@@ -501,6 +528,66 @@ async fn send(
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct PaymentUriRequest {
+    uri: String,
+}
+
+/// A single-payment ZIP-321 request, resolved for the Send form.
+#[derive(Debug, Serialize)]
+struct PaymentUri {
+    address: String,
+    destination_pool: &'static str,
+    /// Set when the address belongs to a development account.
+    to_account: Option<u8>,
+    amount_zatoshi: Option<u64>,
+    memo: Option<String>,
+}
+
+async fn parse_payment_uri(
+    State(state): State<AppState>,
+    Json(req): Json<PaymentUriRequest>,
+) -> ApiResult<Json<PaymentUri>> {
+    Ok(Json(payment_uri(&state.0.store, &req.uri)?))
+}
+
+fn payment_uri(store: &Store, uri: &str) -> ApiResult<PaymentUri> {
+    let request = TransactionRequest::from_uri(uri.trim()).map_err(|error| {
+        tracing::debug!(%error, "rejected ZIP-321 URI");
+        ApiError::bad_request("Invalid payment URI")
+    })?;
+    let mut payments = request.payments().values();
+    let (Some(payment), None) = (payments.next(), payments.next()) else {
+        return Err(ApiError::bad_request(
+            "only single-payment URIs are supported",
+        ));
+    };
+    let address = payment.recipient_address().encode();
+    let destination_pool = require_send_address(&address)?;
+    let memo = match payment.memo().map(Memo::try_from).transpose() {
+        Ok(None | Some(Memo::Empty)) => None,
+        Ok(Some(Memo::Text(text))) => Some(String::from(&*text)),
+        _ => return Err(ApiError::bad_request("only text memos are supported")),
+    };
+    Ok(PaymentUri {
+        to_account: development_account_for(store, &address)?,
+        address,
+        destination_pool,
+        amount_zatoshi: payment.amount().map(u64::from),
+        memo,
+    })
+}
+
+fn development_account_for(store: &Store, address: &str) -> anyhow::Result<Option<u8>> {
+    for id in 1..=USER_ACCOUNT_COUNT {
+        let account = store.account(id)?;
+        if account.unified_address == address || account.transparent_address == address {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Deserialize)]
@@ -1887,23 +1974,42 @@ fn require_pool(pool: &str, field: &str) -> ApiResult<()> {
 
 /// Checks the whole send request without touching the store, wallet or node,
 /// and returns the encoded memo it carries.
-fn validate_send(req: &SendRequest) -> ApiResult<Option<MemoBytes>> {
+fn validate_send(req: &SendRequest) -> ApiResult<(Recipient<'_>, Option<MemoBytes>)> {
     require_key(&req.idempotency_key)?;
     require_user_account(req.from_account)?;
-    require_user_account(req.to_account)?;
     require_pool(&req.source_pool, "source_pool")?;
     require_pool(&req.destination_pool, "destination_pool")?;
-    if req.from_account == req.to_account && req.source_pool == req.destination_pool {
-        return Err(ApiError::bad_request(
-            "choose a different account or a different destination pool",
-        ));
-    }
+    let recipient = match (req.to_account, req.to_address.as_deref()) {
+        (Some(to_account), None) => {
+            require_user_account(to_account)?;
+            if req.from_account == to_account && req.source_pool == req.destination_pool {
+                return Err(ApiError::bad_request(
+                    "choose a different account or a different destination pool",
+                ));
+            }
+            Recipient::Account(to_account)
+        }
+        (None, Some(address)) => {
+            if require_send_address(address)? != req.destination_pool {
+                return Err(ApiError::bad_request(
+                    "destination_pool does not match the destination address",
+                ));
+            }
+            Recipient::Address(address)
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "provide exactly one of to_account or to_address",
+            ));
+        }
+    };
     if req.amount_zatoshi == 0 || req.amount_zatoshi > MAX_MONEY {
         return Err(ApiError::bad_request(format!(
             "amount_zatoshi must be between 1 and {MAX_MONEY}"
         )));
     }
-    parse_memo(req.memo.as_deref(), &req.destination_pool)
+    let memo = parse_memo(req.memo.as_deref(), &req.destination_pool)?;
+    Ok((recipient, memo))
 }
 
 /// An absent (or null) memo is `None`. Any present memo, including `""`, is
@@ -1947,6 +2053,24 @@ fn require_faucet_address(value: &str) -> ApiResult<()> {
     }
 }
 
+/// Returns the pool a payment to `value` lands in. Ironwood shares the Orchard
+/// receiver, so a unified address needs one to receive shielded funds.
+fn require_send_address(value: &str) -> ApiResult<&'static str> {
+    match Address::decode(&regtest_network(), value) {
+        Some(Address::Unified(address)) if address.has_orchard() => Ok("ironwood"),
+        Some(Address::Transparent(_)) => Ok("transparent"),
+        Some(Address::Unified(_)) => Err(ApiError::bad_request(
+            "unified destination must include an Ironwood receiver",
+        )),
+        Some(_) => Err(ApiError::bad_request(
+            "destination must be a unified or transparent Regtest address",
+        )),
+        None => Err(ApiError::bad_request(
+            "destination is not a valid Regtest address",
+        )),
+    }
+}
+
 fn require_transparent_address(value: &str) -> ApiResult<()> {
     match Address::decode(&regtest_network(), value) {
         Some(Address::Transparent(_)) => Ok(()),
@@ -1957,6 +2081,7 @@ fn require_transparent_address(value: &str) -> ApiResult<()> {
 }
 
 type ApiResult<T> = Result<T, ApiError>;
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -3233,7 +3358,15 @@ mod tests {
         let claim = state
             .0
             .store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "same",
+                None,
+            )
             .unwrap();
         rusqlite::Connection::open(dir.path().join("wallet.db"))
             .unwrap()
@@ -3326,7 +3459,15 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.initialize().unwrap();
         let claimed = store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "same",
+                None,
+            )
             .unwrap();
         store
             .record_prepared(&claimed.id, "old-txid", b"old transaction", 140)
@@ -3357,7 +3498,15 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.initialize().unwrap();
         let pending = store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "issue-67", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "issue-67",
+                None,
+            )
             .unwrap();
         let pending = store
             .record_prepared(&pending.id, "txid-abc", b"raw transaction", 140)
@@ -3385,6 +3534,126 @@ mod tests {
         );
         assert_ne!(confirmed.block_hash.as_deref(), Some(generate_hash));
         assert_eq!(confirmed.txid, "txid-abc");
+    }
+
+    fn text_memo_param(text: &str) -> String {
+        zip321::memo_to_base64(&MemoBytes::from(&text.parse::<Memo>().unwrap()))
+    }
+
+    /// A unified address from a seed unrelated to the development accounts.
+    fn foreign_unified_address<P: zcash_protocol::consensus::Parameters>(params: &P) -> String {
+        use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+        let usk =
+            UnifiedSpendingKey::from_seed(params, &[7u8; 32], zip32::AccountId::ZERO).unwrap();
+        let (address, _) = usk
+            .to_unified_full_viewing_key()
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .unwrap();
+        address.encode(params)
+    }
+
+    #[test]
+    fn payment_uri_resolves_a_development_account_with_amount_and_memo() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let account = store.account(2).unwrap();
+        let uri = format!(
+            "zcash:{}?amount=1.5&memo={}",
+            account.unified_address,
+            text_memo_param("rent for October")
+        );
+
+        let parsed = payment_uri(&store, &uri).unwrap();
+        assert_eq!(parsed.address, account.unified_address);
+        assert_eq!(parsed.destination_pool, "ironwood");
+        assert_eq!(parsed.to_account, Some(2));
+        assert_eq!(parsed.amount_zatoshi, Some(150_000_000));
+        assert_eq!(parsed.memo.as_deref(), Some("rent for October"));
+    }
+
+    #[test]
+    fn payment_uri_accepts_transparent_and_external_regtest_addresses() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let transparent = store.account(3).unwrap().transparent_address;
+        let parsed = payment_uri(&store, &format!("zcash:?address={transparent}")).unwrap();
+        assert_eq!(parsed.destination_pool, "transparent");
+        assert_eq!(parsed.to_account, Some(3));
+        assert_eq!(parsed.amount_zatoshi, None);
+
+        let external = foreign_unified_address(&regtest_network());
+        let parsed = payment_uri(&store, &format!("zcash:{external}?amount=0.1")).unwrap();
+        assert_eq!(parsed.to_account, None);
+        assert_eq!(parsed.address, external);
+    }
+
+    #[test]
+    fn payment_uri_rejects_unsupported_requests() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let ua = store.account(1).unwrap().unified_address;
+        let taddr = store.account(2).unwrap().transparent_address;
+        let mainnet = foreign_unified_address(&zcash_protocol::consensus::MainNetwork);
+        let rejected = [
+            format!("zcash:{taddr}?amount=1&memo={}", text_memo_param("hi")),
+            format!("zcash:?address={ua}&amount=1&address.1={taddr}&amount.1=2"),
+            format!("zcash:{mainnet}?amount=1"),
+            format!("zcash:{ua}?amount=1&req-unknown=x"),
+            format!("zcash:{ua}?amount=0.000000001"),
+            "not a uri".to_owned(),
+        ];
+        for uri in rejected {
+            let error = payment_uri(&store, &uri).expect_err(&uri);
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[test]
+    fn send_addresses_map_to_their_pool() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let account = store.account(1).unwrap();
+        assert_eq!(
+            require_send_address(&account.unified_address).ok(),
+            Some("ironwood")
+        );
+        assert_eq!(
+            require_send_address(&account.transparent_address).ok(),
+            Some("transparent")
+        );
+        let mainnet = foreign_unified_address(&zcash_protocol::consensus::MainNetwork);
+        assert!(require_send_address(&mainnet).is_err());
+        assert!(require_send_address("not-an-address").is_err());
+    }
+
+    #[test]
+    fn send_validation_requires_a_matching_pool_for_an_address() {
+        let external = foreign_unified_address(&regtest_network());
+        let request = |destination_pool: &str| {
+            let mut body = valid_send();
+            body.as_object_mut().unwrap().remove("to_account");
+            body["to_address"] = json!(external);
+            body["destination_pool"] = json!(destination_pool);
+            serde_json::from_value::<SendRequest>(body).unwrap()
+        };
+        let req = request("ironwood");
+        assert!(matches!(
+            validate_send(&req),
+            Ok((Recipient::Address(address), None)) if address == external
+        ));
+        let req = request("transparent");
+        assert_eq!(
+            validate_send(&req).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut both = valid_send();
+        both["to_address"] = json!(external);
+        let req = serde_json::from_value::<SendRequest>(both).unwrap();
+        assert_eq!(
+            validate_send(&req).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -3573,7 +3842,7 @@ mod tests {
                         );
                     } else {
                         assert!(
-                            matches!(result, Ok(None)),
+                            matches!(result, Ok((Recipient::Account(id), None)) if id == to),
                             "{to}: {source} -> {destination}"
                         );
                     }
@@ -3588,7 +3857,15 @@ mod tests {
         let original = state
             .0
             .store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 100_000, REPLAY_KEY, None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                100_000,
+                REPLAY_KEY,
+                None,
+            )
             .unwrap();
         let before = activity_ids(&state);
 
@@ -3687,7 +3964,15 @@ mod tests {
             let original = state
                 .0
                 .store
-                .claim_transfer(1, 1, source, destination, 100_000, REPLAY_KEY, None)
+                .claim_transfer(
+                    1,
+                    Recipient::Account(1),
+                    source,
+                    destination,
+                    100_000,
+                    REPLAY_KEY,
+                    None,
+                )
                 .unwrap();
             state
                 .0
@@ -3734,7 +4019,15 @@ mod tests {
         let original = state
             .0
             .store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 100_000, REPLAY_KEY, None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                100_000,
+                REPLAY_KEY,
+                None,
+            )
             .unwrap();
         state
             .0
@@ -4406,7 +4699,15 @@ mod tests {
             let store = Store::open(":memory:").unwrap();
             store.initialize().unwrap();
             let claim = store
-                .claim_transfer(1, to, source, destination, 12_000, "same", None)
+                .claim_transfer(
+                    1,
+                    Recipient::Account(to),
+                    source,
+                    destination,
+                    12_000,
+                    "same",
+                    None,
+                )
                 .unwrap();
             store
                 .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
@@ -4504,7 +4805,15 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store.initialize().unwrap();
         let claim = store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "same",
+                None,
+            )
             .unwrap();
         let prepared = store
             .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
@@ -4534,7 +4843,15 @@ mod tests {
         let store = Store::open(&path).unwrap();
         store.initialize().unwrap();
         let claim = store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "same",
+                None,
+            )
             .unwrap();
         let prepared = store
             .record_prepared(&claim.id, "real-txid", b"signed transaction", 140)
@@ -4610,7 +4927,15 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.initialize().unwrap();
         let claim = store
-            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same", None)
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_000,
+                "same",
+                None,
+            )
             .unwrap();
         store
             .record_prepared(&claim.id, "real-txid", b"signed transaction", expiry_height)
