@@ -121,7 +121,7 @@ pub struct Runtime {
 
 struct FaucetJournal {
     path: PathBuf,
-    _lock: File,
+    lock: File,
 }
 
 impl FaucetJournal {
@@ -144,7 +144,7 @@ impl FaucetJournal {
         }
         Ok(Self {
             path: instance_dir.join("faucet-intents.json"),
-            _lock: lock,
+            lock,
         })
     }
 
@@ -217,6 +217,16 @@ impl FaucetJournal {
             entries.remove(*intent);
         }
         self.write(&entries)
+    }
+}
+
+impl Drop for FaucetJournal {
+    fn drop(&mut self) {
+        // Closing our handle alone can leave the lock held by a descriptor
+        // inherited during a concurrent process spawn. Unlock before closing.
+        if let Err(error) = self.lock.unlock() {
+            eprintln!("could not unlock faucet intents: {error}");
+        }
     }
 }
 
@@ -2169,6 +2179,41 @@ mod tests {
         );
         drop(next);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dropping_faucet_journal_releases_lock_with_a_duplicated_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FaucetJournal::open(dir.path()).unwrap();
+        let key = journal.key_for("address:recipient:100").unwrap();
+        // A concurrent process spawn can temporarily inherit the same open file
+        // description. Keep a duplicate alive to reproduce that lifetime without timing.
+        let duplicate = journal.lock.try_clone().unwrap();
+        let contender = OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("faucet-intents.lock"))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+
+        drop(journal);
+        let retry = FaucetJournal::open(dir.path()).unwrap();
+        assert_eq!(retry.key_for("address:recipient:100").unwrap(), key);
+        assert!(matches!(
+            contender.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+
+        drop(duplicate);
+        assert!(matches!(
+            contender.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+        drop(retry);
+        contender.try_lock().unwrap();
     }
 
     #[test]
