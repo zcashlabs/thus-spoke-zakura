@@ -198,6 +198,7 @@ Running `ths` with no command starts the default environment.
 | --- | --- |
 | `ths` | Start a fresh environment and open the dashboard |
 | `ths start --no-open` | Start without opening a browser |
+| `ths --json start --no-open` | Print endpoints as one JSON document on stdout; setup and cleanup diagnostics go to stderr |
 | `ths start --port-offset 10` | Start on loopback ports shifted by 10 for another instance |
 | `ths status` | Show health and endpoint information |
 | `ths open` | Open the running dashboard |
