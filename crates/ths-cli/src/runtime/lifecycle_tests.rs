@@ -596,6 +596,161 @@ fn recorded_identity_is_removed_without_adopting_a_replacement() {
 }
 
 #[test]
+fn missing_recorded_identity_is_absence_when_the_listing_omits_it() {
+    let (runtime, docker, metadata) = owned_cleanup_fixture();
+    docker.drop_resource("app-id");
+    docker.drop_resource("ths-alpha-chain");
+    docker.fail_inspect("missing-app");
+    let mut journal =
+        RecoveryJournal::create(runtime.recovery_path(&name("alpha")), &name("alpha")).unwrap();
+    let container = journal
+        .begin(
+            ResourceRef {
+                kind: ResourceKind::Container,
+                name: "ths-alpha-app".into(),
+                identity: None,
+            },
+            Vec::new(),
+            MutationOperation::Create,
+        )
+        .unwrap();
+    journal
+        .finish(
+            container,
+            MutationOutcome::Acknowledged,
+            Some("missing-app".into()),
+        )
+        .unwrap();
+    let volume = journal
+        .begin(
+            ResourceRef {
+                kind: ResourceKind::Volume,
+                name: "ths-alpha-chain".into(),
+                identity: None,
+            },
+            Vec::new(),
+            MutationOperation::Create,
+        )
+        .unwrap();
+    journal
+        .finish(
+            volume,
+            MutationOutcome::Acknowledged,
+            Some("ths-alpha-chain".into()),
+        )
+        .unwrap();
+    drop(journal);
+    let report = runtime
+        .cleanup_with(&name("alpha"), &docker, false, &short_policy())
+        .unwrap();
+    assert!(report.verified(), "{report:?}");
+    assert!(!metadata.exists());
+    assert!(!runtime.recovery_path(&name("alpha")).exists());
+    let removals = docker.removal_calls();
+    assert!(
+        removals.iter().all(|call| !call
+            .iter()
+            .any(|arg| arg == "missing-app" || arg == "ths-alpha-chain")),
+        "{removals:?}"
+    );
+}
+
+#[test]
+fn failed_inspect_of_a_listed_identity_stays_uncertain() {
+    let (runtime, docker, metadata) = owned_cleanup_fixture();
+    docker.fail_inspect("app-id");
+    let mut journal =
+        RecoveryJournal::create(runtime.recovery_path(&name("alpha")), &name("alpha")).unwrap();
+    let index = journal
+        .begin(
+            ResourceRef {
+                kind: ResourceKind::Container,
+                name: "ths-alpha-app".into(),
+                identity: None,
+            },
+            Vec::new(),
+            MutationOperation::Create,
+        )
+        .unwrap();
+    journal
+        .finish(index, MutationOutcome::Acknowledged, Some("app-id".into()))
+        .unwrap();
+    drop(journal);
+    let report = runtime
+        .cleanup_with(&name("alpha"), &docker, false, &short_policy())
+        .unwrap();
+    assert!(
+        matches!(report.outcome, CleanupOutcome::Uncertain),
+        "{report:?}"
+    );
+    assert!(metadata.exists());
+    assert!(docker.contains_id("app-id"));
+    assert!(
+        docker
+            .removal_calls()
+            .iter()
+            .all(|call| !call.iter().any(|arg| arg == "app-id")),
+        "{:?}",
+        docker.removal_calls()
+    );
+}
+
+#[test]
+fn hanging_removal_leaves_the_termination_reserve_for_helpers() {
+    let mut policy = short_policy();
+    policy.cleanup = Duration::from_millis(500);
+    policy.termination_reserve = Duration::from_millis(150);
+    policy.startup_docker = Duration::from_secs(2);
+    let context = LifecycleContext::new(policy);
+    let script = hang_on_removal_script();
+    let root = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: root.path().to_path_buf(),
+    };
+    let instance = name("alpha");
+    fs::create_dir_all(runtime.instance_dir(&instance)).unwrap();
+    fs::write(
+        runtime.instance_dir(&instance).join("instance.json"),
+        b"{}\n",
+    )
+    .unwrap();
+    let mut journal = RecoveryJournal::create(runtime.recovery_path(&instance), &instance).unwrap();
+    let index = journal
+        .begin(
+            ResourceRef {
+                kind: ResourceKind::Container,
+                name: "ths-alpha-app".into(),
+                identity: None,
+            },
+            Vec::new(),
+            MutationOperation::Create,
+        )
+        .unwrap();
+    journal
+        .finish(index, MutationOutcome::Acknowledged, Some("app-id".into()))
+        .unwrap();
+    drop(journal);
+    let deadline = Deadline::after(policy.cleanup);
+    let mut docker = lifecycle_docker(&context, deadline, Cancellation::Ignore);
+    docker.program = "/bin/sh".into();
+    docker.prefix_args = vec![script.path().join("docker").to_string_lossy().into_owned()];
+    let report = runtime
+        .cleanup_core(&instance, &docker, false, deadline, &context)
+        .unwrap();
+    assert!(
+        deadline.remaining() > policy.termination_reserve,
+        "cleanup returned with {:?} left, which does not preserve the {:?} helper reserve",
+        deadline.remaining(),
+        policy.termination_reserve
+    );
+    assert!(
+        report.helpers_finished,
+        "hanging removal helper was not reaped inside the cleanup allowance: {report:?}"
+    );
+    assert!(context.helpers_finished());
+}
+
+#[test]
 fn acknowledged_removal_without_verified_absence_is_incomplete() {
     let (runtime, docker, metadata) = owned_cleanup_fixture();
     docker.acknowledge_without_removing("ths-alpha-app");
@@ -811,6 +966,7 @@ struct StatefulDocker {
     resources: Mutex<Vec<FakeResource>>,
     calls: Mutex<Vec<Vec<String>>>,
     retain: Mutex<Vec<String>>,
+    inspect_errors: Mutex<Vec<String>>,
 }
 
 impl StatefulDocker {
@@ -820,6 +976,7 @@ impl StatefulDocker {
             resources: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             retain: Mutex::new(Vec::new()),
+            inspect_errors: Mutex::new(Vec::new()),
         }
     }
 
@@ -842,6 +999,17 @@ impl StatefulDocker {
 
     fn acknowledge_without_removing(&self, target: &str) {
         self.retain.lock().unwrap().push(target.to_owned());
+    }
+
+    fn drop_resource(&self, id: &str) {
+        self.resources
+            .lock()
+            .unwrap()
+            .retain(|resource| resource.id != id);
+    }
+
+    fn fail_inspect(&self, id: &str) {
+        self.inspect_errors.lock().unwrap().push(id.to_owned());
     }
 
     fn retain_nothing_but_app_replacement(&self) {
@@ -893,6 +1061,17 @@ impl StatefulDocker {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    fn ids(&self, kind: &str) -> String {
+        self.resources
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|resource| resource.kind == kind)
+            .map(|resource| resource.id.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl DockerResourceCommands for StatefulDocker {
@@ -900,9 +1079,22 @@ impl DockerResourceCommands for StatefulDocker {
         self.record(args);
         match args {
             ["container", "ls", "-a", "--format", "{{.Names}}"] => Ok(self.names("container")),
+            ["container", "ls", "-a", "--no-trunc", "--format", "{{.ID}}"] => {
+                Ok(self.ids("container"))
+            }
             ["volume", "ls", "--format", "{{.Name}}"] => Ok(self.names("volume")),
             ["network", "ls", "--format", "{{.Name}}"] => Ok(self.names("network")),
+            ["network", "ls", "--no-trunc", "--format", "{{.ID}}"] => Ok(self.ids("network")),
             [kind, "inspect", target] => {
+                if self
+                    .inspect_errors
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|id| id == target)
+                {
+                    anyhow::bail!("No such {kind}: {target}");
+                }
                 let resources = self.resources.lock().unwrap();
                 if let Some(resource) = resources
                     .iter()
@@ -998,6 +1190,19 @@ fn script_docker<'a>(
         prefix_args: vec![script.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
     }
+}
+
+fn hang_on_removal_script() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("docker");
+    let mut file = fs::File::create(&path).unwrap();
+    write!(
+        file,
+        "#!/bin/sh\nif [ \"$1\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"volume\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"network\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"container\" ] && [ \"$2\" = \"inspect\" ]; then\n  printf '%s\\n' '[{{\"Id\":\"app-id\",\"Config\":{{\"Labels\":{{\"com.zakura.ths.instance\":\"alpha\"}}}}}}]'\n  exit 0\nfi\nexit 0\n"
+    )
+    .unwrap();
+    make_executable(&path);
+    dir
 }
 
 fn sleep_script() -> tempfile::TempDir {

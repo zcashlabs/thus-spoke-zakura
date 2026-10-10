@@ -629,12 +629,7 @@ impl Runtime {
         let policy = LifecyclePolicy::default();
         let context = LifecycleContext::new(policy);
         let deadline = Deadline::after(policy.cleanup);
-        let docker = LifecycleDocker::production(
-            &context,
-            Some(deadline),
-            policy.startup_docker,
-            Cancellation::Ignore,
-        );
+        let docker = lifecycle_docker(&context, deadline, Cancellation::Ignore);
         self.cleanup_core(name, &docker, false, deadline, &context)
     }
 
@@ -827,26 +822,35 @@ impl Runtime {
                                     "recorded {kind} {target} ({id}) does not match {observed}; refusing to adopt it"
                                 ));
                             }
-                            None => {
-                                uncertain = true;
-                                failures.push(format!(
-                                    "recorded {kind} {target} ({id}) inspection had no identity"
-                                ));
-                            }
+                            None => prove_recorded_absence(
+                                docker,
+                                kind,
+                                target,
+                                &id,
+                                "inspection had no identity",
+                                &mut uncertain,
+                                &mut failures,
+                            ),
                         }
                     }
-                    Ok(_) => {
-                        uncertain = true;
-                        failures.push(format!(
-                            "recorded {kind} {target} ({id}) returned an empty inspection"
-                        ));
-                    }
-                    Err(error) => {
-                        uncertain = true;
-                        failures.push(format!(
-                            "recorded {kind} {target} ({id}) could not be inspected: {error:#}"
-                        ));
-                    }
+                    Ok(_) => prove_recorded_absence(
+                        docker,
+                        kind,
+                        target,
+                        &id,
+                        "returned an empty inspection",
+                        &mut uncertain,
+                        &mut failures,
+                    ),
+                    Err(error) => prove_recorded_absence(
+                        docker,
+                        kind,
+                        target,
+                        &id,
+                        &format!("could not be inspected: {error:#}"),
+                        &mut uncertain,
+                        &mut failures,
+                    ),
                 }
                 return Ok(());
             }
@@ -1343,6 +1347,50 @@ fn observed_identity(kind: &str, details: &str) -> Option<String> {
         .as_str()
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
+}
+
+/// A failed or empty inspect is not absence. A completed identity listing that
+/// does not contain the recorded id is.
+fn prove_recorded_absence(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    target: &str,
+    id: &str,
+    reason: &str,
+    uncertain: &mut bool,
+    failures: &mut Vec<String>,
+) {
+    match recorded_identity_absent(docker, kind, id) {
+        Ok(true) => {}
+        Ok(false) => {
+            *uncertain = true;
+            failures.push(format!("recorded {kind} {target} ({id}) {reason}"));
+        }
+        Err(error) => {
+            *uncertain = true;
+            failures.push(format!(
+                "recorded {kind} {target} ({id}) {reason}; identity listing failed: {error:#}"
+            ));
+        }
+    }
+}
+
+fn recorded_identity_absent(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    identity: &str,
+) -> Result<bool> {
+    let listing = match kind {
+        "container" => {
+            docker.output(&["container", "ls", "-a", "--no-trunc", "--format", "{{.ID}}"])?
+        }
+        "network" => docker.output(&["network", "ls", "--no-trunc", "--format", "{{.ID}}"])?,
+        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    };
+    Ok(!listing
+        .lines()
+        .any(|candidate| candidate.trim() == identity))
 }
 
 fn resource_absent(docker: &impl DockerResourceCommands, kind: &str, name: &str) -> Result<bool> {
@@ -2273,9 +2321,12 @@ fn lifecycle_docker<'a>(
     deadline: Deadline,
     cancellation: Cancellation<'a>,
 ) -> LifecycleDocker<'a> {
+    // The cleanup allowance's termination reserve stays outside every Docker
+    // call so HelperSet::finish can still reap inside the original deadline.
+    let operation_deadline = deadline.saturating_sub(context.policy.termination_reserve);
     LifecycleDocker::production(
         context,
-        Some(deadline),
+        Some(operation_deadline),
         context.policy.startup_docker,
         cancellation,
     )
