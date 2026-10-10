@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fmt::{self, Display},
     fs::{self, File, OpenOptions, TryLockError},
@@ -10,7 +11,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use crate::lifecycle::{
+    Cancellation, CapturedOutput, CommandFailure, CommandFailureKind, Deadline, HelperSet,
+    LifecyclePolicy, OutputMode, run,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -21,6 +27,15 @@ const APP_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura-app";
 const ZAKURA_IMAGE: &str = "zakuracore/zakura:1.6.0";
 const LIGHTWALLETD_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd";
 const INSTANCE_LABEL: &str = "com.zakura.ths.instance";
+
+#[cfg(test)]
+#[path = "../tests/unit/docker_lifecycle.rs"]
+mod docker_lifecycle_tests;
+#[cfg(test)]
+#[path = "../tests/unit/runtime_lifecycle.rs"]
+mod lifecycle_tests;
+mod readiness;
+mod recovery;
 
 fn app_image() -> String {
     format!("{APP_IMAGE_REPOSITORY}:{}", env!("CARGO_PKG_VERSION"))
@@ -300,12 +315,47 @@ impl Runtime {
         port_offset: u16,
     ) -> Result<()> {
         host_ports(port_offset)?;
-        self.doctor(false)?;
-        for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
-            require_image(&image)?;
-        }
         let shutdown = Shutdown::install()?;
-        self.start_with(name, no_open, json, port_offset, &DockerHost, &shutdown)
+        let context = LifecycleContext::new(LifecyclePolicy::default());
+        let prepared = {
+            let requested = || shutdown.try_interrupted();
+            let docker = LifecycleDocker::production(
+                &context,
+                None,
+                context.policy.startup_docker,
+                Cancellation::Observe(&requested),
+            );
+            (|| {
+                startup_docker_reachable(&docker)?;
+                for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
+                    startup_require_image(&docker, &image)?;
+                }
+                Ok(())
+            })()
+        };
+        if let Err(error) = prepared {
+            let failures = context.finish_helpers(Deadline::after(context.policy.startup_docker));
+            if !failures.is_empty() {
+                return Err(anyhow!(
+                    "{error:#}; helper cleanup: {}",
+                    failures
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+            return Err(error);
+        }
+        self.start_with_policy(
+            name,
+            no_open,
+            json,
+            port_offset,
+            &DockerHost,
+            &shutdown,
+            &context,
+        )
     }
 
     pub fn status(&self, name: &InstanceName, json: bool) -> Result<()> {
@@ -593,18 +643,34 @@ impl Runtime {
     }
 
     pub fn stop(&self, name: &InstanceName) -> Result<()> {
-        self.delete_instance_resources(name)?;
-        println!("Stopped and deleted {name} and all of its development data.");
-        Ok(())
+        let report = self.verified_cleanup(name)?;
+        if report.verified() {
+            println!("Stopped and deleted {name} and all of its development data.");
+            Ok(())
+        } else {
+            report.into_result()
+        }
     }
 
     pub fn reset(&self, name: &InstanceName, force: bool) -> Result<()> {
         if !force {
             bail!("reset deletes chain, wallet, and seed data; repeat with --force");
         }
-        self.delete_instance_resources(name)?;
-        println!("Deleted {name}; its Docker volumes cannot be recovered.");
-        Ok(())
+        let report = self.verified_cleanup(name)?;
+        if report.verified() {
+            println!("Deleted {name}; its Docker volumes cannot be recovered.");
+            Ok(())
+        } else {
+            report.into_result()
+        }
+    }
+
+    fn verified_cleanup(&self, name: &InstanceName) -> Result<CleanupReport> {
+        let policy = LifecyclePolicy::default();
+        let context = LifecycleContext::new(policy);
+        let deadline = Deadline::after(policy.cleanup);
+        let docker = lifecycle_docker(&context, deadline, Cancellation::Ignore);
+        self.cleanup_core(name, &docker, false, deadline, &context)
     }
 
     pub fn list(&self, json: bool) -> Result<()> {
@@ -663,89 +729,387 @@ impl Runtime {
         .context("invalid instance metadata")
     }
 
-    fn delete_instance_resources(&self, name: &InstanceName) -> Result<()> {
-        self.delete_instance_resources_with(name, &DockerCli)
+    fn recovery_path(&self, name: &InstanceName) -> PathBuf {
+        self.instance_dir(name).join(recovery::RECOVERY_FILE)
     }
 
-    fn delete_partial_instance_resources(&self, name: &InstanceName) -> Result<()> {
-        self.delete_instance_resources_with_mode(name, &DockerCli, true)
-    }
-
+    #[cfg(test)]
     fn delete_instance_resources_with(
         &self,
         name: &InstanceName,
         docker: &impl DockerResourceCommands,
     ) -> Result<()> {
-        self.delete_instance_resources_with_mode(name, docker, false)
+        self.cleanup_with(name, docker, false, &LifecyclePolicy::default())?
+            .into_result()
     }
 
+    #[cfg(test)]
     fn delete_instance_resources_with_mode(
         &self,
         name: &InstanceName,
         docker: &impl DockerResourceCommands,
         partial: bool,
     ) -> Result<()> {
-        let prefix = prefix(name);
-        let mut failures = Vec::new();
-        let mut inspect = |kind: &str, target: &str| {
-            let result = owned_resource(docker, kind, target, name)
-                .with_context(|| format!("{kind} {target}"));
-            if partial {
-                match result {
-                    Ok(resource) => Ok(resource),
-                    Err(error) => {
-                        failures.push(format!("{error:#}"));
-                        Ok(None)
-                    }
-                }
-            } else {
-                result
+        self.cleanup_with(name, docker, partial, &LifecyclePolicy::default())?
+            .into_result()
+    }
+
+    #[cfg(test)]
+    fn cleanup_with(
+        &self,
+        name: &InstanceName,
+        docker: &impl DockerResourceCommands,
+        partial: bool,
+        policy: &LifecyclePolicy,
+    ) -> Result<CleanupReport> {
+        let deadline = Deadline::after(policy.cleanup);
+        let context = LifecycleContext::new(*policy);
+        self.cleanup_core(name, docker, partial, deadline, &context)
+    }
+
+    fn cleanup_core(
+        &self,
+        name: &InstanceName,
+        docker: &impl DockerResourceCommands,
+        partial: bool,
+        deadline: Deadline,
+        context: &LifecycleContext,
+    ) -> Result<CleanupReport> {
+        let recovery_path = self.recovery_path(name);
+        let loaded = match recovery::RecoveryJournal::load(recovery_path.clone(), name) {
+            Ok(journal) => journal,
+            Err(error) => {
+                let mut failures = vec![format!("{error:#}")];
+                failures.extend(
+                    context
+                        .finish_helpers(deadline)
+                        .iter()
+                        .map(ToString::to_string),
+                );
+                return Ok(CleanupReport {
+                    outcome: CleanupOutcome::Uncertain,
+                    failures,
+                    recovery_path: Some(recovery_path),
+                    helpers_finished: context.helpers_finished(),
+                });
             }
         };
-        let containers = ["app", "lightwalletd", "zakura", "init"]
-            .into_iter()
-            .map(|service| {
-                let target = format!("{prefix}-{service}");
-                inspect("container", &target)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let volumes = ["chain", "wallet", "lightwalletd", "config"]
-            .into_iter()
-            .map(|suffix| {
-                let volume = format!("{prefix}-{suffix}");
-                inspect("volume", &volume)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let network = inspect("network", &prefix)?;
-
-        for id in containers.into_iter().flatten() {
-            if let Err(error) = docker.run(&["rm", "-f", &id]) {
-                failures.push(format!("container {id}: {error}"));
+        let mut journal = loaded;
+        let mut kept = std::collections::HashSet::new();
+        if let Some(existing) = &journal {
+            for mutation in &existing.record().mutations {
+                let outcome = recovery::loaded_outcome(&mutation.outcome);
+                let unresolved = matches!(outcome, recovery::MutationOutcome::Uncertain(_));
+                if unresolved
+                    && matches!(
+                        mutation.operation,
+                        recovery::MutationOperation::Create | recovery::MutationOperation::Start
+                    )
+                {
+                    kept.insert((
+                        mutation.resource.kind.clone(),
+                        mutation.resource.name.clone(),
+                    ));
+                    for dependency in &mutation.dependencies {
+                        kept.insert((dependency.kind.clone(), dependency.name.clone()));
+                    }
+                }
             }
         }
-        for volume in volumes.into_iter().flatten() {
-            if let Err(error) = docker.run(&["volume", "rm", &volume]) {
-                failures.push(format!("volume {volume}: {error}"));
-            }
-        }
-        if let Some(id) = network
-            && let Err(error) = docker.run(&["network", "rm", &id])
+        let work_deadline = deadline.saturating_sub(context.policy.termination_reserve);
+        let prefix = prefix(name);
+        let mut failures = Vec::new();
+        let mut uncertain = work_deadline.expired();
+        if let Some(existing) = &journal
+            && !existing.record().unresolved_helpers.is_empty()
         {
-            failures.push(format!("network {prefix}: {error}"));
+            uncertain = true;
+            failures.push(format!(
+                "previous launcher helpers remain unverified: {}",
+                existing.record().unresolved_helpers.join(", ")
+            ));
         }
-        if failures.is_empty() {
-            let dir = self.instance_dir(name);
-            if dir.exists() {
-                fs::remove_dir_all(&dir)
-                    .with_context(|| format!("removing metadata {}", dir.display()))?;
+        if work_deadline.expired() {
+            failures.push(format!(
+                "cleanup deadline for {name} expired before resource removal"
+            ));
+        }
+        let mut targets: Vec<(String, String, String)> = Vec::new();
+        let mut consider = |kind: &str, target: &str| -> Result<()> {
+            if kept.contains(&(resource_kind(kind), target.to_owned())) {
+                let present = match resource_absent(docker, kind, target) {
+                    Ok(absent) => !absent,
+                    Err(error) => {
+                        uncertain = true;
+                        failures.push(format!(
+                            "kept {kind} {target} but its snapshot failed: {error:#}"
+                        ));
+                        return Ok(());
+                    }
+                };
+                let recovery::MutationOutcome::Uncertain(reason) =
+                    recovery::reconcile_unidentified_create(present)
+                else {
+                    uncertain = true;
+                    failures.push(format!("kept {kind} {target} without an uncertain outcome"));
+                    return Ok(());
+                };
+                failures.push(format!("kept {kind} {target}: {reason}"));
+                uncertain = true;
+                return Ok(());
+            }
+            if work_deadline.expired() {
+                uncertain = true;
+                failures.push(format!("stopped before inspecting {kind} {target}"));
+                return Ok(());
+            }
+            if let Some(id) = journal.as_ref().and_then(|existing| {
+                existing
+                    .record()
+                    .resources
+                    .iter()
+                    .find(|resource| {
+                        resource.kind == resource_kind(kind) && resource.name == target
+                    })
+                    .and_then(|resource| resource.identity.clone())
+            }) {
+                match docker.output(&[kind, "inspect", &id]) {
+                    Ok(details) if !details.trim().is_empty() => {
+                        let recorded = recovery::ResourceRef {
+                            kind: match kind {
+                                "container" => recovery::ResourceKind::Container,
+                                "volume" => recovery::ResourceKind::Volume,
+                                _ => recovery::ResourceKind::Network,
+                            },
+                            name: target.to_owned(),
+                            identity: Some(id.clone()),
+                        };
+                        match inspected_resource_identity(kind, target, name, &details) {
+                            Ok(observed) if recovery::identity_matches(&recorded, &observed) => {
+                                targets.push((kind.to_owned(), id, target.to_owned()));
+                            }
+                            Ok(observed) => {
+                                uncertain = true;
+                                failures.push(format!(
+                                    "recorded {kind} {target} ({id}) does not match {observed}; refusing to adopt it"
+                                ));
+                            }
+                            Err(error) => prove_recorded_absence(
+                                docker,
+                                kind,
+                                target,
+                                &id,
+                                &format!("ownership inspection failed: {error:#}"),
+                                &mut uncertain,
+                                &mut failures,
+                            ),
+                        }
+                    }
+                    Ok(_) => prove_recorded_absence(
+                        docker,
+                        kind,
+                        target,
+                        &id,
+                        "returned an empty inspection",
+                        &mut uncertain,
+                        &mut failures,
+                    ),
+                    Err(error) => prove_recorded_absence(
+                        docker,
+                        kind,
+                        target,
+                        &id,
+                        &format!("could not be inspected: {error:#}"),
+                        &mut uncertain,
+                        &mut failures,
+                    ),
+                }
+                return Ok(());
+            }
+            let result = owned_resource(docker, kind, target, name)
+                .with_context(|| format!("{kind} {target}"));
+            match result {
+                Ok(Some(id)) => targets.push((kind.to_owned(), id, target.to_owned())),
+                Ok(None) => {}
+                Err(error) if partial => failures.push(format!("{error:#}")),
+                Err(error) => return Err(error),
             }
             Ok(())
+        };
+        let preflight: Result<()> = (|| {
+            for service in ["app", "lightwalletd", "zakura", "init"] {
+                consider("container", &format!("{prefix}-{service}"))?;
+            }
+            for suffix in ["chain", "wallet", "lightwalletd", "config"] {
+                consider("volume", &format!("{prefix}-{suffix}"))?;
+            }
+            consider("network", &prefix)?;
+            Ok(())
+        })();
+        let preflight = preflight.and_then(|()| {
+            if journal.is_none() && !targets.is_empty() {
+                journal = Some(recovery::RecoveryJournal::create(
+                    recovery_path.clone(),
+                    name,
+                )?);
+            }
+            Ok(())
+        });
+        if let Err(error) = preflight {
+            failures.push(format!("{error:#}"));
+            uncertain = true;
         } else {
-            bail!(
-                "could not delete every instance resource: {}",
-                failures.join("; ")
-            )
+            for (kind, id, label) in targets {
+                if work_deadline.expired() {
+                    uncertain = true;
+                    failures.push(format!("cleanup deadline expired before removing {label}"));
+                    break;
+                }
+                if let Some(existing) = &mut journal {
+                    let resource = recovery::ResourceRef {
+                        kind: match kind.as_str() {
+                            "container" => recovery::ResourceKind::Container,
+                            "volume" => recovery::ResourceKind::Volume,
+                            _ => recovery::ResourceKind::Network,
+                        },
+                        name: label.clone(),
+                        identity: Some(id.clone()),
+                    };
+                    if let Err(error) =
+                        existing.begin(resource, Vec::new(), recovery::MutationOperation::Remove)
+                    {
+                        failures.push(format!(
+                            "could not record removal of {label} before mutation: {error:#}"
+                        ));
+                        uncertain = true;
+                        continue;
+                    }
+                }
+                let removal = match kind.as_str() {
+                    "container" => docker.run(&["rm", "-f", &id]),
+                    "volume" => docker.run(&["volume", "rm", &id]),
+                    _ => docker.run(&["network", "rm", &id]),
+                };
+                let mut reconciled_diagnostic = None;
+                let outcome = match resource_absent(docker, &kind, &label) {
+                    Ok(true) => {
+                        if let Err(error) = &removal {
+                            reconciled_diagnostic = Some(format!(
+                                "{label}: {error:#}; absence verified after lost removal reply"
+                            ));
+                        }
+                        let unresolved = journal.as_ref().is_some_and(|existing| {
+                            recovery::unresolved_create(
+                                existing.record(),
+                                &resource_kind(&kind),
+                                &label,
+                            )
+                            .is_some()
+                        });
+                        let outcome = recovery::reconcile_acknowledged_removal(true, unresolved);
+                        if let recovery::MutationOutcome::Uncertain(reason) = &outcome {
+                            uncertain = true;
+                            failures.push(format!("{label}: {reason}"));
+                        }
+                        outcome
+                    }
+                    Ok(false) => match removal {
+                        Ok(()) => {
+                            failures.push(format!("{label} is still present after removal"));
+                            recovery::MutationOutcome::ReconciledPresent
+                        }
+                        Err(error) => {
+                            uncertain = true;
+                            let reason = format!("{label}: {error:#}");
+                            failures.push(reason.clone());
+                            recovery::MutationOutcome::Uncertain(reason)
+                        }
+                    },
+                    Err(error) => {
+                        uncertain = true;
+                        let mut reason =
+                            format!("{label} removal could not be verified: {error:#}");
+                        if let Err(removal_error) = removal {
+                            reason.push_str(&format!("; removal failed: {removal_error:#}"));
+                        }
+                        failures.push(reason.clone());
+                        recovery::MutationOutcome::Uncertain(reason)
+                    }
+                };
+                if let Some(existing) = &mut journal {
+                    let index = existing.record().mutations.len() - 1;
+                    if let Some(diagnostic) = reconciled_diagnostic
+                        && let Err(error) = existing.retain_failures(vec![diagnostic], Vec::new())
+                    {
+                        uncertain = true;
+                        failures.push(format!(
+                            "recording reconciled removal of {label}: {error:#}"
+                        ));
+                    }
+                    if let Err(error) = existing.finish(index, outcome, Some(id)) {
+                        uncertain = true;
+                        failures.push(format!("recording removal of {label}: {error:#}"));
+                    }
+                }
+            }
         }
+        for failure in context.finish_helpers(deadline) {
+            uncertain = true;
+            failures.push(failure.to_string());
+        }
+        let helpers_finished = context.helpers_finished();
+        if !helpers_finished {
+            uncertain = true;
+            failures.push(format!(
+                "unresolved helpers remain: {}",
+                context.unresolved_helpers().join(", ")
+            ));
+        }
+        let outcome = if uncertain {
+            CleanupOutcome::Uncertain
+        } else if failures.is_empty() {
+            CleanupOutcome::VerifiedComplete
+        } else {
+            CleanupOutcome::Incomplete
+        };
+        if matches!(outcome, CleanupOutcome::VerifiedComplete) && helpers_finished {
+            let dir = self.instance_dir(name);
+            if dir.exists()
+                && let Err(error) = fs::remove_dir_all(&dir)
+            {
+                failures.push(format!("removing metadata {}: {error}", dir.display()));
+                if let Some(existing) = &mut journal
+                    && let Err(error) =
+                        existing.retain_failures(failures.clone(), context.unresolved_helpers())
+                {
+                    failures.push(format!("retaining cleanup recovery: {error:#}"));
+                }
+                return Ok(CleanupReport {
+                    outcome: CleanupOutcome::Incomplete,
+                    failures,
+                    recovery_path: Some(recovery_path),
+                    helpers_finished,
+                });
+            }
+            return Ok(CleanupReport {
+                outcome: CleanupOutcome::VerifiedComplete,
+                failures,
+                recovery_path: None,
+                helpers_finished,
+            });
+        }
+        if let Some(existing) = &mut journal
+            && let Err(error) =
+                existing.retain_failures(failures.clone(), context.unresolved_helpers())
+        {
+            failures.push(format!("retaining cleanup recovery: {error:#}"));
+        }
+        Ok(CleanupReport {
+            outcome,
+            failures,
+            recovery_path: Some(recovery_path),
+            helpers_finished,
+        })
     }
 }
 
@@ -840,32 +1204,177 @@ impl DockerResourceCommands for DockerCli {
     }
 }
 
-fn owned_resource(
-    docker: &impl DockerResourceCommands,
+struct LifecycleContext {
+    policy: LifecyclePolicy,
+    helpers: RefCell<HelperSet>,
+}
+
+impl LifecycleContext {
+    fn new(policy: LifecyclePolicy) -> Self {
+        Self {
+            policy,
+            helpers: RefCell::new(HelperSet::new()),
+        }
+    }
+
+    fn finish_helpers(&self, deadline: Deadline) -> Vec<CommandFailure> {
+        self.helpers.borrow_mut().finish(deadline, self.policy.poll)
+    }
+
+    fn helpers_finished(&self) -> bool {
+        self.helpers.borrow().is_empty()
+    }
+
+    fn unresolved_helpers(&self) -> Vec<String> {
+        self.helpers.borrow().unresolved_context()
+    }
+}
+
+struct LifecycleDocker<'a> {
+    context: &'a LifecycleContext,
+    enclosing_deadline: Option<Deadline>,
+    command_cap: Duration,
+    cancellation: Cancellation<'a>,
+    program: String,
+    prefix_args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+impl<'a> LifecycleDocker<'a> {
+    fn production(
+        context: &'a LifecycleContext,
+        enclosing_deadline: Option<Deadline>,
+        command_cap: Duration,
+        cancellation: Cancellation<'a>,
+    ) -> Self {
+        Self {
+            context,
+            enclosing_deadline,
+            command_cap,
+            cancellation,
+            program: "docker".to_owned(),
+            prefix_args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    fn scoped(&self, enclosing_deadline: Deadline, command_cap: Duration) -> LifecycleDocker<'a> {
+        LifecycleDocker {
+            context: self.context,
+            enclosing_deadline: Some(enclosing_deadline),
+            command_cap,
+            cancellation: self.cancellation,
+            program: self.program.clone(),
+            prefix_args: self.prefix_args.clone(),
+            env: self.env.clone(),
+        }
+    }
+
+    fn operation_deadline(&self) -> Deadline {
+        self.enclosing_deadline
+            .map(|deadline| deadline.clipped(self.command_cap))
+            .unwrap_or_else(|| Deadline::after(self.command_cap))
+    }
+
+    fn execute(&self, args: &[&str], mode: OutputMode) -> Result<CapturedOutput, CommandFailure> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.prefix_args);
+        command.args(args);
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
+        let mut helpers = self.context.helpers.borrow_mut();
+        run(
+            &mut command,
+            self.operation_deadline(),
+            self.cancellation,
+            mode,
+            &self.context.policy,
+            &mut helpers,
+        )
+    }
+}
+
+impl DockerResourceCommands for LifecycleDocker<'_> {
+    fn output(&self, args: &[&str]) -> Result<String> {
+        let captured = self
+            .execute(args, OutputMode::Capture)
+            .map_err(|error| anyhow!("{error}"))?;
+        if captured.stdout_truncated || captured.stderr_truncated {
+            bail!("docker {} returned truncated output", args.join(" "));
+        }
+        let mut text = String::from_utf8(captured.stdout).context("docker output was not utf-8")?;
+        if args.first().copied() == Some("logs") {
+            text.push_str(&String::from_utf8_lossy(&captured.stderr));
+        }
+        Ok(text.trim().to_owned())
+    }
+
+    fn run(&self, args: &[&str]) -> Result<()> {
+        self.execute(args, OutputMode::Inherit)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum CleanupOutcome {
+    VerifiedComplete,
+    Incomplete,
+    Uncertain,
+}
+
+#[derive(Debug)]
+struct CleanupReport {
+    outcome: CleanupOutcome,
+    failures: Vec<String>,
+    recovery_path: Option<PathBuf>,
+    helpers_finished: bool,
+}
+
+impl CleanupReport {
+    fn verified(&self) -> bool {
+        matches!(self.outcome, CleanupOutcome::VerifiedComplete) && self.helpers_finished
+    }
+
+    fn into_result(self) -> Result<()> {
+        if self.verified() {
+            Ok(())
+        } else if self.failures.is_empty() {
+            bail!("cleanup was not verified")
+        } else {
+            let location = self
+                .recovery_path
+                .as_ref()
+                .map(|path| format!("; recovery remains at {}", path.display()))
+                .unwrap_or_default();
+            bail!("{}{location}", self.failures.join("; "))
+        }
+    }
+}
+
+struct AllocatedInstance {
+    endpoints: Endpoints,
+    resources: Vec<recovery::ResourceRef>,
+    app_container_id: String,
+    zakura_container_id: String,
+}
+
+fn resource_kind(kind: &str) -> recovery::ResourceKind {
+    match kind {
+        "container" => recovery::ResourceKind::Container,
+        "volume" => recovery::ResourceKind::Volume,
+        "network" => recovery::ResourceKind::Network,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    }
+}
+
+fn inspected_resource_identity(
     kind: &str,
     target: &str,
     name: &InstanceName,
-) -> Result<Option<String>> {
-    let names = match kind {
-        "container" => docker.output(&["container", "ls", "-a", "--format", "{{.Names}}"])?,
-        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
-        "network" => docker.output(&["network", "ls", "--format", "{{.Name}}"])?,
-        _ => unreachable!("resource kind is fixed by the caller"),
-    };
-    let matches = names
-        .lines()
-        .filter(|candidate| candidate.trim() == target)
-        .count();
-    if matches == 0 {
-        return Ok(None);
-    }
-    if matches > 1 {
-        bail!(
-            "Docker has multiple {kind} resources named {target}; refusing to reuse or delete them"
-        );
-    }
-    let details = docker.output(&[kind, "inspect", target])?;
-    let resources: serde_json::Value = serde_json::from_str(&details)
+    details: &str,
+) -> Result<String> {
+    let resources: serde_json::Value = serde_json::from_str(details)
         .with_context(|| format!("decoding Docker {kind} {target}"))?;
     let items = resources
         .as_array()
@@ -893,48 +1402,255 @@ fn owned_resource(
         .as_str()
         .filter(|id| !id.is_empty())
         .with_context(|| format!("Docker {kind} {target} has no {id_field}"))?;
-    Ok(Some(id.to_owned()))
+    Ok(id.to_owned())
 }
 
-fn ensure_network(prefix: &str, name: &InstanceName) -> Result<()> {
-    ensure_network_with(prefix, name, &DockerCli)
+/// A failed or empty inspect is not absence. A completed identity listing that
+/// does not contain the recorded id is.
+fn prove_recorded_absence(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    target: &str,
+    id: &str,
+    reason: &str,
+    uncertain: &mut bool,
+    failures: &mut Vec<String>,
+) {
+    match recorded_identity_absent(docker, kind, id) {
+        Ok(true) => {}
+        Ok(false) => {
+            *uncertain = true;
+            failures.push(format!("recorded {kind} {target} ({id}) {reason}"));
+        }
+        Err(error) => {
+            *uncertain = true;
+            failures.push(format!(
+                "recorded {kind} {target} ({id}) {reason}; identity listing failed: {error:#}"
+            ));
+        }
+    }
 }
+
+fn recorded_identity_absent(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    identity: &str,
+) -> Result<bool> {
+    let listing = match kind {
+        "container" => {
+            docker.output(&["container", "ls", "-a", "--no-trunc", "--format", "{{.ID}}"])?
+        }
+        "network" => docker.output(&["network", "ls", "--no-trunc", "--format", "{{.ID}}"])?,
+        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    };
+    Ok(!listing
+        .lines()
+        .any(|candidate| candidate.trim() == identity))
+}
+
+fn resource_absent(docker: &impl DockerResourceCommands, kind: &str, name: &str) -> Result<bool> {
+    let names = match kind {
+        "container" => docker.output(&["container", "ls", "-a", "--format", "{{.Names}}"])?,
+        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
+        "network" => docker.output(&["network", "ls", "--format", "{{.Name}}"])?,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    };
+    Ok(!names.lines().any(|candidate| candidate.trim() == name))
+}
+
+fn owned_resource(
+    docker: &impl DockerResourceCommands,
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+) -> Result<Option<String>> {
+    let names = match kind {
+        "container" => docker.output(&["container", "ls", "-a", "--format", "{{.Names}}"])?,
+        "volume" => docker.output(&["volume", "ls", "--format", "{{.Name}}"])?,
+        "network" => docker.output(&["network", "ls", "--format", "{{.Name}}"])?,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    };
+    let matches = names
+        .lines()
+        .filter(|candidate| candidate.trim() == target)
+        .count();
+    if matches == 0 {
+        return Ok(None);
+    }
+    if matches > 1 {
+        bail!(
+            "Docker has multiple {kind} resources named {target}; refusing to reuse or delete them"
+        );
+    }
+    let details = docker.output(&[kind, "inspect", target])?;
+    inspected_resource_identity(kind, target, name, &details).map(Some)
+}
+
+fn mutation_failure(
+    journal: &mut recovery::RecoveryJournal,
+    index: usize,
+    error: anyhow::Error,
+    identity: Option<String>,
+) -> anyhow::Error {
+    match journal.finish(
+        index,
+        recovery::MutationOutcome::Uncertain(format!("{error:#}")),
+        identity,
+    ) {
+        Ok(()) => error,
+        Err(record_error) => anyhow!("{error:#}; recording mutation uncertainty: {record_error:#}"),
+    }
+}
+
 fn ensure_network_with(
     prefix: &str,
     name: &InstanceName,
     docker: &impl DockerResourceCommands,
-) -> Result<()> {
-    if owned_resource(docker, "network", prefix, name)?.is_none() {
-        docker.run(&["network", "create", "--label", &label(name), prefix])?;
-        owned_resource(docker, "network", prefix, name)?
-            .with_context(|| format!("Docker did not create network {prefix}"))?;
-    }
-    Ok(())
-}
-fn ensure_volume(volume: &str, name: &InstanceName) -> Result<()> {
-    ensure_volume_with(volume, name, &DockerCli)
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+) -> Result<recovery::ResourceRef> {
+    bounded_ensure(deadline, prefix, || {
+        if let Some(id) = owned_resource(docker, "network", prefix, name)? {
+            return Ok(recovery::ResourceRef {
+                kind: recovery::ResourceKind::Network,
+                name: prefix.to_owned(),
+                identity: Some(id),
+            });
+        }
+        let resource = recovery::ResourceRef {
+            kind: recovery::ResourceKind::Network,
+            name: prefix.to_owned(),
+            identity: None,
+        };
+        let index = journal.begin(
+            resource.clone(),
+            Vec::new(),
+            recovery::MutationOperation::Create,
+        )?;
+        if let Err(error) = docker.run(&["network", "create", "--label", &label(name), prefix]) {
+            return Err(mutation_failure(journal, index, error, None));
+        }
+        match owned_resource(docker, "network", prefix, name)? {
+            Some(id) => {
+                journal.finish(
+                    index,
+                    recovery::MutationOutcome::Acknowledged,
+                    Some(id.clone()),
+                )?;
+                Ok(recovery::ResourceRef {
+                    identity: Some(id),
+                    ..resource
+                })
+            }
+            None => Err(mutation_failure(
+                journal,
+                index,
+                anyhow!("Docker did not create network {prefix}"),
+                None,
+            )),
+        }
+    })
 }
 fn ensure_volume_with(
     volume: &str,
     name: &InstanceName,
     docker: &impl DockerResourceCommands,
-) -> Result<()> {
-    if owned_resource(docker, "volume", volume, name)?.is_none() {
-        docker.run(&["volume", "create", "--label", &label(name), volume])?;
-        owned_resource(docker, "volume", volume, name)?
-            .with_context(|| format!("Docker did not create volume {volume}"))?;
-    }
-    Ok(())
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+) -> Result<recovery::ResourceRef> {
+    bounded_ensure(deadline, volume, || {
+        if let Some(id) = owned_resource(docker, "volume", volume, name)? {
+            return Ok(recovery::ResourceRef {
+                kind: recovery::ResourceKind::Volume,
+                name: volume.to_owned(),
+                identity: Some(id),
+            });
+        }
+        let resource = recovery::ResourceRef {
+            kind: recovery::ResourceKind::Volume,
+            name: volume.to_owned(),
+            identity: None,
+        };
+        let index = journal.begin(
+            resource.clone(),
+            Vec::new(),
+            recovery::MutationOperation::Create,
+        )?;
+        if let Err(error) = docker.run(&["volume", "create", "--label", &label(name), volume]) {
+            return Err(mutation_failure(journal, index, error, None));
+        }
+        match owned_resource(docker, "volume", volume, name)? {
+            Some(id) => {
+                journal.finish(
+                    index,
+                    recovery::MutationOutcome::Acknowledged,
+                    Some(id.clone()),
+                )?;
+                Ok(recovery::ResourceRef {
+                    identity: Some(id),
+                    ..resource
+                })
+            }
+            None => Err(mutation_failure(
+                journal,
+                index,
+                anyhow!("Docker did not create volume {volume}"),
+                None,
+            )),
+        }
+    })
 }
-fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
-    let target = format!("{prefix}-zakura");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
-        let rpc_bind = loopback_publish(ports.rpc, 18232);
-        let p2p_bind = loopback_publish(ports.p2p, 18233);
-        docker([
+
+fn bounded_ensure<T>(
+    deadline: Deadline,
+    resource: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if deadline.expired() {
+        bail!("timed out before creating {resource}");
+    }
+    operation()
+}
+fn volume_dependency(
+    journal: &recovery::RecoveryJournal,
+    target: &str,
+) -> Result<recovery::ResourceRef> {
+    journal
+        .record()
+        .resources
+        .iter()
+        .find(|resource| resource.kind == recovery::ResourceKind::Volume && resource.name == target)
+        .cloned()
+        .with_context(|| format!("missing allocated dependency {target}"))
+}
+
+fn ensure_zakura(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+    mut dependencies: Vec<recovery::ResourceRef>,
+) -> Result<String> {
+    for suffix in ["chain", "config"] {
+        dependencies.push(volume_dependency(journal, &format!("{prefix}-{suffix}"))?);
+    }
+
+    let rpc_bind = loopback_publish(ports.rpc, 18232);
+    let p2p_bind = loopback_publish(ports.p2p, 18233);
+    create_container(
+        &format!("{prefix}-zakura"),
+        name,
+        docker,
+        journal,
+        deadline,
+        dependencies,
+        &[
             "create",
             "--name",
-            &target,
+            &format!("{prefix}-zakura"),
             "--network",
             prefix,
             "--network-alias",
@@ -954,16 +1670,34 @@ fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result
             ZAKURA_IMAGE,
             "zakurad",
             "start",
-        ])?;
-    }
-    Ok(())
+        ],
+    )
 }
-fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
+fn ensure_lightwalletd(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+    mut dependencies: Vec<recovery::ResourceRef>,
+) -> Result<String> {
+    dependencies.push(volume_dependency(
+        journal,
+        &format!("{prefix}-lightwalletd"),
+    )?);
+
+    let image = lightwalletd_image();
+    let lightwalletd_bind = loopback_publish(ports.lightwalletd, 9067);
     let target = format!("{prefix}-lightwalletd");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
-        let image = lightwalletd_image();
-        let lightwalletd_bind = loopback_publish(ports.lightwalletd, 9067);
-        docker([
+    create_container(
+        &target,
+        name,
+        docker,
+        journal,
+        deadline,
+        dependencies,
+        &[
             "create",
             "--name",
             &target,
@@ -995,19 +1729,38 @@ fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> 
             "/var/lib/lightwalletd",
             "--log-file",
             "/dev/stdout",
-        ])?;
-    }
-    Ok(())
+        ],
+    )
 }
-fn ensure_app(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
+fn ensure_app(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+    mut dependencies: Vec<recovery::ResourceRef>,
+) -> Result<String> {
+    dependencies.push(volume_dependency(journal, &format!("{prefix}-wallet"))?);
+
+    let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
+    let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
+    let public_p2p = format!("127.0.0.1:{}", ports.p2p);
+    let dashboard_bind = loopback_publish(ports.dashboard, 8080);
+    let image = app_image();
     let target = format!("{prefix}-app");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
-        let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
-        let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
-        let public_p2p = format!("127.0.0.1:{}", ports.p2p);
-        let dashboard_bind = loopback_publish(ports.dashboard, 8080);
-        let image = app_image();
-        docker([
+    let instance = format!("THS_INSTANCE={name}");
+    let public_rpc_env = format!("THS_PUBLIC_ZAKURA_RPC={public_rpc}");
+    let public_lightwalletd_env = format!("THS_PUBLIC_LIGHTWALLETD={public_lightwalletd}");
+    let public_p2p_env = format!("THS_PUBLIC_P2P={public_p2p}");
+    create_container(
+        &target,
+        name,
+        docker,
+        journal,
+        deadline,
+        dependencies,
+        &[
             "create",
             "--name",
             &target,
@@ -1024,21 +1777,131 @@ fn ensure_app(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()
             "-e",
             "THS_LIGHTWALLETD=http://lightwalletd:9067",
             "-e",
-            &format!("THS_INSTANCE={name}"),
+            &instance,
             "-e",
-            &format!("THS_PUBLIC_ZAKURA_RPC={public_rpc}"),
+            &public_rpc_env,
             "-e",
-            &format!("THS_PUBLIC_LIGHTWALLETD={public_lightwalletd}"),
+            &public_lightwalletd_env,
             "-e",
-            &format!("THS_PUBLIC_P2P={public_p2p}"),
+            &public_p2p_env,
             "-v",
             &format!("{prefix}-wallet:/data"),
             &image,
             "serve",
             "--data-dir",
             "/data",
-        ])?;
+        ],
+    )
+}
+
+fn create_container(
+    target: &str,
+    name: &InstanceName,
+    docker: &impl DockerResourceCommands,
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+    dependencies: Vec<recovery::ResourceRef>,
+    args: &[&str],
+) -> Result<String> {
+    if deadline.expired() {
+        bail!("timed out before creating {target}");
     }
+    if let Some(id) = owned_resource(docker, "container", target, name)? {
+        return Ok(id);
+    }
+    let index = journal.begin(
+        recovery::ResourceRef {
+            kind: recovery::ResourceKind::Container,
+            name: target.to_owned(),
+            identity: None,
+        },
+        dependencies,
+        recovery::MutationOperation::Create,
+    )?;
+    let created = docker.output(args);
+    let id = match created {
+        Ok(id) => id,
+        Err(error) => {
+            return Err(mutation_failure(journal, index, error, None));
+        }
+    };
+    if let Err(error) = require_container_identity(docker, &id, name) {
+        return Err(mutation_failure(journal, index, error, Some(id)));
+    }
+    journal.finish(
+        index,
+        recovery::MutationOutcome::Acknowledged,
+        Some(id.clone()),
+    )?;
+    Ok(id)
+}
+
+fn require_container_identity(
+    docker: &impl DockerResourceCommands,
+    id: &str,
+    name: &InstanceName,
+) -> Result<()> {
+    let details = docker.output(&["container", "inspect", id])?;
+    let resources: serde_json::Value = serde_json::from_str(&details)
+        .with_context(|| format!("decoding Docker container {id}"))?;
+    let items = resources
+        .as_array()
+        .with_context(|| format!("Docker returned invalid container {id}"))?;
+    if items.len() != 1 {
+        bail!(
+            "Docker returned {} container resources for {id}; refusing to adopt a replacement",
+            items.len()
+        );
+    }
+    let resource = &items[0];
+    if resource["Id"].as_str() != Some(id) {
+        bail!("Docker container {id} changed identity; refusing to adopt a replacement");
+    }
+    if resource["Config"]["Labels"][INSTANCE_LABEL].as_str() != Some(name.0.as_str()) {
+        bail!("Docker container {id} is not owned by ths instance {name}");
+    }
+    Ok(())
+}
+
+fn start_container(
+    id: &str,
+    name: &str,
+    docker: &impl DockerResourceCommands,
+    journal: &mut recovery::RecoveryJournal,
+    deadline: Deadline,
+) -> Result<()> {
+    if deadline.expired() {
+        bail!("timed out before starting {name}");
+    }
+    let dependencies = journal
+        .record()
+        .mutations
+        .iter()
+        .rev()
+        .find(|mutation| {
+            mutation.operation == recovery::MutationOperation::Create
+                && mutation.resource.name == name
+        })
+        .with_context(|| format!("missing creation record for {name}"))?
+        .dependencies
+        .clone();
+    let index = journal.begin(
+        recovery::ResourceRef {
+            kind: recovery::ResourceKind::Container,
+            name: name.to_owned(),
+            identity: Some(id.to_owned()),
+        },
+        dependencies,
+        recovery::MutationOperation::Start,
+    )?;
+    if let Err(error) = docker.run(&["start", id]) {
+        return Err(mutation_failure(journal, index, error, Some(id.to_owned())));
+    }
+    journal.finish(
+        index,
+        recovery::MutationOutcome::Acknowledged,
+        Some(id.to_owned()),
+    )?;
     Ok(())
 }
 
@@ -1089,14 +1952,6 @@ fn ensure_image(image: &str) -> Result<()> {
     if docker_output(["image", "inspect", image]).is_err() {
         println!("Pulling {image}…");
         docker(["pull", image])?;
-    }
-    Ok(())
-}
-fn require_image(image: &str) -> Result<()> {
-    if docker_output(["image", "inspect", image]).is_err() {
-        bail!(
-            "required image {image} is unavailable; run `ths pull` (or `ths build` from a source checkout) first"
-        );
     }
     Ok(())
 }
@@ -1217,9 +2072,21 @@ impl Shutdown {
 }
 
 trait StartHost {
-    fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()>;
-    fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
-        self.delete(runtime, name)
+    fn delete(
+        &self,
+        runtime: &Runtime,
+        name: &InstanceName,
+        context: &LifecycleContext,
+        deadline: Deadline,
+    ) -> Result<CleanupReport>;
+    fn delete_partial(
+        &self,
+        runtime: &Runtime,
+        name: &InstanceName,
+        context: &LifecycleContext,
+        deadline: Deadline,
+    ) -> Result<CleanupReport> {
+        self.delete(runtime, name, context, deadline)
     }
     fn allocate(
         &self,
@@ -1227,27 +2094,42 @@ trait StartHost {
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: u16,
-    ) -> Result<Endpoints>;
+        context: &LifecycleContext,
+        journal: &mut recovery::RecoveryJournal,
+    ) -> Result<AllocatedInstance>;
     fn wait_ready(
         &self,
-        endpoints: &Endpoints,
-        app_container: &str,
-        timeout: Duration,
+        allocated: &AllocatedInstance,
         shutdown: &Shutdown,
+        context: &LifecycleContext,
     ) -> Result<()>;
-    fn open_url(&self, url: &str) -> Result<()>;
+    fn open_url(&self, url: &str, shutdown: &Shutdown, context: &LifecycleContext) -> Result<()>;
     fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()>;
 }
 
 struct DockerHost;
 
 impl StartHost for DockerHost {
-    fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
-        runtime.delete_instance_resources(name)
+    fn delete(
+        &self,
+        runtime: &Runtime,
+        name: &InstanceName,
+        context: &LifecycleContext,
+        deadline: Deadline,
+    ) -> Result<CleanupReport> {
+        let docker = lifecycle_docker(context, deadline, Cancellation::Ignore);
+        runtime.cleanup_core(name, &docker, false, deadline, context)
     }
 
-    fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
-        runtime.delete_partial_instance_resources(name)
+    fn delete_partial(
+        &self,
+        runtime: &Runtime,
+        name: &InstanceName,
+        context: &LifecycleContext,
+        deadline: Deadline,
+    ) -> Result<CleanupReport> {
+        let docker = lifecycle_docker(context, deadline, Cancellation::Ignore);
+        runtime.cleanup_core(name, &docker, true, deadline, context)
     }
 
     fn allocate(
@@ -1256,84 +2138,211 @@ impl StartHost for DockerHost {
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: u16,
-    ) -> Result<Endpoints> {
+        context: &LifecycleContext,
+        journal: &mut recovery::RecoveryJournal,
+    ) -> Result<AllocatedInstance> {
+        let requested = || shutdown.try_interrupted();
+        let docker = LifecycleDocker::production(
+            context,
+            None,
+            context.policy.startup_docker,
+            Cancellation::Observe(&requested),
+        );
         fs::create_dir_all(runtime.instance_dir(name))?;
+        shutdown.check()?;
         let prefix = prefix(name);
         let ports = host_ports(port_offset)?;
         require_free_loopback(ports.dashboard)?;
         require_free_loopback(ports.rpc)?;
         require_free_loopback(ports.p2p)?;
         require_free_loopback(ports.lightwalletd)?;
-        ensure_network(&prefix, name)?;
         shutdown.check()?;
+        let network_budget = Deadline::after(context.policy.startup_docker);
+        let network = ensure_network_with(
+            &prefix,
+            name,
+            &docker.scoped(network_budget, context.policy.startup_docker),
+            journal,
+            network_budget,
+        )?;
+        shutdown.check()?;
+        let mut volumes = Vec::new();
         for suffix in ["chain", "wallet", "lightwalletd", "config"] {
-            ensure_volume(&format!("{prefix}-{suffix}"), name)?;
-        }
-        shutdown.check()?;
-
-        if owned_resource(&DockerCli, "container", &format!("{prefix}-init"), name)?.is_none() {
-            docker([
-                "create",
-                "--name",
-                &format!("{prefix}-init"),
-                "--label",
-                &label(name),
-                "-v",
-                &format!("{prefix}-wallet:/data"),
-                "-v",
-                &format!("{prefix}-config:/config"),
-                &app_image(),
-                "init",
-                "--data-dir",
-                "/data",
-                "--config-dir",
-                "/config",
-            ])?;
-            shutdown.check()?;
-            docker(["start", "-a", &format!("{prefix}-init")])?;
+            let budget = Deadline::after(context.policy.startup_docker);
+            volumes.push(ensure_volume_with(
+                &format!("{prefix}-{suffix}"),
+                name,
+                &docker.scoped(budget, context.policy.startup_docker),
+                journal,
+                budget,
+            )?);
             shutdown.check()?;
         }
-
-        ensure_zakura(&prefix, name, &ports)?;
+        let init_name = format!("{prefix}-init");
+        let init_budget = Deadline::after(context.policy.startup_docker);
+        let init_docker = docker.scoped(init_budget, context.policy.startup_docker);
+        if owned_resource(&init_docker, "container", &init_name, name)?.is_none() {
+            let app = app_image();
+            let init_id = create_container(
+                &init_name,
+                name,
+                &init_docker,
+                journal,
+                init_budget,
+                volumes.clone(),
+                &[
+                    "create",
+                    "--name",
+                    &init_name,
+                    "--label",
+                    &label(name),
+                    "-v",
+                    &format!("{prefix}-wallet:/data"),
+                    "-v",
+                    &format!("{prefix}-config:/config"),
+                    &app,
+                    "init",
+                    "--data-dir",
+                    "/data",
+                    "--config-dir",
+                    "/config",
+                ],
+            )?;
+            shutdown.check()?;
+            let start_budget = Deadline::after(context.policy.initialization);
+            let starter = docker.scoped(start_budget, context.policy.initialization);
+            let index = journal.begin(
+                recovery::ResourceRef {
+                    kind: recovery::ResourceKind::Container,
+                    name: init_name.clone(),
+                    identity: Some(init_id.clone()),
+                },
+                volumes.clone(),
+                recovery::MutationOperation::Start,
+            )?;
+            if let Err(error) = starter.run(&["start", "-a", &init_id]) {
+                return Err(mutation_failure(journal, index, error, Some(init_id)));
+            }
+            journal.finish(
+                index,
+                recovery::MutationOutcome::Acknowledged,
+                Some(init_id),
+            )?;
+            shutdown.check()?;
+        }
+        let zakura_budget = Deadline::after(context.policy.startup_docker);
+        let zakura_id = ensure_zakura(
+            &prefix,
+            name,
+            &ports,
+            &docker.scoped(zakura_budget, context.policy.startup_docker),
+            journal,
+            zakura_budget,
+            vec![network.clone()],
+        )?;
         shutdown.check()?;
-        ensure_lightwalletd(&prefix, name, &ports)?;
+        let lightwalletd_budget = Deadline::after(context.policy.startup_docker);
+        let lightwalletd_id = ensure_lightwalletd(
+            &prefix,
+            name,
+            &ports,
+            &docker.scoped(lightwalletd_budget, context.policy.startup_docker),
+            journal,
+            lightwalletd_budget,
+            vec![network.clone()],
+        )?;
         shutdown.check()?;
-        let zakura_container = format!("{prefix}-zakura");
-        docker(["start", &zakura_container])?;
+        let zakura_start = Deadline::after(context.policy.startup_docker);
+        start_container(
+            &zakura_id,
+            &format!("{prefix}-zakura"),
+            &docker.scoped(zakura_start, context.policy.startup_docker),
+            journal,
+            zakura_start,
+        )?;
         shutdown.check()?;
         let zakura_rpc = format!(
             "http://127.0.0.1:{}",
-            published_port(&zakura_container, "18232/tcp")?
+            published_port_with(
+                &docker.scoped(zakura_start, context.policy.startup_docker),
+                &zakura_id,
+                "18232/tcp",
+            )?
         );
-        wait_for_zakura_tip(
+        let tip_deadline = Deadline::after(context.policy.readiness);
+        readiness::wait_for_zakura_tip(
             &zakura_rpc,
-            &zakura_container,
-            Duration::from_secs(120),
+            &zakura_id,
+            tip_deadline,
             shutdown,
+            &context.policy,
+            &docker.scoped(tip_deadline, context.policy.readiness_docker),
         )?;
-        docker(["start", &format!("{prefix}-lightwalletd")])?;
+        let lightwalletd_start = Deadline::after(context.policy.startup_docker);
+        start_container(
+            &lightwalletd_id,
+            &format!("{prefix}-lightwalletd"),
+            &docker.scoped(lightwalletd_start, context.policy.startup_docker),
+            journal,
+            lightwalletd_start,
+        )?;
         shutdown.check()?;
-        ensure_app(&prefix, name, &ports)?;
+        let app_budget = Deadline::after(context.policy.startup_docker);
+        let app_id = ensure_app(
+            &prefix,
+            name,
+            &ports,
+            &docker.scoped(app_budget, context.policy.startup_docker),
+            journal,
+            app_budget,
+            vec![network],
+        )?;
         shutdown.check()?;
-        docker(["start", &format!("{prefix}-app")])?;
+        let app_start = Deadline::after(context.policy.startup_docker);
+        start_container(
+            &app_id,
+            &format!("{prefix}-app"),
+            &docker.scoped(app_start, context.policy.startup_docker),
+            journal,
+            app_start,
+        )?;
         shutdown.check()?;
         let endpoints = endpoints_for(&ports);
         runtime.write_instance(name, &endpoints)?;
-        Ok(endpoints)
+        Ok(AllocatedInstance {
+            endpoints,
+            resources: journal.record().resources.clone(),
+            app_container_id: app_id,
+            zakura_container_id: zakura_id,
+        })
     }
 
     fn wait_ready(
         &self,
-        endpoints: &Endpoints,
-        app_container: &str,
-        timeout: Duration,
+        allocated: &AllocatedInstance,
         shutdown: &Shutdown,
+        context: &LifecycleContext,
     ) -> Result<()> {
-        wait_ready(&endpoints.dashboard, app_container, timeout, shutdown)
+        let requested = || shutdown.try_interrupted();
+        let deadline = Deadline::after(context.policy.readiness);
+        let docker = LifecycleDocker::production(
+            context,
+            Some(deadline),
+            context.policy.readiness_docker,
+            Cancellation::Observe(&requested),
+        );
+        readiness::wait_ready(
+            &allocated.endpoints.dashboard,
+            &allocated.app_container_id,
+            deadline,
+            shutdown,
+            &context.policy,
+            &docker,
+        )
     }
 
-    fn open_url(&self, url: &str) -> Result<()> {
-        open_url(url)
+    fn open_url(&self, url: &str, shutdown: &Shutdown, context: &LifecycleContext) -> Result<()> {
+        open_url_with(url, shutdown, context)
     }
 
     fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()> {
@@ -1341,25 +2350,53 @@ impl StartHost for DockerHost {
     }
 }
 
+fn lifecycle_docker<'a>(
+    context: &'a LifecycleContext,
+    deadline: Deadline,
+    cancellation: Cancellation<'a>,
+) -> LifecycleDocker<'a> {
+    // The cleanup allowance's termination reserve stays outside every Docker
+    // call so HelperSet::finish can still reap inside the original deadline.
+    let operation_deadline = deadline.saturating_sub(context.policy.termination_reserve);
+    LifecycleDocker::production(
+        context,
+        Some(operation_deadline),
+        context.policy.startup_docker,
+        cancellation,
+    )
+}
+
+enum CleanupGuard {
+    Inactive,
+    Armed,
+    Explicit,
+}
+
 struct CleanupOnDrop<'a> {
     runtime: &'a Runtime,
     name: &'a InstanceName,
     host: &'a dyn StartHost,
-    active: bool,
+    context: &'a LifecycleContext,
+    state: CleanupGuard,
 }
 
 impl Drop for CleanupOnDrop<'_> {
     fn drop(&mut self) {
-        if !self.active {
+        if !matches!(self.state, CleanupGuard::Armed) {
             return;
         }
-        if let Err(error) = self.host.delete_partial(self.runtime, self.name) {
+        let deadline = Deadline::after(self.context.policy.cleanup);
+        if let Err(error) =
+            self.host
+                .delete_partial(self.runtime, self.name, self.context, deadline)
+        {
             eprintln!("could not delete {}: {error:#}", self.name);
         }
     }
 }
 
 impl Runtime {
+    #[cfg(test)]
     fn start_with(
         &self,
         name: &InstanceName,
@@ -1369,42 +2406,86 @@ impl Runtime {
         host: &dyn StartHost,
         shutdown: &Shutdown,
     ) -> Result<()> {
+        let context = LifecycleContext::new(LifecyclePolicy::default());
+        self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_policy(
+        &self,
+        name: &InstanceName,
+        no_open: bool,
+        json: bool,
+        port_offset: u16,
+        host: &dyn StartHost,
+        shutdown: &Shutdown,
+        context: &LifecycleContext,
+    ) -> Result<()> {
         host_ports(port_offset)?;
         let mut cleanup = CleanupOnDrop {
             runtime: self,
             name,
             host,
-            active: false,
+            context,
+            state: CleanupGuard::Inactive,
         };
         println!("Preparing a fresh {name} environment…");
-        host.delete(self, name)?;
-        cleanup.active = true;
+        let initial_deadline = Deadline::after(context.policy.cleanup);
+        let initial = host.delete(self, name, context, initial_deadline)?;
+        if !initial.verified() {
+            return initial.into_result();
+        }
+        cleanup.state = CleanupGuard::Armed;
         println!("Starting {name}…");
-        let endpoints = host.allocate(self, name, shutdown, port_offset)?;
-        shutdown.check()?;
-        host.wait_ready(
-            &endpoints,
-            &format!("{}-app", prefix(name)),
-            Duration::from_secs(120),
-            shutdown,
-        )?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&endpoints)?);
-        } else {
-            println!("\n{name} is ready 🌸\n{}", endpoint_lines(&endpoints));
+        let primary = (|| {
+            fs::create_dir_all(self.instance_dir(name))?;
+            let mut journal = recovery::RecoveryJournal::create(self.recovery_path(name), name)?;
+            let allocated =
+                host.allocate(self, name, shutdown, port_offset, context, &mut journal)?;
+            if allocated.zakura_container_id.is_empty()
+                || allocated
+                    .resources
+                    .iter()
+                    .any(|resource| resource.name.is_empty())
+            {
+                bail!("startup did not record the allocated resource identities");
+            }
+            shutdown.check()?;
+            host.wait_ready(&allocated, shutdown, context)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&allocated.endpoints)?);
+            } else {
+                println!(
+                    "\n{name} is ready 🌸\n{}",
+                    endpoint_lines(&allocated.endpoints)
+                );
+            }
+            if !no_open {
+                host.open_url(&allocated.endpoints.dashboard, shutdown, context)?;
+            }
+            if !json {
+                println!("\nPress Ctrl+C to stop and delete this development environment.");
+            }
+            host.wait_for_shutdown(shutdown)?;
+            Ok(())
+        })();
+        cleanup.state = CleanupGuard::Explicit;
+        if primary.is_ok() {
+            println!("\nStopping and deleting {name}…");
         }
-        if !no_open {
-            host.open_url(&endpoints.dashboard)?;
+        let final_deadline = Deadline::after(context.policy.cleanup);
+        let cleaned = host
+            .delete_partial(self, name, context, final_deadline)
+            .and_then(CleanupReport::into_result);
+        match (primary, cleaned) {
+            (Ok(()), Ok(())) => {
+                println!("Deleted {name} and all of its development data.");
+                Ok(())
+            }
+            (Err(primary), Ok(())) => Err(primary),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(primary), Err(error)) => Err(anyhow!("{primary:#}\n{error:#}")),
         }
-        if !json {
-            println!("\nPress Ctrl+C to stop and delete this development environment.");
-        }
-        host.wait_for_shutdown(shutdown)?;
-        println!("\nStopping and deleting {name}…");
-        host.delete(self, name)?;
-        cleanup.active = false;
-        println!("Deleted {name} and all of its development data.");
-        Ok(())
     }
 }
 
@@ -1417,88 +2498,108 @@ fn container_running(name: &str) -> Result<bool> {
         name,
     ])? == "true")
 }
-fn wait_ready(
-    base: &str,
-    app_container: &str,
-    timeout: Duration,
-    shutdown: &Shutdown,
-) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        shutdown.check()?;
-        if Command::new("curl")
-            .args(["-fsS", &format!("{base}/api/v1/health")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return Ok(());
-        }
-        if !container_running(app_container).unwrap_or(false) {
-            let logs = docker_logs(app_container)
-                .unwrap_or_else(|error| format!("could not read app logs: {error}"));
-            bail!("app exited before becoming healthy:\n{logs}");
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        shutdown.wait_timeout(remaining.min(Duration::from_millis(750)))?;
-    }
-    bail!(
-        "dashboard did not become healthy within {} seconds",
-        timeout.as_secs()
-    )
-}
-fn wait_for_zakura_tip(
-    base: &str,
+fn published_port_with(
+    docker: &impl DockerResourceCommands,
     container: &str,
-    timeout: Duration,
-    shutdown: &Shutdown,
-) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        shutdown.check()?;
-        let tip_available = Command::new("curl")
-            .args([
-                "-sS",
-                "-H",
-                "content-type: application/json",
-                "--data",
-                r#"{"jsonrpc":"2.0","id":1,"method":"getbestblockhash","params":[]}"#,
-                base,
-            ])
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-            .and_then(|response| {
-                response
-                    .get("result")
-                    .and_then(|result| result.as_str())
-                    .map(str::to_owned)
-            })
-            .is_some();
-        if tip_available {
-            return Ok(());
+    port: &str,
+) -> Result<u16> {
+    docker
+        .output(&[
+            "inspect",
+            "--format",
+            &format!("{{{{(index (index .NetworkSettings.Ports \"{port}\") 0).HostPort}}}}"),
+            container,
+        ])?
+        .parse()
+        .context("Docker returned an invalid published port")
+}
+
+fn startup_docker_reachable(docker: &impl DockerResourceCommands) -> Result<()> {
+    let version = docker
+        .output(&["version", "--format", "{{.Server.Version}}"])
+        .context("Docker is not reachable; start Docker Desktop or the Docker daemon")?;
+    println!("✓ Docker {version}");
+    Ok(())
+}
+
+fn startup_require_image(docker: &LifecycleDocker<'_>, image: &str) -> Result<()> {
+    match docker.execute(
+        &["image", "inspect", "--format", "{{.Id}}", image],
+        OutputMode::Capture,
+    ) {
+        Ok(output)
+            if output.status.success() && !output.stdout_truncated && !output.stderr_truncated =>
+        {
+            Ok(())
         }
-        if !container_running(container).unwrap_or(false) {
-            let logs = docker_logs(container)
-                .unwrap_or_else(|error| format!("could not read Zakura logs: {error}"));
-            bail!("Zakura exited before its RPC tip became available:\n{logs}");
+        Ok(output) if !output.status.success() && !output.stdout_truncated => {
+            confirm_image_absent(docker, image, &output.stderr)
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
+        Ok(_) => bail!("checking image {image} returned truncated output"),
+        Err(error) if error.kind == CommandFailureKind::Nonzero => {
+            confirm_image_absent(docker, image, &error.stderr)
         }
-        shutdown.wait_timeout(remaining.min(Duration::from_millis(250)))?;
+        Err(error) => Err(anyhow!("{error}").context(format!("checking image {image}"))),
     }
-    bail!(
-        "Zakura RPC tip did not become available within {} seconds",
-        timeout.as_secs()
+}
+
+fn confirm_image_absent(
+    docker: &LifecycleDocker<'_>,
+    image: &str,
+    inspect_stderr: &[u8],
+) -> Result<()> {
+    match docker.execute(
+        &["image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+        OutputMode::Capture,
+    ) {
+        Ok(listing) if listing.status.success() && !listing.stdout_truncated => {
+            let present = String::from_utf8_lossy(&listing.stdout)
+                .lines()
+                .any(|line| line.trim() == image);
+            if present {
+                Ok(())
+            } else {
+                bail!(
+                    "required image {image} is unavailable; run `ths pull` (or `ths build` from a source checkout) first"
+                )
+            }
+        }
+        Ok(listing) => bail!(
+            "checking image {image} failed: {}; image listing was not usable: {}",
+            String::from_utf8_lossy(inspect_stderr).trim(),
+            String::from_utf8_lossy(&listing.stderr).trim()
+        ),
+        Err(error) => Err(anyhow!("{error}").context(format!(
+            "checking image {image} failed: {}",
+            String::from_utf8_lossy(inspect_stderr).trim()
+        ))),
+    }
+}
+
+fn open_url_with(url: &str, shutdown: &Shutdown, context: &LifecycleContext) -> Result<()> {
+    let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+        ("open", vec![url])
+    } else {
+        ("xdg-open", vec![url])
+    };
+    let requested = || shutdown.try_interrupted();
+    let mut command = Command::new(program);
+    command.args(args);
+    let deadline = Deadline::after(context.policy.startup_docker);
+    let mut helpers = context.helpers.borrow_mut();
+    run(
+        &mut command,
+        deadline,
+        Cancellation::Observe(&requested),
+        OutputMode::Null,
+        &context.policy,
+        &mut helpers,
     )
+    .map_err(|error| anyhow!("{error}"))
+    .with_context(|| format!("opening {url}"))?;
+    drop(helpers);
+    shutdown.check()?;
+    Ok(())
 }
 fn status_text(name: &InstanceName, running: bool, e: &Endpoints) -> String {
     let state = if running { "running" } else { "stopped" };
@@ -1776,25 +2877,13 @@ fn docker_output_args(args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
-fn docker_logs(container: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .args(["logs", "--tail", "50", container])
-        .output()
-        .context("running Docker")?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    let mut logs = output.stdout;
-    logs.extend_from_slice(&output.stderr);
-    Ok(String::from_utf8_lossy(&logs).trim().to_owned())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{
-        collections::HashMap,
         sync::{Arc, Mutex},
+        time::Instant,
     };
 
     #[test]
@@ -1837,43 +2926,126 @@ mod tests {
         assert_eq!(out, b"one\ntwo");
     }
 
+    struct RecordedResource {
+        name: String,
+        body: String,
+    }
+
     struct RecordingDocker {
-        output: HashMap<String, String>,
+        extra_output: BTreeMap<String, String>,
+        containers: Mutex<Vec<RecordedResource>>,
+        volumes: Mutex<Vec<RecordedResource>>,
+        networks: Mutex<Vec<RecordedResource>>,
         runs: Mutex<Vec<String>>,
+        retain: Mutex<Vec<String>>,
+    }
+
+    fn recorded_names(text: &str) -> Vec<RecordedResource> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|name| RecordedResource {
+                name: name.to_owned(),
+                body: String::new(),
+            })
+            .collect()
     }
 
     impl RecordingDocker {
         fn new(containers: &str, volumes: &str, networks: &str) -> Self {
             Self {
-                output: HashMap::from([
-                    (
-                        "container ls -a --format {{.Names}}".into(),
-                        containers.into(),
-                    ),
-                    ("volume ls --format {{.Name}}".into(), volumes.into()),
-                    ("network ls --format {{.Name}}".into(), networks.into()),
-                ]),
+                extra_output: BTreeMap::new(),
+                containers: Mutex::new(recorded_names(containers)),
+                volumes: Mutex::new(recorded_names(volumes)),
+                networks: Mutex::new(recorded_names(networks)),
                 runs: Mutex::new(Vec::new()),
+                retain: Mutex::new(Vec::new()),
             }
         }
 
         fn inspect(&mut self, kind: &str, target: &str, body: &str) {
-            self.output
-                .insert(format!("{kind} inspect {target}"), body.into());
+            let resources = match kind {
+                "container" => &self.containers,
+                "volume" => &self.volumes,
+                _ => &self.networks,
+            };
+            let mut resources = resources.lock().unwrap();
+            if let Some(resource) = resources
+                .iter_mut()
+                .find(|resource| resource.name == target)
+            {
+                resource.body = body.to_owned();
+            } else {
+                resources.push(RecordedResource {
+                    name: target.to_owned(),
+                    body: body.to_owned(),
+                });
+            }
         }
+    }
+
+    fn resource_matches(resource: &RecordedResource, token: &str) -> bool {
+        resource.name == token
+            || resource.body.contains(&format!("\"Id\":\"{token}\""))
+            || resource.body.contains(&format!("\"Name\":\"{token}\""))
     }
 
     impl DockerResourceCommands for RecordingDocker {
         fn output(&self, args: &[&str]) -> Result<String> {
-            let command = args.join(" ");
-            self.output
-                .get(&command)
-                .cloned()
-                .ok_or_else(|| anyhow!("unexpected Docker read: {command}"))
+            if let Some(output) = self.extra_output.get(&args.join(" ")) {
+                return Ok(output.clone());
+            }
+            let listed = |resources: &Mutex<Vec<RecordedResource>>| {
+                resources
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|resource| resource.name.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            match args {
+                ["container", "ls", "-a", "--format", "{{.Names}}"] => Ok(listed(&self.containers)),
+                ["volume", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.volumes)),
+                ["network", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.networks)),
+                [kind, "inspect", target] => {
+                    let resources = match *kind {
+                        "container" => &self.containers,
+                        "volume" => &self.volumes,
+                        "network" => &self.networks,
+                        _ => bail!("unexpected Docker read: {}", args.join(" ")),
+                    };
+                    resources
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|resource| {
+                            resource.name == *target || resource_matches(resource, target)
+                        })
+                        .map(|resource| resource.body.clone())
+                        .filter(|body| !body.is_empty())
+                        .ok_or_else(|| anyhow!("unexpected Docker read: {}", args.join(" ")))
+                }
+                _ => bail!("unexpected Docker read: {}", args.join(" ")),
+            }
         }
 
         fn run(&self, args: &[&str]) -> Result<()> {
             self.runs.lock().unwrap().push(args.join(" "));
+            let token = args.last().copied().unwrap_or("");
+            if self.retain.lock().unwrap().iter().any(|kept| kept == token) {
+                return Ok(());
+            }
+            let resources = match args {
+                ["rm", "-f", _] => &self.containers,
+                ["volume", "rm", _] => &self.volumes,
+                ["network", "rm", _] => &self.networks,
+                _ => return Ok(()),
+            };
+            resources
+                .lock()
+                .unwrap()
+                .retain(|resource| !resource_matches(resource, token));
             Ok(())
         }
     }
@@ -2081,7 +3253,20 @@ mod tests {
 
         let docker = NewNetwork(AtomicBool::new(false));
 
-        ensure_network_with("ths-alpha", &name("alpha"), &docker).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = recovery::RecoveryJournal::create(
+            dir.path().join(recovery::RECOVERY_FILE),
+            &name("alpha"),
+        )
+        .unwrap();
+        ensure_network_with(
+            "ths-alpha",
+            &name("alpha"),
+            &docker,
+            &mut journal,
+            Deadline::after(Duration::from_secs(1)),
+        )
+        .unwrap();
         assert!(docker.0.load(Ordering::SeqCst));
     }
 
@@ -2089,7 +3274,20 @@ mod tests {
     fn duplicate_network_names_are_rejected() {
         let docker = RecordingDocker::new("", "", "ths-alpha\nths-alpha");
 
-        let error = ensure_network_with("ths-alpha", &name("alpha"), &docker).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = recovery::RecoveryJournal::create(
+            dir.path().join(recovery::RECOVERY_FILE),
+            &name("alpha"),
+        )
+        .unwrap();
+        let error = ensure_network_with(
+            "ths-alpha",
+            &name("alpha"),
+            &docker,
+            &mut journal,
+            Deadline::after(Duration::from_secs(1)),
+        )
+        .unwrap_err();
 
         assert!(
             error.to_string().contains("multiple network resources"),
@@ -2133,10 +3331,18 @@ mod tests {
             }
         }
 
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = recovery::RecoveryJournal::create(
+            dir.path().join(recovery::RECOVERY_FILE),
+            &name("alpha"),
+        )
+        .unwrap();
         let error = ensure_volume_with(
             "ths-alpha-wallet",
             &name("alpha"),
             &RacingVolume(AtomicBool::new(false)),
+            &mut journal,
+            Deadline::after(Duration::from_secs(1)),
         )
         .unwrap_err();
 
@@ -2320,7 +3526,7 @@ mod tests {
                 &format!("ths-alpha-{service}"),
                 &format!(r#"[{{"Id":"{service}-id","Config":{{"Labels":{labels}}}}}]"#),
             );
-            docker.output.insert(
+            docker.extra_output.insert(
                 format!(
                     "container inspect --format {{{{.State.Status}}}} {{{{.Created}}}} {{{{.State.StartedAt}}}} {service}-id"
                 ),
@@ -2413,6 +3619,7 @@ mod tests {
         wait_ready_result: Result<(), String>,
         open_url_result: Result<(), String>,
         interrupt_before_ready: bool,
+        final_cleanup_failure: Option<String>,
     }
 
     impl RecordingHost {
@@ -2426,6 +3633,7 @@ mod tests {
                     wait_ready_result: Ok(()),
                     open_url_result: Ok(()),
                     interrupt_before_ready: false,
+                    final_cleanup_failure: None,
                 },
                 events,
             )
@@ -2436,31 +3644,74 @@ mod tests {
         }
     }
 
+    fn verified_report() -> CleanupReport {
+        CleanupReport {
+            outcome: CleanupOutcome::VerifiedComplete,
+            failures: Vec::new(),
+            recovery_path: None,
+            helpers_finished: true,
+        }
+    }
+
     impl StartHost for RecordingHost {
-        fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
+        fn delete(
+            &self,
+            runtime: &Runtime,
+            name: &InstanceName,
+            context: &LifecycleContext,
+            _deadline: Deadline,
+        ) -> Result<CleanupReport> {
+            let later =
+                self.events.lock().unwrap().iter().any(|event| {
+                    event.starts_with("delete:") || event.starts_with("delete_partial:")
+                });
             self.push(&format!("delete:{name}"));
-            if self.initial_delete_error {
+            if later {
+                self.push(&format!("final_cleanup:{name}"));
+            }
+            if !later && self.initial_delete_error {
                 bail!("resource collision");
             }
-            if self
-                .events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|event| event == "wait_for_shutdown")
+            if later
+                && self
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event == "wait_for_shutdown")
                 && let Some(docker) = &self.shutdown_collision
             {
-                return runtime.delete_instance_resources_with(name, docker);
+                return runtime.cleanup_with(name, docker, false, &context.policy);
             }
-            Ok(())
+            if later && let Some(message) = &self.final_cleanup_failure {
+                return Ok(CleanupReport {
+                    outcome: CleanupOutcome::Uncertain,
+                    failures: vec![message.clone()],
+                    recovery_path: Some(runtime.recovery_path(name)),
+                    helpers_finished: true,
+                });
+            }
+            Ok(verified_report())
         }
 
-        fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
+        fn delete_partial(
+            &self,
+            runtime: &Runtime,
+            name: &InstanceName,
+            context: &LifecycleContext,
+            deadline: Deadline,
+        ) -> Result<CleanupReport> {
             if let Some(docker) = &self.shutdown_collision {
+                let later = self.events.lock().unwrap().iter().any(|event| {
+                    event.starts_with("delete:") || event.starts_with("delete_partial:")
+                });
                 self.push(&format!("delete_partial:{name}"));
-                runtime.delete_instance_resources_with_mode(name, docker, true)
+                if later {
+                    self.push(&format!("final_cleanup:{name}"));
+                }
+                runtime.cleanup_with(name, docker, true, &context.policy)
             } else {
-                self.delete(runtime, name)
+                self.delete(runtime, name, context, deadline)
             }
         }
 
@@ -2470,25 +3721,31 @@ mod tests {
             name: &InstanceName,
             shutdown: &Shutdown,
             _port_offset: u16,
-        ) -> Result<Endpoints> {
+            _context: &LifecycleContext,
+            _journal: &mut recovery::RecoveryJournal,
+        ) -> Result<AllocatedInstance> {
             self.push(&format!("allocate:{name}"));
             shutdown.check()?;
-            Ok(Endpoints {
-                dashboard: "http://127.0.0.1:1".into(),
-                rpc: "http://127.0.0.1:2".into(),
-                lightwalletd: "http://127.0.0.1:3".into(),
-                p2p: "127.0.0.1:4".into(),
-                network: default_regtest(),
-                tls: false,
+            Ok(AllocatedInstance {
+                endpoints: Endpoints {
+                    dashboard: "http://127.0.0.1:1".into(),
+                    rpc: "http://127.0.0.1:2".into(),
+                    lightwalletd: "http://127.0.0.1:3".into(),
+                    p2p: "127.0.0.1:4".into(),
+                    network: default_regtest(),
+                    tls: false,
+                },
+                resources: Vec::new(),
+                app_container_id: "app-id".into(),
+                zakura_container_id: "zakura-id".into(),
             })
         }
 
         fn wait_ready(
             &self,
-            _endpoints: &Endpoints,
-            _app_container: &str,
-            _timeout: Duration,
+            _allocated: &AllocatedInstance,
             shutdown: &Shutdown,
+            _context: &LifecycleContext,
         ) -> Result<()> {
             self.push("wait_ready");
             if self.interrupt_before_ready {
@@ -2501,7 +3758,12 @@ mod tests {
                 .map_err(|e| anyhow!("{e}"))
         }
 
-        fn open_url(&self, url: &str) -> Result<()> {
+        fn open_url(
+            &self,
+            url: &str,
+            _shutdown: &Shutdown,
+            _context: &LifecycleContext,
+        ) -> Result<()> {
             self.push(&format!("open_url:{url}"));
             self.open_url_result
                 .as_ref()
@@ -2520,9 +3782,9 @@ mod tests {
     }
 
     fn runtime_for_tests() -> Runtime {
-        Runtime {
-            root: std::env::temp_dir().join("ths-start-cleanup-tests"),
-        }
+        let root = std::env::temp_dir().join(format!("ths-start-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        Runtime { root }
     }
 
     fn name(value: &str) -> InstanceName {
@@ -2858,8 +4120,20 @@ mod tests {
     fn no_open_skips_browser_and_waits_for_shutdown() {
         let (host, events) = RecordingHost::new();
         let (sender, receiver) = std::sync::mpsc::channel();
+        let watched = std::sync::Arc::clone(&events);
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(2) {
+                let waiting = watched
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event == "wait_for_shutdown");
+                if waiting {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             sender.send(()).unwrap();
         });
         let shutdown = Shutdown::from_receiver(receiver);
@@ -2870,6 +4144,30 @@ mod tests {
         assert!(!events.iter().any(|e| e.starts_with("open_url:")));
         assert!(events.iter().any(|e| e == "wait_for_shutdown"));
         assert!(events.iter().any(|e| e == "delete:alpha"));
+    }
+
+    #[test]
+    fn startup_and_cleanup_failures_are_both_reported_once() {
+        let (mut host, events) = RecordingHost::new();
+        host.wait_ready_result = Err("dashboard readiness timed out".into());
+        host.final_cleanup_failure = Some("Docker inspection failed".into());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let error = runtime_for_tests()
+            .start_with(&name("alpha"), true, false, 0, &host, &shutdown)
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("dashboard readiness timed out"));
+        assert!(text.contains("Docker inspection failed"));
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| *event == "final_cleanup:alpha")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2983,16 +4281,30 @@ mod tests {
         shutdown.wait().unwrap();
     }
 
+    struct IdleDocker;
+
+    impl DockerResourceCommands for IdleDocker {
+        fn output(&self, args: &[&str]) -> Result<String> {
+            bail!("unexpected Docker read: {args:?}")
+        }
+
+        fn run(&self, args: &[&str]) -> Result<()> {
+            bail!("unexpected Docker run: {args:?}")
+        }
+    }
+
     #[test]
     fn wait_ready_aborts_when_shutdown_is_signaled() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         sender.send(()).unwrap();
-        let err = wait_ready(
+        let err = readiness::wait_ready(
             "http://127.0.0.1:1",
             "missing-app",
-            Duration::from_secs(5),
+            Deadline::after(Duration::from_secs(5)),
             &shutdown,
+            &LifecyclePolicy::default(),
+            &IdleDocker,
         )
         .unwrap_err();
         assert!(err.to_string().contains("interrupted"));
@@ -3003,11 +4315,13 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         sender.send(()).unwrap();
-        let err = wait_for_zakura_tip(
+        let err = readiness::wait_for_zakura_tip(
             "http://127.0.0.1:1",
             "missing-zakura",
-            Duration::from_secs(5),
+            Deadline::after(Duration::from_secs(5)),
             &shutdown,
+            &LifecyclePolicy::default(),
+            &IdleDocker,
         )
         .unwrap_err();
         assert!(err.to_string().contains("interrupted"));

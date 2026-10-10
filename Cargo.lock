@@ -2987,6 +2987,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "directories",
+ "libc",
  "reqwest",
  "semver",
  "serde",

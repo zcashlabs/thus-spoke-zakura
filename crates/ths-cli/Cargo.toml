@@ -27,3 +27,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+# Direct edge so the launcher can set O_NONBLOCK on child pipes with F_GETFL/F_SETFL.
+# The version matches the existing transitive lock; do not float it.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
