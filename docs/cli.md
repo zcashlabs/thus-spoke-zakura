@@ -127,7 +127,12 @@ ths reset --force
 
 ### `ths list [--json]`
 
-Lists every known environment and its dashboard URL.
+Lists known environments in sections by state, with each one's dashboard URL,
+state (running, paused, degraded or stopped), and containers' status and
+creation and start times. `--json` gives the same data with unix-second
+timestamps. An environment whose container names are held by containers it
+doesn't own is listed as a conflict, and if Docker can't be reached,
+environments are still listed with their state as unknown.
 
 ```console
 ths list
@@ -402,7 +407,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths wallet shield --from --to --amount [--memo]` | Spend transparent funds into the same or another account's Ironwood balance |
 | `ths wallet unshield --from --to --amount` | Spend Ironwood funds into the same or another account's transparent balance |
 | `ths logs [service] [-f] [--tail N \| --head N]` | Stream or print service logs |
-| `ths list` | List known environments |
+| `ths list` | List environments and their container status |
 | `ths stop` | Stop and delete the environment |
 | `ths reset --force` | Force-delete one environment and all its data |
 | `ths doctor` | Check Docker and local configuration |

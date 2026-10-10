@@ -3,7 +3,7 @@ import { ArrowDownToLine, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { absoluteTime, shortHash, timeAgo } from '@/lib/format';
 import { formatZecAmount } from '@/lib/money';
-import type { Activity } from '@/lib/api';
+import { errorMessage, type Activity } from '@/lib/api';
 import { EmptyState, ErrorState } from '@/components/ui/StateBlock';
 import { SkeletonRows } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
@@ -113,13 +113,7 @@ export function ActivityList({
       }
     >
       {activity.isPending && <SkeletonRows rows={4} />}
-      {activity.isError && (
-        <ErrorState
-          message={
-            activity.error instanceof Error ? activity.error.message : 'Could not load activity.'
-          }
-        />
-      )}
+      {activity.isError && <ErrorState message={errorMessage(activity.error)} />}
       {activity.data &&
         (count === 0 ? (
           <EmptyState message="No transactions yet. Use the faucet to create your first activity." />

@@ -12,7 +12,8 @@ use zcash_keys::{
     address::Address,
     keys::{Era, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
 };
-use zcash_protocol::local_consensus::LocalNetwork;
+
+use crate::wallet::regtest_network;
 
 pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 pub const USER_ACCOUNT_COUNT: u8 = 5;
@@ -178,7 +179,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let seed = hex::decode(self.seed()?).context("invalid wallet seed")?;
-        let network = local_network();
+        let network = regtest_network();
         for account in &mut accounts {
             if (1..=USER_ACCOUNT_COUNT).contains(&account.id) {
                 account.unified_full_viewing_key =
@@ -534,7 +535,7 @@ impl Store {
     pub fn development_secrets(&self) -> Result<DevelopmentSecrets> {
         let seed = hex::decode(self.seed()?).context("invalid wallet seed")?;
         let mnemonic = self.mnemonic()?;
-        let network = local_network();
+        let network = regtest_network();
         let mut accounts = Vec::with_capacity(usize::from(USER_ACCOUNT_COUNT));
         for id in 1..=USER_ACCOUNT_COUNT {
             let account_index = zip32::AccountId::try_from(u32::from(id - 1))
@@ -675,13 +676,13 @@ fn derived_full_viewing_key(seed: &[u8], id: u8) -> Result<UnifiedFullViewingKey
     let index = id.checked_sub(1).context("invalid account id")?;
     let account = zip32::AccountId::try_from(u32::from(index))
         .map_err(|_| anyhow::anyhow!("invalid ZIP-32 account {id}"))?;
-    let usk = UnifiedSpendingKey::from_seed(&local_network(), seed, account)
+    let usk = UnifiedSpendingKey::from_seed(&regtest_network(), seed, account)
         .map_err(|error| anyhow::anyhow!("deriving account {id}: {error:?}"))?;
     Ok(usk.to_unified_full_viewing_key())
 }
 
 fn derived_addresses(seed: &[u8], id: u8) -> Result<(String, String)> {
-    let network = local_network();
+    let network = regtest_network();
     let (ua, _) = derived_full_viewing_key(seed, id)?
         .default_address(UnifiedAddressRequest::AllAvailableKeys)
         .map_err(|error| anyhow::anyhow!("deriving account {id} address: {error:?}"))?;
@@ -693,10 +694,6 @@ fn derived_addresses(seed: &[u8], id: u8) -> Result<(String, String)> {
         ua.encode(&network),
         Address::Transparent(transparent).encode(&network),
     ))
-}
-
-fn local_network() -> LocalNetwork {
-    crate::wallet::regtest_network()
 }
 
 #[cfg(test)]
@@ -884,7 +881,7 @@ mod tests {
             users.iter().map(|a| a.id).collect::<Vec<_>>(),
             [1, 2, 3, 4, 5]
         );
-        let network = local_network();
+        let network = regtest_network();
         let mut distinct = std::collections::HashSet::new();
         for account in &users {
             let json = serde_json::to_value(account).unwrap();

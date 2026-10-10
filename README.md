@@ -241,7 +241,7 @@ Running `ths` with no command starts the default environment.
 | `ths logs lightwalletd -f` | Follow lightwalletd logs |
 | `ths logs --tail 200 -f` | Print the last 200 app log lines, then follow |
 | `ths logs zakura --head 200` | Print the first 200 node log lines |
-| `ths list` | List known environments |
+| `ths list` | List environments and their container status |
 | `ths stop` | Stop and delete the environment after verified cleanup. Incomplete or uncertain cleanup fails and keeps `lifecycle-recovery.json` |
 | `ths reset --force` | Force-delete one environment and all its data after verified cleanup. A failed cleanup keeps recovery metadata and does not prune other Docker resources |
 | `ths doctor` | Check Docker and local configuration |

@@ -21,6 +21,17 @@ const IO_COLUMNS: Column[] = [
   { key: 'value', header: 'Value', align: 'right', width: '160px' },
 ];
 
+/**
+ * A transaction can spend more than one output from the same previous
+ * transaction, so the txid alone is not unique across input rows. Coinbase
+ * and incomplete inputs fall back to the (fixed) input index instead.
+ */
+function inputKey(input: TxInput, index: number): string {
+  return input.txid !== undefined && input.vout !== undefined
+    ? `${input.txid}:${input.vout}`
+    : String(index);
+}
+
 function PublicInputs({ vin }: { vin: TxInput[] }) {
   // The server resolves every prevout before it hands the transaction over, so
   // refetching each previous transaction here would repeat that work — and each
@@ -42,7 +53,7 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
               ? `/explorer/tx/${resolved.prevTxid}`
               : undefined;
           return (
-            <Row key={input.txid ?? input.coinbase ?? index} index={index} {...(to ? { to } : {})}>
+            <Row key={inputKey(input, index)} index={index} {...(to ? { to } : {})}>
               <td className="text-ink-muted tabular-nums">{index}</td>
               <td>
                 {to ? (
