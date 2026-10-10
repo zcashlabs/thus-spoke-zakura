@@ -26,10 +26,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start an environment in the foreground; interrupting deletes it.
+    /// Start an environment; foreground mode deletes it when interrupted.
     Start {
         #[arg(long)]
         no_open: bool,
+        /// Return once ready without opening a browser. Stop explicitly after scripts or CI.
+        #[arg(short = 'd', long)]
+        detach: bool,
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
         port_offset: u16,
@@ -213,12 +216,14 @@ fn main() -> Result<ExitCode> {
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
         no_open: false,
+        detach: false,
         port_offset: 0,
     }) {
         Command::Start {
             no_open,
+            detach,
             port_offset,
-        } => runtime.start(&cli.name, no_open, cli.json, port_offset),
+        } => runtime.start(&cli.name, no_open, cli.json, port_offset, detach),
         Command::Build { dev } => runtime.build(dev),
         Command::Pull => runtime.pull(),
         Command::Update { .. } => unreachable!("update is handled before runtime discovery"),
@@ -473,7 +478,8 @@ mod tests {
             cli.command,
             Some(Command::Start {
                 no_open: false,
-                port_offset: 10
+                port_offset: 10,
+                detach: false,
             })
         ));
 
@@ -544,6 +550,22 @@ mod tests {
 
         let status = Cli::try_parse_from(["ths", "status"]).unwrap();
         assert!(!should_check_for_updates(&status));
+    }
+
+    #[test]
+    fn detached_start_accepts_long_and_short_flags() {
+        for flag in ["--detach", "-d"] {
+            let cli = Cli::try_parse_from(["ths", "start", flag]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Start { detach: true, .. })
+            ));
+        }
+        let cli = Cli::try_parse_from(["ths", "start"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Start { detach: false, .. })
+        ));
     }
 
     #[test]

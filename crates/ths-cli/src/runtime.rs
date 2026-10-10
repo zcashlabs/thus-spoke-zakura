@@ -305,6 +305,7 @@ impl Runtime {
         no_open: bool,
         json: bool,
         port_offset: u16,
+        detach: bool,
     ) -> Result<()> {
         host_ports(port_offset)?;
         self.doctor_with(false, json)?;
@@ -317,6 +318,7 @@ impl Runtime {
             no_open,
             json,
             port_offset,
+            detach,
             &DockerHost { json },
             &shutdown,
         )
@@ -1396,12 +1398,14 @@ impl Drop for CleanupOnDrop<'_> {
 }
 
 impl Runtime {
+    #[allow(clippy::too_many_arguments)]
     fn start_with(
         &self,
         name: &InstanceName,
         no_open: bool,
         json: bool,
         port_offset: u16,
+        detach: bool,
         host: &dyn StartHost,
         shutdown: &Shutdown,
     ) -> Result<()> {
@@ -1424,10 +1428,16 @@ impl Runtime {
             Duration::from_secs(120),
             shutdown,
         )?;
+        shutdown.check()?;
         if json {
             println!("{}", serde_json::to_string_pretty(&endpoints)?);
         } else {
             println!("\n{name} is ready 🌸\n{}", endpoint_lines(&endpoints));
+        }
+        if detach {
+            // Explicit stop/reset commands now own the ready environment's cleanup.
+            cleanup.active = false;
+            return Ok(());
         }
         if !no_open {
             host.open_url(&endpoints.dashboard)?;
@@ -2471,6 +2481,7 @@ mod tests {
         wait_ready_result: Result<(), String>,
         open_url_result: Result<(), String>,
         interrupt_before_ready: bool,
+        interrupt_after_ready: bool,
     }
 
     impl RecordingHost {
@@ -2484,6 +2495,7 @@ mod tests {
                     wait_ready_result: Ok(()),
                     open_url_result: Ok(()),
                     interrupt_before_ready: false,
+                    interrupt_after_ready: false,
                 },
                 events,
             )
@@ -2553,6 +2565,9 @@ mod tests {
                 bail!("interrupted");
             }
             shutdown.check()?;
+            if self.interrupt_after_ready {
+                shutdown.flag.store(true, Ordering::SeqCst);
+            }
             self.wait_ready_result
                 .as_ref()
                 .map(|_| ())
@@ -2577,6 +2592,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn detached_start_returns_ready_without_browser_wait_or_cleanup() {
+        let (host, events) = RecordingHost::new();
+        let (_sender, receiver) = mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        runtime_for_tests()
+            .start_with(&name("alpha"), false, true, 0, true, &host, &shutdown)
+            .unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["delete:alpha", "allocate:alpha", "wait_ready"]
+        );
+    }
+
+    #[test]
+    fn detached_start_readiness_failure_keeps_cleanup_armed() {
+        let (mut host, events) = RecordingHost::new();
+        host.wait_ready_result = Err("not ready".into());
+        let (_sender, receiver) = mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let error = runtime_for_tests()
+            .start_with(&name("alpha"), false, true, 0, true, &host, &shutdown)
+            .unwrap_err();
+        assert!(error.to_string().contains("not ready"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "delete:alpha",
+                "allocate:alpha",
+                "wait_ready",
+                "delete:alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn detached_start_interrupt_at_readiness_still_cleans_up() {
+        let (mut host, events) = RecordingHost::new();
+        host.interrupt_after_ready = true;
+        let (_sender, receiver) = mpsc::channel();
+        let shutdown = Shutdown::from_receiver(receiver);
+        let error = runtime_for_tests()
+            .start_with(&name("alpha"), false, true, 0, true, &host, &shutdown)
+            .unwrap_err();
+        assert!(error.to_string().contains("interrupted"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "delete:alpha",
+                "allocate:alpha",
+                "wait_ready",
+                "delete:alpha"
+            ]
+        );
+    }
+
     fn runtime_for_tests() -> Runtime {
         Runtime {
             root: std::env::temp_dir().join("ths-start-cleanup-tests"),
@@ -2595,7 +2666,7 @@ mod tests {
         let shutdown = Shutdown::from_receiver(receiver);
 
         let error = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 0, false, &host, &shutdown)
             .unwrap_err();
 
         assert!(error.to_string().contains("resource collision"));
@@ -2635,7 +2706,7 @@ mod tests {
         let shutdown = Shutdown::from_receiver(receiver);
 
         let error = runtime_for_tests()
-            .start_with(&name("alpha"), true, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), true, false, 0, false, &host, &shutdown)
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("ths-alpha-init is not owned"));
@@ -2874,7 +2945,7 @@ mod tests {
         let (_sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         let err = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 0, false, &host, &shutdown)
             .unwrap_err();
         assert!(err.to_string().contains("dashboard did not become healthy"));
         let events = events.lock().unwrap().clone();
@@ -2903,7 +2974,7 @@ mod tests {
         let (_sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         let err = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 0, false, &host, &shutdown)
             .unwrap_err();
         assert!(err.to_string().contains("opening"));
         let events = events.lock().unwrap().clone();
@@ -2922,7 +2993,7 @@ mod tests {
         });
         let shutdown = Shutdown::from_receiver(receiver);
         runtime_for_tests()
-            .start_with(&name("alpha"), true, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), true, false, 0, false, &host, &shutdown)
             .unwrap();
         let events = events.lock().unwrap().clone();
         assert!(!events.iter().any(|e| e.starts_with("open_url:")));
@@ -2937,7 +3008,7 @@ mod tests {
         let (_sender, receiver) = std::sync::mpsc::channel();
         let shutdown = Shutdown::from_receiver(receiver);
         let err = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 0, false, &host, &shutdown)
             .unwrap_err();
         assert!(err.to_string().contains("interrupted"));
         let events = events.lock().unwrap().clone();
@@ -2953,7 +3024,7 @@ mod tests {
         sender.send(()).unwrap();
         let shutdown = Shutdown::from_receiver(receiver);
         let err = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 0, false, &host, &shutdown)
             .unwrap_err();
         assert!(err.to_string().contains("interrupted"));
         let events = events.lock().unwrap().clone();
@@ -3121,7 +3192,7 @@ mod tests {
         let shutdown = Shutdown::from_receiver(receiver);
 
         let error = runtime_for_tests()
-            .start_with(&name("alpha"), false, false, 32740, &host, &shutdown)
+            .start_with(&name("alpha"), false, false, 32740, false, &host, &shutdown)
             .unwrap_err();
 
         assert!(error.to_string().contains("overflow"));

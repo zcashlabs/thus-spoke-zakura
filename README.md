@@ -194,10 +194,17 @@ Account 5: uregtest1l82ktar6wygqsncxp7famz8manh48tv283pve29fnumsrskyj9dyhn50l9gn
 
 Running `ths` with no command starts the default environment.
 
+For scripts and CI, use `ths --name ci start --detach --port-offset 100`.
+It waits until ready, skips the browser, and returns while the containers keep
+running. Add `--json` for endpoints on stdout. Run `ths --name ci stop` or
+`ths --name ci reset --force` when finished to delete the environment and its data.
+Startup failure or interruption before readiness still triggers cleanup.
+
 | Command | What it does |
 | --- | --- |
 | `ths` | Start a fresh environment and open the dashboard |
 | `ths start --no-open` | Start without opening a browser |
+| `ths start --detach` | Start for scripts or CI and return once ready; stop explicitly afterward |
 | `ths --json start --no-open` | Print endpoints as one JSON document on stdout; setup and cleanup diagnostics go to stderr |
 | `ths start --port-offset 10` | Start on loopback ports shifted by 10 for another instance |
 | `ths status` | Show health and endpoint information |
