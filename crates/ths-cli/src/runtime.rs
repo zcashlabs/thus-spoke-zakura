@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::lifecycle::{
@@ -1190,10 +1190,8 @@ trait DockerResourceCommands {
     fn run(&self, args: &[&str]) -> Result<()>;
 }
 
-#[cfg(test)]
 struct DockerCli;
 
-#[cfg(test)]
 impl DockerResourceCommands for DockerCli {
     fn output(&self, args: &[&str]) -> Result<String> {
         docker_output_args(args)
@@ -2932,6 +2930,7 @@ mod tests {
     }
 
     struct RecordingDocker {
+        extra_output: BTreeMap<String, String>,
         containers: Mutex<Vec<RecordedResource>>,
         volumes: Mutex<Vec<RecordedResource>>,
         networks: Mutex<Vec<RecordedResource>>,
@@ -2953,6 +2952,7 @@ mod tests {
     impl RecordingDocker {
         fn new(containers: &str, volumes: &str, networks: &str) -> Self {
             Self {
+                extra_output: BTreeMap::new(),
                 containers: Mutex::new(recorded_names(containers)),
                 volumes: Mutex::new(recorded_names(volumes)),
                 networks: Mutex::new(recorded_names(networks)),
@@ -2990,6 +2990,9 @@ mod tests {
 
     impl DockerResourceCommands for RecordingDocker {
         fn output(&self, args: &[&str]) -> Result<String> {
+            if let Some(output) = self.extra_output.get(&args.join(" ")) {
+                return Ok(output.clone());
+            }
             let listed = |resources: &Mutex<Vec<RecordedResource>>| {
                 resources
                     .lock()
@@ -3521,7 +3524,7 @@ mod tests {
                 &format!("ths-alpha-{service}"),
                 &format!(r#"[{{"Id":"{service}-id","Config":{{"Labels":{labels}}}}}]"#),
             );
-            docker.output.insert(
+            docker.extra_output.insert(
                 format!(
                     "container inspect --format {{{{.State.Status}}}} {{{{.Created}}}} {{{{.State.StartedAt}}}} {service}-id"
                 ),
