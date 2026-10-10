@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { poolSchema } from '@/lib/api';
 import { parseZec, ZATOSHIS_PER_ZEC } from '@/lib/money';
 
 /** Server-side faucet ceiling (`api.rs`: `5 * ZATOSHIS_PER_ZEC`). */
@@ -7,8 +8,6 @@ export const FAUCET_MAX_ZATOSHI = 5n * ZATOSHIS_PER_ZEC;
 /** Server-side mining bounds (`api.rs`: `(1..=10_000)`). */
 export const MINE_MIN_BLOCKS = 1;
 export const MINE_MAX_BLOCKS = 10_000;
-
-const poolField = z.enum(['transparent', 'ironwood']);
 
 /** Selects and inputs hand back strings; the schema owns the conversion. */
 const accountIdField = z
@@ -56,8 +55,8 @@ export const sendSchema = z
   .object({
     from_account: accountIdField,
     to_account: accountIdField,
-    source_pool: poolField,
-    destination_pool: poolField,
+    source_pool: poolSchema,
+    destination_pool: poolSchema,
     amount: amountField,
     memo: memoField,
   })
@@ -78,7 +77,7 @@ export type SendValues = z.output<typeof sendSchema>;
 
 export const faucetSchema = z.object({
   account_id: accountIdField,
-  pool: poolField,
+  pool: poolSchema,
   amount: amountField.refine(
     (zatoshi) => zatoshi <= FAUCET_MAX_ZATOSHI,
     'The faucet is limited to 5 ZEC per request.',

@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { renderWithProviders } from '@/test/utils';
+import { ApiError } from '@/lib/api';
 import { ActivityList } from './ActivityList';
+
+function renderError(error: unknown) {
+  renderWithProviders(
+    <MemoryRouter>
+      <ActivityList activity={{ isPending: false, isError: true, error, data: undefined }} />
+    </MemoryRouter>,
+  );
+}
 
 describe('ActivityList same-account transfers', () => {
   it.each([
@@ -44,5 +53,17 @@ describe('ActivityList same-account transfers', () => {
     expect(within(row!).getByText(source)).toBeInTheDocument();
     expect(within(row!).getByText(destination)).toBeInTheDocument();
     expect(screen.getByText('1 event')).toBeInTheDocument();
+  });
+});
+
+describe('ActivityList error state', () => {
+  it("preserves an ApiError's own message", () => {
+    renderError(new ApiError(404, 'activity not found'));
+    expect(screen.getByText('activity not found')).toBeInTheDocument();
+  });
+
+  it('falls back to the shared message for an unrecognised error', () => {
+    renderError('boom');
+    expect(screen.getByText('Something went wrong.')).toBeInTheDocument();
   });
 });

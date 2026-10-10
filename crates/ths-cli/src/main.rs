@@ -1,7 +1,7 @@
 mod runtime;
 mod updater;
 
-use std::{path::PathBuf, process::ExitCode, str::FromStr};
+use std::{process::ExitCode, str::FromStr};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -318,8 +318,6 @@ fn send(runtime: &Runtime, name: &InstanceName, args: SendArgs, json: bool) -> R
 fn should_check_for_updates(cli: &Cli) -> bool {
     !cli.json && matches!(cli.command, None | Some(Command::Start { .. }))
 }
-
-fn _assert_pathbuf_send(_: PathBuf) {}
 
 /// `--memo ""` is allowed and sends an explicit empty text memo.
 fn parse_memo(value: &str) -> Result<String> {
