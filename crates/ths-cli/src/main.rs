@@ -1,4 +1,7 @@
+mod lifecycle;
 mod runtime;
+#[cfg(test)]
+mod test_support;
 mod updater;
 
 use std::{path::PathBuf, process::ExitCode, str::FromStr};
