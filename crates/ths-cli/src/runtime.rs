@@ -149,7 +149,7 @@ pub struct Runtime {
 
 struct FaucetJournal {
     path: PathBuf,
-    _lock: File,
+    lock: File,
 }
 
 impl FaucetJournal {
@@ -172,7 +172,7 @@ impl FaucetJournal {
         }
         Ok(Self {
             path: instance_dir.join("faucet-intents.json"),
-            _lock: lock,
+            lock,
         })
     }
 
@@ -245,6 +245,18 @@ impl FaucetJournal {
             entries.remove(*intent);
         }
         self.write(&entries)
+    }
+}
+
+impl Drop for FaucetJournal {
+    fn drop(&mut self) {
+        // Closing the file releases this flock only after every inherited copy
+        // is closed too. A child forked while the guard is alive can hold that
+        // copy until exec, so a following faucet command would still see the
+        // journal as busy. Unlocking releases every copy of this descriptor.
+        if let Err(error) = self.lock.unlock() {
+            eprintln!("could not release the faucet intent lock: {error}");
+        }
     }
 }
 
@@ -2678,6 +2690,143 @@ mod tests {
                 .to_string()
                 .contains("another faucet command is running")
         );
+    }
+
+    /// holds a child between fork and exec so it keeps every inherited descriptor.
+    #[cfg(unix)]
+    struct InheritedDescriptorChild {
+        release: Option<std::os::unix::net::UnixStream>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl InheritedDescriptorChild {
+        fn spawn() -> Self {
+            use std::io::Read;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::{net::UnixStream, process::CommandExt};
+
+            let program = ["/usr/bin/true", "/bin/true"]
+                .into_iter()
+                .find(|path| std::path::Path::new(path).is_file())
+                .expect("a program that exits immediately");
+            let (mut ready_read, ready_write) = UnixStream::pair().unwrap();
+            let (release_read, release_write) = UnixStream::pair().unwrap();
+            ready_read
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut command = Command::new(program);
+            // SAFETY: the hook runs between fork and exec and only transfers one
+            // byte on each barrier socket. Those reads and writes are async-signal-safe,
+            // and the sockets stay open because this closure owns them until exec.
+            unsafe {
+                command.pre_exec(move || {
+                    transfer_barrier_byte(ready_write.as_raw_fd(), false)?;
+                    transfer_barrier_byte(release_read.as_raw_fd(), true)?;
+                    Ok(())
+                });
+            }
+            let worker = std::thread::spawn(move || {
+                command.spawn().unwrap().wait().unwrap();
+            });
+            let child = Self {
+                release: Some(release_write),
+                worker: Some(worker),
+            };
+            let mut byte = [0u8; 1];
+            ready_read.read_exact(&mut byte).unwrap_or_else(|error| {
+                panic!("child did not pause before exec with the inherited descriptor: {error}")
+            });
+            child
+        }
+
+        fn release(mut self) {
+            self.unblock();
+            if let Some(worker) = self.worker.take() {
+                worker.join().unwrap();
+            }
+        }
+
+        fn unblock(&mut self) {
+            use std::io::Write;
+            if let Some(mut release) = self.release.take() {
+                // Closing the socket after a failed write makes the child's read
+                // return end-of-file, so it exits instead of staying paused.
+                if let Err(error) = release.write_all(&[1]) {
+                    eprintln!("could not release the inherited-descriptor child: {error}");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for InheritedDescriptorChild {
+        fn drop(&mut self) {
+            // Unblock a child that is still before exec when an assertion fails,
+            // so the worker thread cannot keep the test process waiting.
+            self.unblock();
+        }
+    }
+
+    /// reads or writes one byte on a barrier socket that stays open until exec.
+    #[cfg(unix)]
+    fn transfer_barrier_byte(fd: i32, reading: bool) -> std::io::Result<()> {
+        let mut byte = [0u8; 1];
+        loop {
+            // SAFETY: `fd` is a blocking socket owned by the pre_exec closure.
+            // `read` and `write` of one byte do not allocate on the success path.
+            let transferred = unsafe {
+                if reading {
+                    inherited_read(fd, byte.as_mut_ptr().cast(), 1)
+                } else {
+                    inherited_write(fd, byte.as_ptr().cast(), 1)
+                }
+            };
+            if transferred == 1 {
+                return Ok(());
+            }
+            if transferred == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "faucet lock barrier closed",
+                ));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "read"]
+        fn inherited_read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
+        #[link_name = "write"]
+        fn inherited_write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_journal_releases_the_lock_while_a_child_holds_its_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FaucetJournal::open(dir.path()).unwrap();
+        let child = InheritedDescriptorChild::spawn();
+        drop(journal);
+
+        let reopened = FaucetJournal::open(dir.path())
+            .unwrap_or_else(|error| panic!("inherited descriptor kept the faucet lock: {error:#}"));
+        match FaucetJournal::open(dir.path()) {
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("another faucet command is running"),
+                "{error:#}"
+            ),
+            Ok(_) => panic!("reopened journal did not keep the faucet lock"),
+        }
+        drop(reopened);
+        child.release();
     }
 
     #[test]
