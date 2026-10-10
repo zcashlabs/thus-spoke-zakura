@@ -472,6 +472,7 @@ async fn send(
                         &address,
                         req.amount_zatoshi,
                         memo,
+                        record_prepared_payment(&state.0.store, &activity_id),
                     )
                     .await
             }
@@ -719,6 +720,7 @@ async fn fund_address_from_treasury(
                         &treasury,
                         address,
                         amount_zatoshi,
+                        record_prepared_address_payment(&state.0.store, &pending.id),
                     )
                     .await
                 }
@@ -825,6 +827,7 @@ async fn fund_from_treasury(
             &treasury,
             &address,
             amount_zatoshi,
+            record_prepared_payment(&state.0.store, &activity_id),
         )
         .await
     })
@@ -921,6 +924,40 @@ impl PaymentSubmitter for AppState {
 
     async fn recover_prepared(&self, txid: &str) -> anyhow::Result<Option<PreparedPayment>> {
         self.0.wallet.recover_prepared(txid).await
+    }
+}
+
+fn record_prepared_payment(
+    store: &Store,
+    id: &str,
+) -> impl FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Clone + Send + 'static {
+    let store = store.clone();
+    let id = id.to_owned();
+    move |prepared| {
+        store.record_prepared(
+            &id,
+            &prepared.txid,
+            &prepared.raw_transaction,
+            prepared.expiry_height,
+        )?;
+        Ok(prepared)
+    }
+}
+
+fn record_prepared_address_payment(
+    store: &Store,
+    id: &str,
+) -> impl FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Clone + Send + 'static {
+    let store = store.clone();
+    let id = id.to_owned();
+    move |prepared| {
+        store.record_address_prepared(
+            &id,
+            &prepared.txid,
+            &prepared.raw_transaction,
+            prepared.expiry_height,
+        )?;
+        Ok(prepared)
     }
 }
 
@@ -1047,13 +1084,16 @@ enum PreparedSubmission {
 
 #[async_trait::async_trait]
 trait FaucetRuntime: Sync {
-    async fn prepare_payment(
+    async fn prepare_payment<F>(
         &self,
         activity_id: Option<&str>,
         seed: &str,
         destination: &str,
         amount_zatoshi: u64,
-    ) -> anyhow::Result<PreparedPayment>;
+        record: F,
+    ) -> anyhow::Result<PreparedPayment>
+    where
+        F: FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Send + 'static;
     async fn chain_height(&self) -> anyhow::Result<u64>;
     async fn block_hash(&self, height: u32) -> anyhow::Result<String>;
     async fn synchronize_latest(&self) -> anyhow::Result<()>;
@@ -1091,13 +1131,17 @@ trait FaucetRuntime: Sync {
 
 #[async_trait::async_trait]
 impl FaucetRuntime for AppState {
-    async fn prepare_payment(
+    async fn prepare_payment<F>(
         &self,
         activity_id: Option<&str>,
         seed: &str,
         destination: &str,
         amount_zatoshi: u64,
-    ) -> anyhow::Result<PreparedPayment> {
+        record: F,
+    ) -> anyhow::Result<PreparedPayment>
+    where
+        F: FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Send + 'static,
+    {
         self.0
             .wallet
             .prepare(
@@ -1108,6 +1152,7 @@ impl FaucetRuntime for AppState {
                 destination,
                 amount_zatoshi,
                 None,
+                record,
             )
             .await
     }
@@ -1256,18 +1301,29 @@ async fn discover_reward(
     Ok(next)
 }
 
-async fn prepare_with_replenishment<R: FaucetRuntime>(
+async fn prepare_with_replenishment<R, F>(
     runtime: &R,
     activity_id: Option<&str>,
     seed: &str,
     treasury: &Account,
     destination: &str,
     amount_zatoshi: u64,
-) -> anyhow::Result<PreparedPayment> {
+    record: F,
+) -> anyhow::Result<PreparedPayment>
+where
+    R: FaucetRuntime,
+    F: FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Clone + Send + 'static,
+{
     let mut reconciled_after_scan_required = false;
     loop {
         match runtime
-            .prepare_payment(activity_id, seed, destination, amount_zatoshi)
+            .prepare_payment(
+                activity_id,
+                seed,
+                destination,
+                amount_zatoshi,
+                record.clone(),
+            )
             .await
         {
             Ok(prepared) => return Ok(prepared),
@@ -4436,16 +4492,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl FaucetRuntime for RecordingFaucetRuntime {
-        async fn prepare_payment(
+        async fn prepare_payment<F>(
             &self,
             _activity_id: Option<&str>,
             _seed: &str,
             _destination: &str,
             _amount_zatoshi: u64,
-        ) -> anyhow::Result<PreparedPayment> {
+            record: F,
+        ) -> anyhow::Result<PreparedPayment>
+        where
+            F: FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Send + 'static,
+        {
             self.events.lock().unwrap().push("prepare".into());
             if self.funds_available.load(Ordering::SeqCst) {
-                Ok(PreparedPayment {
+                record(PreparedPayment {
                     txid: "recovered-txid".into(),
                     raw_transaction: b"recovered transaction".to_vec(),
                     expiry_height: 240,
@@ -4541,6 +4601,7 @@ mod tests {
             &treasury,
             "uregtest-recipient",
             100_000_000,
+            Ok,
         )
         .await
         .unwrap();
