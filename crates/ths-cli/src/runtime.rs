@@ -304,7 +304,17 @@ impl Runtime {
             })()
         };
         if let Err(error) = prepared {
-            let _ = context.finish_helpers(Deadline::after(context.policy.startup_docker));
+            let failures = context.finish_helpers(Deadline::after(context.policy.startup_docker));
+            if !failures.is_empty() {
+                return Err(anyhow!(
+                    "{error:#}; helper cleanup: {}",
+                    failures
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
             return Err(error);
         }
         self.start_with_policy(
@@ -728,9 +738,16 @@ impl Runtime {
         let loaded = match recovery::RecoveryJournal::load(recovery_path.clone(), name) {
             Ok(journal) => journal,
             Err(error) => {
+                let mut failures = vec![format!("{error:#}")];
+                failures.extend(
+                    context
+                        .finish_helpers(deadline)
+                        .iter()
+                        .map(ToString::to_string),
+                );
                 return Ok(CleanupReport {
                     outcome: CleanupOutcome::Uncertain,
-                    failures: vec![format!("{error:#}")],
+                    failures,
                     recovery_path: Some(recovery_path),
                     helpers_finished: context.helpers_finished(),
                 });
@@ -748,9 +765,12 @@ impl Runtime {
                         recovery::MutationOperation::Create | recovery::MutationOperation::Start
                     )
                 {
-                    kept.insert(mutation.resource.name.clone());
+                    kept.insert((
+                        mutation.resource.kind.clone(),
+                        mutation.resource.name.clone(),
+                    ));
                     for dependency in &mutation.dependencies {
-                        kept.insert(dependency.name.clone());
+                        kept.insert((dependency.kind.clone(), dependency.name.clone()));
                     }
                 }
             }
@@ -759,14 +779,23 @@ impl Runtime {
         let prefix = prefix(name);
         let mut failures = Vec::new();
         let mut uncertain = work_deadline.expired();
-        if uncertain {
+        if let Some(existing) = &journal
+            && !existing.record().unresolved_helpers.is_empty()
+        {
+            uncertain = true;
+            failures.push(format!(
+                "previous launcher helpers remain unverified: {}",
+                existing.record().unresolved_helpers.join(", ")
+            ));
+        }
+        if work_deadline.expired() {
             failures.push(format!(
                 "cleanup deadline for {name} expired before resource removal"
             ));
         }
         let mut targets: Vec<(String, String, String)> = Vec::new();
         let mut consider = |kind: &str, target: &str| -> Result<()> {
-            if kept.contains(target) {
+            if kept.contains(&(resource_kind(kind), target.to_owned())) {
                 let present = match resource_absent(docker, kind, target) {
                     Ok(absent) => !absent,
                     Err(error) => {
@@ -798,7 +827,9 @@ impl Runtime {
                     .record()
                     .resources
                     .iter()
-                    .find(|resource| resource.name == target)
+                    .find(|resource| {
+                        resource.kind == resource_kind(kind) && resource.name == target
+                    })
                     .and_then(|resource| resource.identity.clone())
             }) {
                 match docker.output(&[kind, "inspect", &id]) {
@@ -812,22 +843,22 @@ impl Runtime {
                             name: target.to_owned(),
                             identity: Some(id.clone()),
                         };
-                        match observed_identity(kind, &details) {
-                            Some(observed) if recovery::identity_matches(&recorded, &observed) => {
+                        match inspected_resource_identity(kind, target, name, &details) {
+                            Ok(observed) if recovery::identity_matches(&recorded, &observed) => {
                                 targets.push((kind.to_owned(), id, target.to_owned()));
                             }
-                            Some(observed) => {
+                            Ok(observed) => {
                                 uncertain = true;
                                 failures.push(format!(
                                     "recorded {kind} {target} ({id}) does not match {observed}; refusing to adopt it"
                                 ));
                             }
-                            None => prove_recorded_absence(
+                            Err(error) => prove_recorded_absence(
                                 docker,
                                 kind,
                                 target,
                                 &id,
-                                "inspection had no identity",
+                                &format!("ownership inspection failed: {error:#}"),
                                 &mut uncertain,
                                 &mut failures,
                             ),
@@ -874,6 +905,15 @@ impl Runtime {
             consider("network", &prefix)?;
             Ok(())
         })();
+        let preflight = preflight.and_then(|()| {
+            if journal.is_none() && !targets.is_empty() {
+                journal = Some(recovery::RecoveryJournal::create(
+                    recovery_path.clone(),
+                    name,
+                )?);
+            }
+            Ok(())
+        });
         if let Err(error) = preflight {
             failures.push(format!("{error:#}"));
             uncertain = true;
@@ -909,93 +949,65 @@ impl Runtime {
                     "volume" => docker.run(&["volume", "rm", &id]),
                     _ => docker.run(&["network", "rm", &id]),
                 };
-                if let Err(error) = removal {
-                    // A lost reply is not absence. One follow-up read can reconcile a
-                    // removal that actually completed; a still-present or unreadable
-                    // resource stays uncertain and is not retried.
-                    match resource_absent(docker, &kind, &label) {
-                        Ok(true) => {
-                            if let Some(existing) = &mut journal {
-                                let index = existing.record().mutations.len() - 1;
-                                let unresolved =
-                                    recovery::unresolved_create(existing.record(), &label)
-                                        .is_some();
-                                let outcome =
-                                    recovery::reconcile_acknowledged_removal(true, unresolved);
-                                if matches!(outcome, recovery::MutationOutcome::Uncertain(_)) {
-                                    uncertain = true;
-                                    failures.push(format!("{label}: {error:#}"));
-                                }
-                                let _ = existing.finish(index, outcome, Some(id));
-                            }
-                        }
-                        Ok(false) => {
-                            uncertain = true;
-                            failures.push(format!("{label}: {error:#}"));
-                            if let Some(existing) = &mut journal {
-                                let index = existing.record().mutations.len() - 1;
-                                let _ = existing.finish(
-                                    index,
-                                    recovery::MutationOutcome::Uncertain(error.to_string()),
-                                    Some(id),
-                                );
-                            }
-                        }
-                        Err(read_error) => {
-                            uncertain = true;
-                            failures.push(format!(
-                                "{label}: {error:#}; removal could not be verified: {read_error:#}"
-                            ));
-                            if let Some(existing) = &mut journal {
-                                let index = existing.record().mutations.len() - 1;
-                                let _ = existing.finish(
-                                    index,
-                                    recovery::MutationOutcome::Uncertain(format!(
-                                        "{error:#}; {read_error:#}"
-                                    )),
-                                    Some(id),
-                                );
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let absent = resource_absent(docker, &kind, &label);
-                match absent {
+                let mut reconciled_diagnostic = None;
+                let outcome = match resource_absent(docker, &kind, &label) {
                     Ok(true) => {
-                        if let Some(existing) = &mut journal {
-                            let index = existing.record().mutations.len() - 1;
-                            let unresolved =
-                                recovery::unresolved_create(existing.record(), &label).is_some();
-                            let _ = existing.finish(
-                                index,
-                                recovery::reconcile_acknowledged_removal(true, unresolved),
-                                Some(id),
-                            );
+                        if let Err(error) = &removal {
+                            reconciled_diagnostic = Some(format!(
+                                "{label}: {error:#}; absence verified after lost removal reply"
+                            ));
                         }
-                    }
-                    Ok(false) => {
-                        failures.push(format!("{label} is still present after removal"));
-                        if let Some(existing) = &mut journal {
-                            let index = existing.record().mutations.len() - 1;
-                            let _ = existing.finish(
-                                index,
-                                recovery::MutationOutcome::ReconciledPresent,
-                                Some(id),
-                            );
+                        let unresolved = journal.as_ref().is_some_and(|existing| {
+                            recovery::unresolved_create(
+                                existing.record(),
+                                &resource_kind(&kind),
+                                &label,
+                            )
+                            .is_some()
+                        });
+                        let outcome = recovery::reconcile_acknowledged_removal(true, unresolved);
+                        if let recovery::MutationOutcome::Uncertain(reason) = &outcome {
+                            uncertain = true;
+                            failures.push(format!("{label}: {reason}"));
                         }
+                        outcome
                     }
+                    Ok(false) => match removal {
+                        Ok(()) => {
+                            failures.push(format!("{label} is still present after removal"));
+                            recovery::MutationOutcome::ReconciledPresent
+                        }
+                        Err(error) => {
+                            uncertain = true;
+                            let reason = format!("{label}: {error:#}");
+                            failures.push(reason.clone());
+                            recovery::MutationOutcome::Uncertain(reason)
+                        }
+                    },
                     Err(error) => {
                         uncertain = true;
-                        failures.push(format!("{label} removal could not be verified: {error:#}"));
-                        if let Some(existing) = &mut journal {
-                            let index = existing.record().mutations.len() - 1;
-                            let _ = existing.finish(
-                                index,
-                                recovery::MutationOutcome::Uncertain(error.to_string()),
-                                Some(id),
-                            );
+                        let mut reason =
+                            format!("{label} removal could not be verified: {error:#}");
+                        if let Err(removal_error) = removal {
+                            reason.push_str(&format!("; removal failed: {removal_error:#}"));
                         }
+                        failures.push(reason.clone());
+                        recovery::MutationOutcome::Uncertain(reason)
+                    }
+                };
+                if let Some(existing) = &mut journal {
+                    let index = existing.record().mutations.len() - 1;
+                    if let Some(diagnostic) = reconciled_diagnostic
+                        && let Err(error) = existing.retain_failures(vec![diagnostic], Vec::new())
+                    {
+                        uncertain = true;
+                        failures.push(format!(
+                            "recording reconciled removal of {label}: {error:#}"
+                        ));
+                    }
+                    if let Err(error) = existing.finish(index, outcome, Some(id)) {
+                        uncertain = true;
+                        failures.push(format!("recording removal of {label}: {error:#}"));
                     }
                 }
             }
@@ -1025,9 +1037,11 @@ impl Runtime {
                 && let Err(error) = fs::remove_dir_all(&dir)
             {
                 failures.push(format!("removing metadata {}: {error}", dir.display()));
-                if let Some(existing) = &mut journal {
-                    let _ =
-                        existing.retain_failures(failures.clone(), context.unresolved_helpers());
+                if let Some(existing) = &mut journal
+                    && let Err(error) =
+                        existing.retain_failures(failures.clone(), context.unresolved_helpers())
+                {
+                    failures.push(format!("retaining cleanup recovery: {error:#}"));
                 }
                 return Ok(CleanupReport {
                     outcome: CleanupOutcome::Incomplete,
@@ -1043,8 +1057,11 @@ impl Runtime {
                 helpers_finished,
             });
         }
-        if let Some(existing) = &mut journal {
-            let _ = existing.retain_failures(failures.clone(), context.unresolved_helpers());
+        if let Some(existing) = &mut journal
+            && let Err(error) =
+                existing.retain_failures(failures.clone(), context.unresolved_helpers())
+        {
+            failures.push(format!("retaining cleanup recovery: {error:#}"));
         }
         Ok(CleanupReport {
             outcome,
@@ -1237,34 +1254,6 @@ impl<'a> LifecycleDocker<'a> {
             &mut helpers,
         )
     }
-
-    fn run_with_cap(
-        &self,
-        args: &[&str],
-        cap: Duration,
-        mode: OutputMode,
-    ) -> Result<CapturedOutput> {
-        let deadline = self
-            .enclosing_deadline
-            .map(|enclosing| enclosing.clipped(cap))
-            .unwrap_or_else(|| Deadline::after(cap));
-        let mut command = Command::new(&self.program);
-        command.args(&self.prefix_args);
-        command.args(args);
-        for (key, value) in &self.env {
-            command.env(key, value);
-        }
-        let mut helpers = self.context.helpers.borrow_mut();
-        run(
-            &mut command,
-            deadline,
-            self.cancellation,
-            mode,
-            &self.context.policy,
-            &mut helpers,
-        )
-        .map_err(|error| anyhow!("{error}"))
-    }
 }
 
 impl DockerResourceCommands for LifecycleDocker<'_> {
@@ -1275,9 +1264,6 @@ impl DockerResourceCommands for LifecycleDocker<'_> {
         if captured.stdout_truncated || captured.stderr_truncated {
             bail!("docker {} returned truncated output", args.join(" "));
         }
-        if !captured.status.success() {
-            bail!("{}", String::from_utf8_lossy(&captured.stderr).trim());
-        }
         let mut text = String::from_utf8(captured.stdout).context("docker output was not utf-8")?;
         if args.first().copied() == Some("logs") {
             text.push_str(&String::from_utf8_lossy(&captured.stderr));
@@ -1286,12 +1272,7 @@ impl DockerResourceCommands for LifecycleDocker<'_> {
     }
 
     fn run(&self, args: &[&str]) -> Result<()> {
-        let captured = self
-            .execute(args, OutputMode::Inherit)
-            .map_err(|error| anyhow!("{error}"))?;
-        if !captured.status.success() {
-            bail!("docker {} failed", args.join(" "));
-        }
+        self.execute(args, OutputMode::Inherit)?;
         Ok(())
     }
 }
@@ -1339,14 +1320,50 @@ struct AllocatedInstance {
     zakura_container_id: String,
 }
 
-fn observed_identity(kind: &str, details: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(details).ok()?;
-    let item = value.as_array()?.first()?;
-    let field = if kind == "volume" { "Name" } else { "Id" };
-    item.get(field)?
+fn resource_kind(kind: &str) -> recovery::ResourceKind {
+    match kind {
+        "container" => recovery::ResourceKind::Container,
+        "volume" => recovery::ResourceKind::Volume,
+        "network" => recovery::ResourceKind::Network,
+        _ => unreachable!("resource kind is fixed by the caller"),
+    }
+}
+
+fn inspected_resource_identity(
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+    details: &str,
+) -> Result<String> {
+    let resources: serde_json::Value = serde_json::from_str(details)
+        .with_context(|| format!("decoding Docker {kind} {target}"))?;
+    let items = resources
+        .as_array()
+        .with_context(|| format!("Docker returned invalid {kind} {target}"))?;
+    if items.len() != 1 {
+        bail!(
+            "Docker returned {} {kind} resources named {target}",
+            items.len()
+        );
+    }
+    let resource = &items[0];
+    let labels = if kind == "container" {
+        &resource["Config"]["Labels"]
+    } else {
+        &resource["Labels"]
+    };
+    if labels[INSTANCE_LABEL].as_str() != Some(name.0.as_str()) {
+        bail!(
+            "Docker {kind} {target} is not owned by ths instance {name}; refusing to reuse or delete it"
+        );
+    }
+    // Containers and networks have stable IDs; Docker identifies volumes by name.
+    let id_field = if kind == "volume" { "Name" } else { "Id" };
+    let id = resource[id_field]
         .as_str()
         .filter(|id| !id.is_empty())
-        .map(str::to_owned)
+        .with_context(|| format!("Docker {kind} {target} has no {id_field}"))?;
+    Ok(id.to_owned())
 }
 
 /// A failed or empty inspect is not absence. A completed identity listing that
@@ -1428,35 +1445,23 @@ fn owned_resource(
         );
     }
     let details = docker.output(&[kind, "inspect", target])?;
-    let resources: serde_json::Value = serde_json::from_str(&details)
-        .with_context(|| format!("decoding Docker {kind} {target}"))?;
-    let items = resources
-        .as_array()
-        .with_context(|| format!("Docker returned invalid {kind} {target}"))?;
-    if items.len() != 1 {
-        bail!(
-            "Docker returned {} {kind} resources named {target}",
-            items.len()
-        );
+    inspected_resource_identity(kind, target, name, &details).map(Some)
+}
+
+fn mutation_failure(
+    journal: &mut recovery::RecoveryJournal,
+    index: usize,
+    error: anyhow::Error,
+    identity: Option<String>,
+) -> anyhow::Error {
+    match journal.finish(
+        index,
+        recovery::MutationOutcome::Uncertain(format!("{error:#}")),
+        identity,
+    ) {
+        Ok(()) => error,
+        Err(record_error) => anyhow!("{error:#}; recording mutation uncertainty: {record_error:#}"),
     }
-    let resource = &items[0];
-    let labels = if kind == "container" {
-        &resource["Config"]["Labels"]
-    } else {
-        &resource["Labels"]
-    };
-    if labels[INSTANCE_LABEL].as_str() != Some(name.0.as_str()) {
-        bail!(
-            "Docker {kind} {target} is not owned by ths instance {name}; refusing to reuse or delete it"
-        );
-    }
-    // Containers and networks have stable IDs; Docker identifies volumes by name.
-    let id_field = if kind == "volume" { "Name" } else { "Id" };
-    let id = resource[id_field]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .with_context(|| format!("Docker {kind} {target} has no {id_field}"))?;
-    Ok(Some(id.to_owned()))
 }
 
 fn ensure_network_with(
@@ -1485,12 +1490,7 @@ fn ensure_network_with(
             recovery::MutationOperation::Create,
         )?;
         if let Err(error) = docker.run(&["network", "create", "--label", &label(name), prefix]) {
-            let _ = journal.finish(
-                index,
-                recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-                None,
-            );
-            return Err(error);
+            return Err(mutation_failure(journal, index, error, None));
         }
         match owned_resource(docker, "network", prefix, name)? {
             Some(id) => {
@@ -1504,16 +1504,12 @@ fn ensure_network_with(
                     ..resource
                 })
             }
-            None => {
-                let _ = journal.finish(
-                    index,
-                    recovery::MutationOutcome::Uncertain(
-                        "network was not visible after create".into(),
-                    ),
-                    None,
-                );
-                bail!("Docker did not create network {prefix}")
-            }
+            None => Err(mutation_failure(
+                journal,
+                index,
+                anyhow!("Docker did not create network {prefix}"),
+                None,
+            )),
         }
     })
 }
@@ -1543,12 +1539,7 @@ fn ensure_volume_with(
             recovery::MutationOperation::Create,
         )?;
         if let Err(error) = docker.run(&["volume", "create", "--label", &label(name), volume]) {
-            let _ = journal.finish(
-                index,
-                recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-                None,
-            );
-            return Err(error);
+            return Err(mutation_failure(journal, index, error, None));
         }
         match owned_resource(docker, "volume", volume, name)? {
             Some(id) => {
@@ -1562,16 +1553,12 @@ fn ensure_volume_with(
                     ..resource
                 })
             }
-            None => {
-                let _ = journal.finish(
-                    index,
-                    recovery::MutationOutcome::Uncertain(
-                        "volume was not visible after create".into(),
-                    ),
-                    None,
-                );
-                bail!("Docker did not create volume {volume}")
-            }
+            None => Err(mutation_failure(
+                journal,
+                index,
+                anyhow!("Docker did not create volume {volume}"),
+                None,
+            )),
         }
     })
 }
@@ -1586,6 +1573,19 @@ fn bounded_ensure<T>(
     }
     operation()
 }
+fn volume_dependency(
+    journal: &recovery::RecoveryJournal,
+    target: &str,
+) -> Result<recovery::ResourceRef> {
+    journal
+        .record()
+        .resources
+        .iter()
+        .find(|resource| resource.kind == recovery::ResourceKind::Volume && resource.name == target)
+        .cloned()
+        .with_context(|| format!("missing allocated dependency {target}"))
+}
+
 fn ensure_zakura(
     prefix: &str,
     name: &InstanceName,
@@ -1593,8 +1593,12 @@ fn ensure_zakura(
     docker: &impl DockerResourceCommands,
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
-    dependencies: Vec<recovery::ResourceRef>,
+    mut dependencies: Vec<recovery::ResourceRef>,
 ) -> Result<String> {
+    for suffix in ["chain", "config"] {
+        dependencies.push(volume_dependency(journal, &format!("{prefix}-{suffix}"))?);
+    }
+
     let rpc_bind = loopback_publish(ports.rpc, 18232);
     let p2p_bind = loopback_publish(ports.p2p, 18233);
     create_container(
@@ -1637,8 +1641,13 @@ fn ensure_lightwalletd(
     docker: &impl DockerResourceCommands,
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
-    dependencies: Vec<recovery::ResourceRef>,
+    mut dependencies: Vec<recovery::ResourceRef>,
 ) -> Result<String> {
+    dependencies.push(volume_dependency(
+        journal,
+        &format!("{prefix}-lightwalletd"),
+    )?);
+
     let image = lightwalletd_image();
     let lightwalletd_bind = loopback_publish(ports.lightwalletd, 9067);
     let target = format!("{prefix}-lightwalletd");
@@ -1691,8 +1700,10 @@ fn ensure_app(
     docker: &impl DockerResourceCommands,
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
-    dependencies: Vec<recovery::ResourceRef>,
+    mut dependencies: Vec<recovery::ResourceRef>,
 ) -> Result<String> {
+    dependencies.push(volume_dependency(journal, &format!("{prefix}-wallet"))?);
+
     let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
     let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
     let public_p2p = format!("127.0.0.1:{}", ports.p2p);
@@ -1772,21 +1783,11 @@ fn create_container(
     let id = match created {
         Ok(id) => id,
         Err(error) => {
-            let _ = journal.finish(
-                index,
-                recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-                None,
-            );
-            return Err(error);
+            return Err(mutation_failure(journal, index, error, None));
         }
     };
     if let Err(error) = require_container_identity(docker, &id, name) {
-        let _ = journal.finish(
-            index,
-            recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-            Some(id),
-        );
-        return Err(error);
+        return Err(mutation_failure(journal, index, error, Some(id)));
     }
     journal.finish(
         index,
@@ -1829,11 +1830,22 @@ fn start_container(
     docker: &impl DockerResourceCommands,
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
-    dependencies: Vec<recovery::ResourceRef>,
 ) -> Result<()> {
     if deadline.expired() {
         bail!("timed out before starting {name}");
     }
+    let dependencies = journal
+        .record()
+        .mutations
+        .iter()
+        .rev()
+        .find(|mutation| {
+            mutation.operation == recovery::MutationOperation::Create
+                && mutation.resource.name == name
+        })
+        .with_context(|| format!("missing creation record for {name}"))?
+        .dependencies
+        .clone();
     let index = journal.begin(
         recovery::ResourceRef {
             kind: recovery::ResourceKind::Container,
@@ -1844,12 +1856,7 @@ fn start_container(
         recovery::MutationOperation::Start,
     )?;
     if let Err(error) = docker.run(&["start", id]) {
-        let _ = journal.finish(
-            index,
-            recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-            Some(id.to_owned()),
-        );
-        return Err(error);
+        return Err(mutation_failure(journal, index, error, Some(id.to_owned())));
     }
     journal.finish(
         index,
@@ -2174,17 +2181,8 @@ impl StartHost for DockerHost {
                 volumes.clone(),
                 recovery::MutationOperation::Start,
             )?;
-            if let Err(error) = starter.run_with_cap(
-                &["start", "-a", &init_id],
-                context.policy.initialization,
-                OutputMode::Inherit,
-            ) {
-                let _ = journal.finish(
-                    index,
-                    recovery::MutationOutcome::Uncertain(format!("{error:#}")),
-                    Some(init_id),
-                );
-                return Err(error);
+            if let Err(error) = starter.run(&["start", "-a", &init_id]) {
+                return Err(mutation_failure(journal, index, error, Some(init_id)));
             }
             journal.finish(
                 index,
@@ -2222,7 +2220,6 @@ impl StartHost for DockerHost {
             &docker.scoped(zakura_start, context.policy.startup_docker),
             journal,
             zakura_start,
-            vec![network.clone()],
         )?;
         shutdown.check()?;
         let zakura_rpc = format!(
@@ -2249,7 +2246,6 @@ impl StartHost for DockerHost {
             &docker.scoped(lightwalletd_start, context.policy.startup_docker),
             journal,
             lightwalletd_start,
-            vec![network.clone()],
         )?;
         shutdown.check()?;
         let app_budget = Deadline::after(context.policy.startup_docker);
@@ -2270,7 +2266,6 @@ impl StartHost for DockerHost {
             &docker.scoped(app_start, context.policy.startup_docker),
             journal,
             app_start,
-            volumes,
         )?;
         shutdown.check()?;
         let endpoints = endpoints_for(&ports);
@@ -2440,17 +2435,15 @@ impl Runtime {
             println!("\nStopping and deleting {name}…");
         }
         let final_deadline = Deadline::after(context.policy.cleanup);
-        let cleaned = host.delete_partial(self, name, context, final_deadline);
+        let cleaned = host
+            .delete_partial(self, name, context, final_deadline)
+            .and_then(CleanupReport::into_result);
         match (primary, cleaned) {
-            (Ok(()), Ok(report)) if report.verified() => {
+            (Ok(()), Ok(())) => {
                 println!("Deleted {name} and all of its development data.");
                 Ok(())
             }
-            (Ok(()), Ok(report)) => report.into_result(),
-            (Err(primary), Ok(report)) if report.verified() => Err(primary),
-            (Err(primary), Ok(report)) => {
-                Err(anyhow!("{primary:#}\n{}", report.failures.join("; ")))
-            }
+            (Err(primary), Ok(())) => Err(primary),
             (Ok(()), Err(error)) => Err(error),
             (Err(primary), Err(error)) => Err(anyhow!("{primary:#}\n{error:#}")),
         }

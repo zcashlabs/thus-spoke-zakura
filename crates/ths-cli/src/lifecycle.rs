@@ -148,6 +148,13 @@ pub(crate) struct CommandFailure {
 impl Display for CommandFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {} ({})", self.command, self.kind, self.detail)?;
+        if !self.stderr.is_empty() {
+            write!(
+                f,
+                "; stderr: {}",
+                String::from_utf8_lossy(&self.stderr).trim()
+            )?;
+        }
         if !self.helper_reaped {
             write!(f, "; helper was not reaped")?;
         }
@@ -353,8 +360,10 @@ pub(crate) fn run_observed(
                 &mut capture_error,
             );
         }
-        if let Some(error) = capture_error.clone() {
-            let _ = ops.kill(&mut child);
+        if let Some(mut error) = capture_error.take() {
+            if let Err(kill_error) = ops.kill(&mut child) {
+                error.push_str(&format!("; kill failed: {kill_error}"));
+            }
             return retain_or_fail(
                 child,
                 command_name,
@@ -377,6 +386,7 @@ pub(crate) fn run_observed(
                     command_name,
                     mode,
                     deadline,
+                    cancellation,
                     policy,
                     stdout,
                     stderr,
@@ -451,6 +461,7 @@ fn finish_exited(
     command_name: String,
     mode: OutputMode,
     deadline: Deadline,
+    cancellation: Cancellation<'_>,
     policy: &LifecyclePolicy,
     mut stdout: Vec<u8>,
     mut stderr: Vec<u8>,
@@ -470,6 +481,7 @@ fn finish_exited(
             &mut stderr_truncated,
             &mut capture_error,
             deadline,
+            cancellation,
         );
         if let Some(error) = capture_error {
             return retain_or_fail(
@@ -488,15 +500,34 @@ fn finish_exited(
         if !settled {
             drop(child.stdout.take());
             drop(child.stderr.take());
+            let cancelled = cancellation.requested();
             return Err(failure(
-                CommandFailureKind::Capture,
+                if cancelled {
+                    CommandFailureKind::Cancelled
+                } else {
+                    CommandFailureKind::Capture
+                },
                 &command_name,
-                "stdout or stderr stayed open after the direct child exited",
+                if cancelled {
+                    "cancelled while collecting output after the direct child exited"
+                } else {
+                    "stdout or stderr stayed open after the direct child exited"
+                },
                 stdout,
                 stderr,
                 true,
             ));
         }
+    }
+    if cancellation.requested() {
+        return Err(failure(
+            CommandFailureKind::Cancelled,
+            &command_name,
+            "cancelled after the direct child exited",
+            stdout,
+            stderr,
+            true,
+        ));
     }
     if status.success() {
         Ok(CapturedOutput {
@@ -556,13 +587,14 @@ fn terminate_and_reap(
     poll: Duration,
     ops: &dyn ChildOps,
 ) -> Result<(), String> {
-    if let Err(error) = ops.kill(child) {
-        // The child may already have exited. A failed kill still requires a verified reap.
-        if !error.kind().eq(&io::ErrorKind::InvalidInput) {
-            let _ = error;
-        }
+    let kill = ops.kill(child);
+    match reap_until(child, deadline, poll, ops) {
+        Ok(()) => Ok(()),
+        Err(reap_error) => match kill {
+            Ok(()) => Err(reap_error),
+            Err(kill_error) => Err(format!("kill failed: {kill_error}; {reap_error}")),
+        },
     }
-    reap_until(child, deadline, poll, ops)
 }
 
 fn reap_until(
@@ -669,8 +701,12 @@ fn drain_until_eof(
     stderr_truncated: &mut bool,
     capture_error: &mut Option<String>,
     deadline: Deadline,
+    cancellation: Cancellation<'_>,
 ) -> bool {
     loop {
+        if cancellation.requested() {
+            return false;
+        }
         let mut stdout_eof = child.stdout.is_none();
         let mut stderr_eof = child.stderr.is_none();
         if let Some(pipe) = child.stdout.as_mut() {

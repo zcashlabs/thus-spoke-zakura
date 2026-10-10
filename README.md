@@ -28,6 +28,13 @@ remaining `instance.json` so the instance can be identified. Do not delete
 those files by hand, retry a create whose result is unknown, or prune shared
 Docker state.
 
+The recovery journal records resources by kind and name and retains their
+allocation identities. It does not lock an instance name or coordinate separate
+launcher sessions. Exclusive ownership and coordinated stop/reset remain tracked
+in [#175](https://github.com/zcashlabs/thus-spoke-zakura/issues/175); foreground
+exit after external deletion remains tracked in
+[#145](https://github.com/zcashlabs/thus-spoke-zakura/issues/145).
+
 ![Wallet dashboard with five development accounts](docs/images/wallet.png)
 
 ## Get started

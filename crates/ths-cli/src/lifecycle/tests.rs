@@ -131,6 +131,7 @@ fn nonzero_exit_keeps_diagnostics_and_reaps_the_helper() {
     assert!(matches!(failure.kind, CommandFailureKind::Nonzero));
     assert!(failure.stdout.windows(3).any(|window| window == b"out"));
     assert!(failure.stderr.windows(3).any(|window| window == b"err"));
+    assert!(failure.to_string().contains("; stderr: err"), "{failure}");
     assert!(failure.helper_reaped);
     assert!(helpers.is_empty());
     fixture.finish();
@@ -228,6 +229,54 @@ fn hold_pipe_reaps_the_direct_child_without_waiting_for_the_grandchild() {
 
 struct RealOps;
 
+struct CancelOnExit<'a>(&'a AtomicBool);
+
+impl ChildOps for CancelOnExit<'_> {
+    fn kill(&self, child: &mut Child) -> io::Result<()> {
+        child.kill()
+    }
+
+    fn try_wait(&self, child: &mut Child) -> io::Result<Option<ExitStatus>> {
+        let status = child.try_wait()?;
+        if status.is_some() {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        Ok(status)
+    }
+}
+
+#[test]
+fn cancellation_after_child_exit_interrupts_descendant_held_pipe_collection() {
+    let policy = short_policy();
+    let mut fixture = HelperFixture::new(HelperMode::HoldPipe);
+    let cancel = AtomicBool::new(false);
+    let requested = || cancel.load(Ordering::SeqCst);
+    let mut helpers = HelperSet::new();
+    let started = Instant::now();
+    let failure = run_observed(
+        &mut fixture.command(),
+        Deadline::after(Duration::from_secs(2)),
+        Cancellation::Observe(&requested),
+        OutputMode::Capture,
+        &policy,
+        &mut helpers,
+        &CancelOnExit(&cancel),
+        false,
+    )
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    let grandchild_holding = fixture.grandchild_holding();
+    fixture.finish();
+    assert!(grandchild_holding);
+    assert!(
+        matches!(failure.kind, CommandFailureKind::Cancelled),
+        "{failure}"
+    );
+    assert!(failure.helper_reaped);
+    assert!(helpers.is_empty());
+    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+}
+
 impl ChildOps for RealOps {
     fn kill(&self, child: &mut Child) -> io::Result<()> {
         child.kill()
@@ -239,6 +288,83 @@ impl ChildOps for RealOps {
 }
 
 struct FailWait;
+
+struct FailKillAndWait;
+
+#[cfg(unix)]
+struct FailCaptureKillAndWait(AtomicBool);
+
+#[cfg(unix)]
+impl ChildOps for FailCaptureKillAndWait {
+    fn kill(&self, _child: &mut Child) -> io::Result<()> {
+        Err(io::Error::other("kill denied after capture failure"))
+    }
+
+    fn try_wait(&self, child: &mut Child) -> io::Result<Option<ExitStatus>> {
+        if !self.0.swap(true, Ordering::SeqCst) {
+            let directory: std::os::fd::OwnedFd = std::fs::File::open(std::env::temp_dir())?.into();
+            child.stdout = Some(std::process::ChildStdout::from(directory));
+            Ok(None)
+        } else {
+            Err(io::Error::other("wait unavailable after capture failure"))
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_failure_preserves_failed_kill_and_reap_diagnostics() {
+    let policy = short_policy();
+    let mut fixture = HelperFixture::new(HelperMode::Hang);
+    let mut helpers = HelperSet::new();
+    let failure = run_observed(
+        &mut fixture.command(),
+        Deadline::after(policy.startup_docker),
+        Cancellation::Ignore,
+        OutputMode::Capture,
+        &policy,
+        &mut helpers,
+        &FailCaptureKillAndWait(AtomicBool::new(false)),
+        false,
+    )
+    .unwrap_err();
+    let cleanup = helpers.finish(Deadline::after(Duration::from_secs(2)), policy.poll);
+    fixture.finish();
+    assert!(cleanup.is_empty(), "{cleanup:?}");
+    assert!(matches!(failure.kind, CommandFailureKind::Capture));
+    assert!(failure.detail.contains("stdout:"), "{failure}");
+    assert!(failure.detail.contains("kill denied"), "{failure}");
+    assert!(failure.detail.contains("wait unavailable"), "{failure}");
+}
+
+impl ChildOps for FailKillAndWait {
+    fn kill(&self, _child: &mut Child) -> io::Result<()> {
+        Err(io::Error::other("kill denied"))
+    }
+
+    fn try_wait(&self, _child: &mut Child) -> io::Result<Option<ExitStatus>> {
+        Err(io::Error::other("wait unavailable"))
+    }
+}
+
+#[test]
+fn failed_termination_and_reaping_preserve_both_errors() {
+    let policy = short_policy();
+    let mut fixture = HelperFixture::new(HelperMode::Hang);
+    let mut child = fixture.command().spawn().unwrap();
+    let error = super::terminate_and_reap(
+        &mut child,
+        Deadline::after(policy.startup_docker),
+        policy.poll,
+        &FailKillAndWait,
+    )
+    .unwrap_err();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    fixture.finish();
+    assert!(error.contains("kill denied"), "{error}");
+    assert!(error.contains("wait unavailable"), "{error}");
+}
 
 impl ChildOps for FailWait {
     fn kill(&self, child: &mut Child) -> io::Result<()> {

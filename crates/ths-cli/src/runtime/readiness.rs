@@ -3,7 +3,7 @@
 //! Each attempt uses the caller's phase deadline clipped to the HTTP attempt cap.
 //! A retry sleeps on the time left in that same deadline and does not open a new one.
 
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
@@ -84,9 +84,6 @@ pub(super) fn probe_once(
             if status >= 400 {
                 return Ok(false);
             }
-            if body.len() > policy.http_body_limit {
-                bail!("oversized Zakura RPC body from {url}");
-            }
             let value: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(value) => value,
                 Err(_) => return Ok(false),
@@ -100,14 +97,15 @@ pub(super) fn probe_once(
 }
 
 fn read_body(response: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>> {
-    let bytes = response
-        .bytes()
+    let mut body = Vec::new();
+    response
+        .take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut body)
         .context("reading a readiness response body")?;
-    if bytes.len() > limit + 1 {
-        Ok(bytes[..limit + 1].to_vec())
-    } else {
-        Ok(bytes.to_vec())
+    if body.len() > limit {
+        bail!("oversized readiness response body");
     }
+    Ok(body)
 }
 
 fn ensure_loopback(base: &str) -> Result<()> {

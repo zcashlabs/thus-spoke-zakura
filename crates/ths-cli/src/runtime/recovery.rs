@@ -19,7 +19,7 @@ use super::InstanceName;
 pub(super) const RECOVERY_VERSION: u32 = 1;
 pub(super) const RECOVERY_FILE: &str = "lifecycle-recovery.json";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub(super) enum ResourceKind {
     Container,
     Volume,
@@ -119,6 +119,24 @@ impl RecoveryJournal {
                 path.display(),
                 record.instance
             );
+        }
+        for resource in record
+            .resources
+            .iter()
+            .chain(record.mutations.iter().map(|mutation| &mutation.resource))
+        {
+            if resource.kind == ResourceKind::Volume
+                && resource
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity != &resource.name)
+            {
+                bail!(
+                    "recovery journal {} has an invalid volume identity for {}; refusing destructive recovery",
+                    path.display(),
+                    resource.name
+                );
+            }
         }
         Ok(Some(Self {
             path,
@@ -238,7 +256,10 @@ fn remember_resource(
     resource: &ResourceRef,
     identity: Option<String>,
 ) {
-    if let Some(existing) = resources.iter_mut().find(|item| item.name == resource.name) {
+    if let Some(existing) = resources
+        .iter_mut()
+        .find(|item| item.kind == resource.kind && item.name == resource.name)
+    {
         if identity.is_some() {
             existing.identity = identity;
         }
@@ -263,10 +284,12 @@ pub(super) fn loaded_outcome(outcome: &MutationOutcome) -> MutationOutcome {
 
 pub(super) fn unresolved_create<'a>(
     record: &'a RecoveryRecord,
+    kind: &ResourceKind,
     resource_name: &str,
 ) -> Option<&'a MutationRecord> {
     record.mutations.iter().rev().find(|mutation| {
-        mutation.resource.name == resource_name
+        mutation.resource.kind == *kind
+            && mutation.resource.name == resource_name
             && matches!(
                 mutation.operation,
                 MutationOperation::Create | MutationOperation::Start
