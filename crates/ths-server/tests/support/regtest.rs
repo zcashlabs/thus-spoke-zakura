@@ -549,6 +549,10 @@ impl RegtestStack {
         self.restart_server().await
     }
 
+    pub async fn interrupt_server(&mut self) -> Result<()> {
+        self.stop_server().await
+    }
+
     pub fn node_url(&self) -> &str {
         &self.node_url
     }

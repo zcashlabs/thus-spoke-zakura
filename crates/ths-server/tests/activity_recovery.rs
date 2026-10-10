@@ -6,9 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::Client;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -182,6 +182,8 @@ async fn queued_retry_survives_restart(external: bool) -> Result<()> {
 
 const RECOVERY_IDEMPOTENCY_KEY: &str = "recovery-after-auto-mine-failure";
 const CONCURRENT_IDEMPOTENCY_KEY: &str = "concurrent-identical-send";
+const PREPARE_ROLLBACK_IDEMPOTENCY_KEY: &str = "prepare-journal-rollback";
+const PREPARE_RESTART_IDEMPOTENCY_KEY: &str = "prepare-restart-recovery";
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const API_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -236,6 +238,119 @@ struct AccountBalance {
     id: u8,
     ironwood_zatoshi: u64,
     transparent_zatoshi: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConstructedTransactionRecord {
+    txid: Vec<u8>,
+    raw_transaction: Vec<u8>,
+    expiry_height: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedPaymentRecord {
+    txid: String,
+    raw_transaction: Vec<u8>,
+    expiry_height: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PreparedPaymentJournalRecord {
+    activity_id: String,
+    payment: PreparedPaymentRecord,
+}
+
+fn constructed_transactions(path: &std::path::Path) -> Result<Vec<ConstructedTransactionRecord>> {
+    let database = Connection::open(path.join("wallet.db"))?;
+    let mut statement = database.prepare(
+        "SELECT txid,raw,expiry_height FROM transactions
+         WHERE created IS NOT NULL AND raw IS NOT NULL ORDER BY txid",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(ConstructedTransactionRecord {
+                txid: row.get(0)?,
+                raw_transaction: row.get(1)?,
+                expiry_height: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn prepared_payment_journal(path: &std::path::Path) -> Result<Vec<PreparedPaymentJournalRecord>> {
+    let database = Connection::open(path.join("wallet.db"))?;
+    let mut statement = database.prepare(
+        "SELECT activity_id,txid,raw_transaction,expiry_height
+         FROM ext_tsz_prepared_payments ORDER BY activity_id",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(PreparedPaymentJournalRecord {
+                activity_id: row.get(0)?,
+                payment: PreparedPaymentRecord {
+                    txid: row.get(1)?,
+                    raw_transaction: row.get(2)?,
+                    expiry_height: row.get(3)?,
+                },
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn prepared_payment(
+    path: &std::path::Path,
+    activity_id: &str,
+) -> Result<Option<PreparedPaymentRecord>> {
+    Ok(Connection::open(path.join("wallet.db"))?
+        .query_row(
+            "SELECT txid,raw_transaction,expiry_height
+             FROM ext_tsz_prepared_payments WHERE activity_id=?1",
+            [activity_id],
+            |row| {
+                Ok(PreparedPaymentRecord {
+                    txid: row.get(0)?,
+                    raw_transaction: row.get(1)?,
+                    expiry_height: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn seed_preparing_payment(path: &std::path::Path, idempotency_key: &str) -> Result<String> {
+    let activity_id = uuid::Uuid::new_v4().to_string();
+    let mut database = Connection::open(path.join("ths.db"))?;
+    let transaction = database.transaction()?;
+    transaction.execute(
+        "INSERT INTO activity(
+           id,kind,from_account,to_account,source_pool,destination_pool,
+           amount_zatoshi,txid,status
+         ) VALUES(?1,'send',1,2,'ironwood','ironwood',1000000,'','preparing')",
+        [&activity_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO idempotency(key,activity_id,memo) VALUES(?1,?2,NULL)",
+        params![idempotency_key, activity_id],
+    )?;
+    transaction.commit()?;
+    Ok(activity_id)
+}
+
+async fn wait_for_prepared_payment(
+    path: &std::path::Path,
+    activity_id: &str,
+) -> Result<PreparedPaymentRecord> {
+    let deadline = Instant::now() + SEND_TIMEOUT;
+    loop {
+        if let Some(prepared) = prepared_payment(path, activity_id)? {
+            return Ok(prepared);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "wallet preparation did not commit before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -913,6 +1028,232 @@ async fn external_address_faucet_behavior_is_unchanged() -> Result<()> {
         assert_eq!(
             before.iter().map(|row| &row.id).collect::<Vec<_>>(),
             after.iter().map(|row| &row.id).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.shutdown().await;
+    preserve_scenario_failure(scenario, cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn prepare_rolls_back_constructed_transaction_when_journal_write_fails() -> Result<()> {
+    let server = PathBuf::from(env!("CARGO_BIN_EXE_ths-server"));
+    let mut fixture = RegtestStack::new(server)?;
+    let scenario = async {
+        fixture.start().await?;
+        let transactions_before = constructed_transactions(fixture.data_dir())?;
+        let journal_before = prepared_payment_journal(fixture.data_dir())?;
+        let wallet_database = Connection::open(fixture.data_dir().join("wallet.db"))?;
+        wallet_database.execute_batch(
+            "CREATE TRIGGER fail_prepared_payment_journal
+             BEFORE INSERT ON ext_tsz_prepared_payments
+             BEGIN SELECT RAISE(ABORT, 'injected prepared-payment journal failure'); END;",
+        )?;
+
+        let response = Client::new()
+            .post(format!("{}/api/v1/send", fixture.api_url()))
+            .timeout(SEND_TIMEOUT)
+            .json(&json!({
+                "from_account": 1,
+                "to_account": 2,
+                "source_pool": "ironwood",
+                "destination_pool": "ironwood",
+                "amount_zatoshi": 1_000_000,
+                "idempotency_key": PREPARE_ROLLBACK_IDEMPOTENCY_KEY,
+            }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status() == reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "journal failure did not fail payment preparation"
+        );
+        let error: serde_json::Value = response.json().await?;
+        anyhow::ensure!(
+            error["error"]["message"].as_str().is_some_and(
+                |message| message.contains("injected prepared-payment journal failure")
+            ),
+            "payment preparation failed before reaching the injected journal write"
+        );
+
+        wallet_database.execute_batch("DROP TRIGGER fail_prepared_payment_journal")?;
+        drop(wallet_database);
+        fixture.restart_server().await?;
+        anyhow::ensure!(
+            constructed_transactions(fixture.data_dir())? == transactions_before,
+            "constructed transaction survived the failed journal write"
+        );
+        anyhow::ensure!(
+            prepared_payment_journal(fixture.data_dir())? == journal_before,
+            "prepared-payment journal changed despite transaction rollback"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.shutdown().await;
+    preserve_scenario_failure(scenario, cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn retry_recovers_prepare_interrupted_before_store_recording() -> Result<()> {
+    let server = PathBuf::from(env!("CARGO_BIN_EXE_ths-server"));
+    let mut fixture = RegtestStack::new(server)?;
+    let scenario = async {
+        fixture
+            .start()
+            .await
+            .context("starting prepare-restart fixture")?;
+        let client = Client::new();
+        let accounts_before: Vec<AccountBalance> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/accounts",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let balance_before = accounts_before
+            .iter()
+            .find(|account| account.id == 2)
+            .map(|account| account.ironwood_zatoshi)
+            .context("destination account is missing")?;
+        let request = json!({
+            "from_account": 1,
+            "to_account": 2,
+            "source_pool": "ironwood",
+            "destination_pool": "ironwood",
+            "amount_zatoshi": 1_000_000,
+            "idempotency_key": PREPARE_RESTART_IDEMPOTENCY_KEY,
+        });
+        // seed only the pre-prepare claim. the request still performs all wallet
+        // construction, serialization, and extension-journal persistence.
+        let activity_id =
+            seed_preparing_payment(fixture.data_dir(), PREPARE_RESTART_IDEMPOTENCY_KEY)?;
+        let application_lock = Connection::open(fixture.data_dir().join("ths.db"))?;
+        // the server's sqlite connection waits five seconds on this writer lock,
+        // leaving time to observe the journal commit and interrupt the process.
+        application_lock.execute_batch("BEGIN IMMEDIATE")?;
+        let interrupted_request = tokio::spawn({
+            let client = client.clone();
+            let api_url = fixture.api_url().to_owned();
+            let request = request.clone();
+            async move {
+                client
+                    .post(format!("{api_url}/api/v1/send"))
+                    .timeout(SEND_TIMEOUT)
+                    .json(&request)
+                    .send()
+                    .await
+            }
+        });
+
+        let original = wait_for_prepared_payment(fixture.data_dir(), &activity_id)
+            .await
+            .context("waiting for wallet preparation to commit")?;
+        anyhow::ensure!(
+            !original.raw_transaction.is_empty() && original.expiry_height > 0,
+            "wallet journal did not retain complete prepared transaction data"
+        );
+        anyhow::ensure!(
+            !interrupted_request.is_finished(),
+            "send completed before interruption at the preparation boundary"
+        );
+        fixture
+            .interrupt_server()
+            .await
+            .context("interrupting server after wallet preparation")?;
+        application_lock.execute_batch("ROLLBACK")?;
+        drop(application_lock);
+        let interrupted = interrupted_request
+            .await
+            .context("interrupted send task did not finish")?;
+        anyhow::ensure!(
+            interrupted.is_err(),
+            "send returned a response instead of being interrupted at the preparation boundary"
+        );
+
+        let application_database = Connection::open(fixture.data_dir().join("ths.db"))?;
+        let (txid, status): (String, String) = application_database.query_row(
+            "SELECT txid,status FROM activity WHERE id=?1",
+            [&activity_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            txid.is_empty() && status == "preparing",
+            "application database recorded preparation before interruption"
+        );
+        let application_prepared: u32 = application_database.query_row(
+            "SELECT COUNT(*) FROM prepared_payments WHERE activity_id=?1",
+            [&activity_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            application_prepared == 0,
+            "application database retained prepared bytes before retry"
+        );
+        drop(application_database);
+
+        fixture
+            .restart_server()
+            .await
+            .context("restarting server after interrupted preparation")?;
+        let recovered: Activity = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/send",
+            Some(&request),
+            SEND_TIMEOUT,
+        )
+        .await
+        .context("retrying interrupted payment")?;
+        anyhow::ensure!(
+            recovered.id == activity_id
+                && recovered.txid == original.txid
+                && recovered.status == "confirmed",
+            "retry did not confirm the original activity and transaction"
+        );
+        let application_database = Connection::open(fixture.data_dir().join("ths.db"))?;
+        let recorded: (Vec<u8>, u64) = application_database.query_row(
+            "SELECT raw_transaction,expiry_height FROM prepared_payments WHERE activity_id=?1",
+            [&activity_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            recorded == (original.raw_transaction.clone(), original.expiry_height),
+            "retry did not recover the original serialized bytes and expiry height"
+        );
+
+        let accounts_after: Vec<AccountBalance> = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/accounts",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let balance_after = accounts_after
+            .iter()
+            .find(|account| account.id == 2)
+            .map(|account| account.ironwood_zatoshi)
+            .context("destination account is missing after retry")?;
+        anyhow::ensure!(
+            balance_after.checked_sub(balance_before) == Some(1_000_000),
+            "retry produced more or less than one payout"
+        );
+        let transaction: TransactionEvidence = rpc(
+            &client,
+            fixture.node_url(),
+            "getrawtransaction",
+            json!([original.txid, 1]),
+        )
+        .await?;
+        anyhow::ensure!(
+            transaction
+                .confirmations
+                .is_some_and(|confirmations| confirmations > 0),
+            "recovered transaction was not confirmed"
         );
         Ok(())
     }
