@@ -29,8 +29,10 @@ const LIGHTWALLETD_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura
 const INSTANCE_LABEL: &str = "com.zakura.ths.instance";
 
 #[cfg(test)]
+#[path = "../tests/unit/docker_lifecycle.rs"]
 mod docker_lifecycle_tests;
 #[cfg(test)]
+#[path = "../tests/unit/runtime_lifecycle.rs"]
 mod lifecycle_tests;
 mod readiness;
 mod recovery;

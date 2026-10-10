@@ -1,6 +1,7 @@
 mod lifecycle;
 mod runtime;
 #[cfg(test)]
+#[path = "../tests/support/mod.rs"]
 mod test_support;
 mod updater;
 
