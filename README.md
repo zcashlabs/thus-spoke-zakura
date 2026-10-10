@@ -306,6 +306,8 @@ cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact internal_address_faucet_recovers_after_auto_mine_failure
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact external_address_faucet_behavior_is_unchanged
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact same_account_cross_pool_round_trip_is_replay_safe
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact queued_send_retry_survives_lost_response_and_restart
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact queued_external_faucet_retry_survives_lost_response_and_restart
 ```
 
 The first command compiles the integration target. The second runs its
@@ -323,6 +325,19 @@ node, then waits for the production background wallet-sync loop to update the
 existing activity row. Direct mining is intentional: retrying Send or using the
 server's mine endpoint would repair the row through a different path and would
 not prove background recovery.
+
+The queued-retry regressions exercise Send and an external-address faucet through
+the production HTTP handlers. A loopback proxy withholds the original HTTP
+response until the client stops waiting. The real original transaction remains
+in the node's mempool. On the same-key retry, controlled proxies report that
+transaction missing and substitute the exact lightwalletd already-queued
+response. These are injected faults, not a naturally occurring node queue race.
+Both server and wallet journals, signed bytes, transaction identity, and reserved
+inputs must remain unchanged and pending without a block hash. After restarting
+the server against both existing databases, the tests mine the original and
+check canonical confirmation, exactly one payout, and no additional broadcast
+or block on confirmed replay. These tests retain caller-driven recovery; they
+do not establish autonomous payment progression.
 
 The same-account round-trip regression unshields 1,000,000 zatoshis from Account 1
 to its transparent pool, then shields 500,000 zatoshis back to Ironwood. It checks

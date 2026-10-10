@@ -17,9 +17,168 @@ use zcash_keys::address::Address;
 use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
 
 use support::{
-    FailureRoute, GenerateCounts, HeightCheckpoint, RecoveryFailureReporter, RecoveryPhase,
-    RegtestStack, TerminationSignals, request_json, rpc, rpc_with_timeout,
+    FailureRoute, GenerateCounts, HeightCheckpoint, QueuedBroadcastProxy, RecoveryFailureReporter,
+    RecoveryPhase, RegtestStack, TerminationSignals, lose_payment_response, request_json, rpc,
+    rpc_with_timeout,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn queued_send_retry_survives_lost_response_and_restart() -> Result<()> {
+    queued_retry_survives_restart(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn queued_external_faucet_retry_survives_lost_response_and_restart() -> Result<()> {
+    queued_retry_survives_restart(true).await
+}
+
+#[derive(PartialEq, Eq)]
+struct PendingPaymentSnapshot {
+    id: String,
+    txid: String,
+    raw: Vec<u8>,
+    expiry_height: u64,
+    reserved_inputs: Vec<(String, i64)>,
+}
+
+fn pending_payment_snapshot(
+    fixture: &RegtestStack,
+    external: bool,
+    key: &str,
+) -> Result<PendingPaymentSnapshot> {
+    let db = Connection::open_with_flags(
+        fixture.data_dir().join("ths.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let sql = if external {
+        "SELECT id,txid,status,block_hash FROM address_faucets WHERE key=?1"
+    } else {
+        "SELECT a.id,a.txid,a.status,a.block_hash FROM activity a JOIN idempotency i ON i.activity_id=a.id WHERE i.key=?1"
+    };
+    let (id, txid, status, block_hash): (String, String, String, Option<String>) =
+        db.query_row(sql, [key], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+    anyhow::ensure!(
+        status == "broadcast" && block_hash.is_none(),
+        "payment is not pending without a block hash"
+    );
+    let (raw, expiry_height): (Vec<u8>, u64) = db.query_row(
+        "SELECT raw_transaction,expiry_height FROM prepared_payments WHERE activity_id=?1",
+        [&id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let wallet = Connection::open_with_flags(
+        fixture.data_dir().join("wallet.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let (wallet_txid, wallet_raw, wallet_expiry): (String, Vec<u8>, u64) = wallet.query_row("SELECT txid,raw_transaction,expiry_height FROM ext_tsz_prepared_payments WHERE activity_id=?1", [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+    anyhow::ensure!(
+        wallet_txid == txid && wallet_raw == raw && wallet_expiry == expiry_height,
+        "wallet and server prepared payment journals differ"
+    );
+    // Compare reservation associations by transaction bytes, avoiding display-endian txid conversion.
+    let mut statement = wallet.prepare(
+        "SELECT 'ironwood',s.ironwood_received_note_id FROM ironwood_received_note_spends s JOIN transactions t ON t.id_tx=s.transaction_id WHERE t.raw=?1
+         UNION ALL SELECT 'transparent',s.transparent_received_output_id FROM transparent_received_output_spends s JOIN transactions t ON t.id_tx=s.transaction_id WHERE t.raw=?1 ORDER BY 1,2")?;
+    let reserved_inputs = statement
+        .query_map([&raw], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !reserved_inputs.is_empty(),
+        "original transaction has no reserved wallet inputs"
+    );
+    Ok(PendingPaymentSnapshot {
+        id,
+        txid,
+        raw,
+        expiry_height,
+        reserved_inputs,
+    })
+}
+
+async fn queued_retry_survives_restart(external: bool) -> Result<()> {
+    let mut fixture = RegtestStack::new(PathBuf::from(env!("CARGO_BIN_EXE_ths-server")))?;
+    let mut broadcast_proxy = None;
+    let scenario = async {
+        fixture.start().await?;
+        broadcast_proxy = Some(QueuedBroadcastProxy::start(fixture.lightwalletd_port()?).await?);
+        let proxy = broadcast_proxy.as_ref().unwrap();
+        fixture.restart_with_lightwalletd(proxy.port()).await?;
+        let client = Client::new();
+        let key = "queued-lost-response-restart";
+        let one = Some(BlockHeight::from_u32(1));
+        let network = LocalNetwork { overwinter: one, sapling: one, blossom: one, heartwood: one, canopy: one, nu5: one, nu6: one, nu6_1: one, nu6_2: one, nu6_3: one, nu7: None };
+        let address = Address::Transparent(TransparentAddress::PublicKeyHash([43; 20])).encode(&network);
+        let (path, body) = if external {
+            ("/api/v1/faucet/address", json!({"address": address, "amount_zatoshi": 1_000_000, "idempotency_key": key}))
+        } else {
+            ("/api/v1/send", json!({"from_account": 1, "to_account": 2, "source_pool": "ironwood", "destination_pool": "ironwood", "amount_zatoshi": 1_000_000, "idempotency_key": key}))
+        };
+        fixture.proxy().fail_next_generate()?;
+        let lost = lose_payment_response(&client, fixture.api_url(), path, &body).await?;
+        anyhow::ensure!(lost["status"] == "broadcast" && lost["block_hash"].is_null(), "first broadcast did not remain pending");
+        let original = pending_payment_snapshot(&fixture, external, key)?;
+        anyhow::ensure!(lost["txid"].as_str() == Some(original.txid.as_str()), "lost response and journals disagree");
+        let mempool: Vec<String> = rpc(&client, fixture.node_url(), "getrawmempool", json!([])).await?;
+        anyhow::ensure!(mempool.contains(&original.txid), "original broadcast did not reach the real node");
+
+        fixture.proxy().hide_transaction(Some(original.txid.clone()))?;
+        fixture.proxy().fail_next_generate()?;
+        proxy.queue_next_broadcast();
+        let retry: serde_json::Value = request_json(&client, fixture.api_url(), path, Some(&body), SEND_TIMEOUT).await?;
+        anyhow::ensure!(retry == lost, "queued retry changed the original pending response");
+        proxy.assert_identical_retry()?;
+        anyhow::ensure!(fixture.proxy().hidden_lookups()? > 0, "queued retry did not exercise missing transaction lookup");
+        anyhow::ensure!(pending_payment_snapshot(&fixture, external, key)? == original, "queued retry changed journals or reserved inputs");
+
+        fixture.restart_server().await?;
+        anyhow::ensure!(pending_payment_snapshot(&fixture, external, key)? == original, "reopening stores changed the pending original payment");
+        fixture.proxy().hide_transaction(None)?;
+        let _: serde_json::Value = rpc(&client, fixture.node_url(), "generate", json!([1])).await?;
+        let confirmed: serde_json::Value = request_json(&client, fixture.api_url(), path, Some(&body), SEND_TIMEOUT).await?;
+        anyhow::ensure!(confirmed["status"] == "confirmed" && confirmed["txid"].as_str() == Some(original.txid.as_str()), "retry did not confirm the original transaction");
+        let evidence: serde_json::Value = rpc(&client, fixture.node_url(), "getrawtransaction", json!([original.txid, 1])).await?;
+        anyhow::ensure!(evidence["confirmations"].as_u64().is_some_and(|n| n > 0) && evidence["blockhash"].is_string() && confirmed["block_hash"] == evidence["blockhash"], "confirmation lacks canonical transaction evidence");
+        let block: serde_json::Value = rpc(&client, fixture.node_url(), "getblockheader", json!([evidence["blockhash"]])).await?;
+        let canonical: String = rpc(&client, fixture.node_url(), "getblockhash", json!([block["height"]])).await?;
+        anyhow::ensure!(evidence["blockhash"].as_str() == Some(canonical.as_str()), "confirmed transaction is not on the canonical chain");
+        let before: ChainInfo = rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
+        let replay: serde_json::Value = request_json(&client, fixture.api_url(), path, Some(&body), SEND_TIMEOUT).await?;
+        anyhow::ensure!(replay == confirmed, "confirmed replay changed the payment");
+        proxy.assert_identical_retry()?;
+        let after: ChainInfo = rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
+        anyhow::ensure!(before.blocks == after.blocks && before.bestblockhash == after.bestblockhash, "confirmed replay mined another payment");
+        let mempool: Vec<String> = rpc(&client, fixture.node_url(), "getrawmempool", json!([])).await?;
+        anyhow::ensure!(mempool.is_empty(), "confirmed replay broadcast another transaction");
+        if external {
+            let balance: serde_json::Value = rpc(&client, fixture.node_url(), "getaddressbalance", json!([{"addresses": [address]}])).await?;
+            anyhow::ensure!(balance["balance"] == 1_000_000, "external destination did not receive exactly one payout");
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            loop {
+                let accounts: Vec<AccountBalance> = request_json(&client, fixture.api_url(), "/api/v1/accounts", None, API_READ_TIMEOUT).await?;
+                if accounts.iter().any(|a| a.id == 2 && a.ironwood_zatoshi == 1_000_000) { break; }
+                anyhow::ensure!(Instant::now() < deadline, "Send destination did not receive exactly one payout");
+                tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
+            }
+        }
+        let db = Connection::open_with_flags(fixture.data_dir().join("ths.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let count: u64 = db.query_row(if external { "SELECT COUNT(*) FROM address_faucets WHERE key=?1" } else { "SELECT COUNT(*) FROM idempotency WHERE key=?1" }, [key], |row| row.get(0))?;
+        anyhow::ensure!(count == 1, "retry created duplicate operations");
+        fixture.assert_running().await?;
+        Ok(())
+    }.await;
+    let cleanup = fixture.shutdown().await;
+    let proxy_cleanup = if let Some(proxy) = broadcast_proxy.as_mut() {
+        proxy.shutdown().await
+    } else {
+        Ok(())
+    };
+    preserve_scenario_failure(scenario, preserve_scenario_failure(cleanup, proxy_cleanup))
+}
 
 const RECOVERY_IDEMPOTENCY_KEY: &str = "recovery-after-auto-mine-failure";
 const CONCURRENT_IDEMPOTENCY_KEY: &str = "concurrent-identical-send";

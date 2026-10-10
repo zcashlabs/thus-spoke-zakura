@@ -1,3 +1,4 @@
+mod payment_proxy;
 mod regtest;
 mod rpc_proxy;
 
@@ -10,6 +11,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub use payment_proxy::{QueuedBroadcastProxy, lose_payment_response};
 pub use regtest::{
     FailureRoute, HeightCheckpoint, RecoveryFailureReporter, RecoveryPhase, RegtestStack,
     TerminationSignals,

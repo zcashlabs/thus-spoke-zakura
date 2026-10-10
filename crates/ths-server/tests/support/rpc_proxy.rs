@@ -35,6 +35,8 @@ struct ProxyState {
     armed: bool,
     rejected: usize,
     forwarded: usize,
+    hidden_transaction: Option<String>,
+    hidden_lookups: usize,
 }
 
 struct SharedProxy {
@@ -54,14 +56,14 @@ struct FallbackReaperState {
 /// The reaper is started before the listener. Its independent runtime keeps
 /// the JoinHandle owned until it can observe graceful completion or abort and
 /// join the server task, while the dropping owner waits only a bounded time.
-struct FallbackTaskReaper {
+pub(super) struct FallbackTaskReaper {
     state: Arc<(Mutex<FallbackReaperState>, Condvar)>,
     completion: Mutex<Receiver<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl FallbackTaskReaper {
-    fn start() -> Result<Self> {
+    pub(super) fn start() -> Result<Self> {
         let state = Arc::new((Mutex::new(FallbackReaperState::default()), Condvar::new()));
         let worker_state = Arc::clone(&state);
         let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
@@ -112,7 +114,7 @@ impl FallbackTaskReaper {
         }
     }
 
-    fn hand_off(&self, task: JoinHandle<Result<()>>) {
+    pub(super) fn hand_off(&self, task: JoinHandle<Result<()>>) {
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(
@@ -123,7 +125,7 @@ impl FallbackTaskReaper {
         wake.notify_one();
     }
 
-    fn wait_for_reap(&self) -> bool {
+    pub(super) fn wait_for_reap(&self) -> bool {
         self.completion
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -140,7 +142,7 @@ impl FallbackTaskReaper {
         }
     }
 
-    fn stop(&mut self) {
+    pub(super) fn stop(&mut self) {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -179,6 +181,23 @@ pub struct GenerateFaultProxy {
 }
 
 impl GenerateFaultProxy {
+    pub fn hide_transaction(&self, txid: Option<String>) -> Result<()> {
+        self.shared
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fixture proxy lock"))?
+            .hidden_transaction = txid;
+        Ok(())
+    }
+
+    pub fn hidden_lookups(&self) -> Result<usize> {
+        Ok(self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fixture proxy lock"))?
+            .hidden_lookups)
+    }
     pub async fn start(upstream: String) -> Result<Self> {
         let fallback_reaper = FallbackTaskReaper::start()?;
         let client = Client::builder()
@@ -335,6 +354,22 @@ async fn proxy_request(State(shared): State<Arc<SharedProxy>>, request: Request)
     let method = payload.get("method").and_then(Value::as_str);
     let is_generate = method == Some("generate");
     let is_fault_target = is_generate && payload.get("params") == Some(&json!([1]));
+
+    let hidden = {
+        let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let hidden = method == Some("getrawtransaction")
+            && state
+                .hidden_transaction
+                .as_deref()
+                .is_some_and(|txid| payload["params"][0].as_str() == Some(txid));
+        if hidden {
+            state.hidden_lookups += 1;
+        }
+        hidden
+    };
+    if hidden {
+        return json_rpc_error(StatusCode::OK, id, -5, "injected missing transaction");
+    }
 
     let rejected = {
         let mut state = match shared.state.lock() {

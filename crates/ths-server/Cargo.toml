@@ -48,6 +48,9 @@ zip32.workspace = true
 zip321 = { package = "zakura-zip321", version = "=2.2.0" }
 
 [dev-dependencies]
+# The live recovery fault proxy forwards lightwalletd's HTTP/2 gRPC streams.
+reqwest = { workspace = true, features = ["http2"] }
+axum = { workspace = true, features = ["http2"] }
 # `oneshot` drives the router in tests without binding a socket.
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
