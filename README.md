@@ -319,7 +319,7 @@ and volumes, plus private temporary data/configuration directories, a local RPC
 proxy, and a local server process. It sends a genuine 1,000,000-zatoshi (0.01
 ZEC) Ironwood payment from Account 1 to Account 2, deliberately rejects exactly
 one automatic `generate([1])` through the proxy, mines directly through the
-node, then waits for the production background wallet-sync loop to update the
+node, then waits for the production background payment-confirmation loop to update the
 existing activity row. Direct mining is intentional: retrying Send or using the
 server's mine endpoint would repair the row through a different path and would
 not prove background recovery.
@@ -342,8 +342,8 @@ request bodies, wallet keys, wallet databases, or configuration directories.
 
 To prove the regression is sensitive, perform the negative control only after a
 successful live run and only in an isolated verification worktree. Temporarily
-remove `reconcile_unconfirmed(self).await?;` from
-`AppState::refresh_wallet_snapshot`, rerun the same explicit live Cargo command,
+remove `background.spawn(api::payment_confirmation_loop(state.clone()));` from
+`serve` in `crates/ths-server/src/main.rs`, rerun the same explicit live Cargo command,
 and require failure at background activity recovery after the broadcast,
 intercepted auto-mine failure, and real inclusion checks. Restore the exact line
 immediately, including after a failed run; do not retain the temporary
@@ -358,7 +358,12 @@ Browser ──HTTP/SSE── ths-server ──JSON-RPC── Zakura (Regtest)
 ```
 
 The server owns wallet synchronization and exposes the latest confirmed wallet
-snapshot to the dashboard. A hidden sixth account acts as the mining and faucet
+snapshot to the dashboard. A separate supervised loop checks persisted payment
+transaction IDs for chain inclusion every two seconds, independently of wallet
+synchronization. Each lookup is bounded to two seconds and each pass to ten
+seconds, resuming after the last attempted record when the budget is exhausted.
+Unknown transactions and unavailable RPC responses remain pending for retry.
+A hidden sixth account acts as the mining and faucet
 treasury. Account 1 starts with 5 Ironwood ZEC, so you can experiment immediately.
 
 The local chain activates every network upgrade through NU6.3 at height 1, so it

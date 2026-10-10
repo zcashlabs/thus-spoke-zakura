@@ -159,7 +159,9 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     api::provision_initial_balance(&state)
         .await
         .context("provisioning Account 1 with 5 Ironwood ZEC")?;
-    tokio::spawn(api::wallet_sync_loop(state.clone()));
+    let mut background = tokio::task::JoinSet::new();
+    background.spawn(api::wallet_sync_loop(state.clone()));
+    background.spawn(api::payment_confirmation_loop(state.clone()));
     let app = api::router(state);
     let address: SocketAddr = std::env::var("THS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
@@ -167,7 +169,15 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         .context("invalid THS_LISTEN")?;
     tracing::info!(%address, "dashboard ready");
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    // A stopped or panicked recovery task must not leave HTTP serving as if
+    // server-owned background work were still supervised.
+    tokio::select! {
+        result = axum::serve(listener, app).into_future() => result?,
+        result = background.join_next() => {
+            result.context("background task set unexpectedly empty")??;
+            anyhow::bail!("server background task unexpectedly exited");
+        }
+    }
     Ok(())
 }
 
