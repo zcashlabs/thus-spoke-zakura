@@ -149,7 +149,7 @@ pub struct Runtime {
 
 struct FaucetJournal {
     path: PathBuf,
-    _lock: File,
+    lock: File,
 }
 
 impl FaucetJournal {
@@ -172,7 +172,7 @@ impl FaucetJournal {
         }
         Ok(Self {
             path: instance_dir.join("faucet-intents.json"),
-            _lock: lock,
+            lock,
         })
     }
 
@@ -245,6 +245,22 @@ impl FaucetJournal {
             entries.remove(*intent);
         }
         self.write(&entries)
+    }
+}
+
+impl Drop for FaucetJournal {
+    fn drop(&mut self) {
+        // A concurrent child can inherit this descriptor before exec. Closing
+        // only our copy would leave its shared lock held until that child execs.
+        if let Err(error) = self.lock.unlock() {
+            use std::io::Write;
+            // Drop cannot return an error. Report it on stderr without panicking
+            // during unwinding; closing the file remains the fallback cleanup.
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: could not unlock faucet intents: {error}"
+            );
+        }
     }
 }
 
@@ -2662,6 +2678,72 @@ mod tests {
         assert!(
             completed_while_locked && output.status.success() && result.contains("running 1 test"),
             "overlapping command waited or acquired the lock: {result}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn faucet_journal_drop_releases_an_inherited_descriptor_before_exec() {
+        use std::io::{Read, Write};
+        use std::os::unix::{net::UnixStream, process::CommandExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FaucetJournal::open(dir.path()).unwrap();
+        let intent = "wallet:ironwood:100:1,2:1";
+        let key = journal.key_for(intent).unwrap();
+        assert!(FaucetJournal::open(dir.path()).is_err());
+
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        for socket in [&parent, &child] {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+        }
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("/usr/bin/true");
+            // SAFETY: the child hook uses only socket read/write syscalls and
+            // stack data. It does not allocate, lock, or access the journal.
+            // The barrier holds the inherited descriptor before close-on-exec.
+            unsafe {
+                command.pre_exec(move || {
+                    if child.write(b"r")? != 1 {
+                        return Err(std::io::ErrorKind::WriteZero.into());
+                    }
+                    let mut release = [0_u8];
+                    if child.read(&mut release)? != 1 {
+                        return Err(std::io::ErrorKind::UnexpectedEof.into());
+                    }
+                    Ok(())
+                });
+            }
+            command.spawn()?.wait()
+        });
+
+        let mut ready = [0_u8];
+        let reached_barrier = parent.read_exact(&mut ready);
+        // Open while the child still holds the inherited descriptor, not after exec.
+        drop(journal);
+        let reopened = FaucetJournal::open(dir.path());
+        let released = parent.write_all(b"g");
+        // Always release and join the unrelated child before asserting results.
+        drop(parent);
+        let status = worker.join().unwrap();
+        reached_barrier.unwrap();
+        released.unwrap();
+        assert!(status.unwrap().success());
+        let reopened = reopened.expect("dropped journal retained its inherited lock");
+        assert_eq!(reopened.key_for(intent).unwrap(), key);
+        assert!(FaucetJournal::open(dir.path()).is_err());
+        drop(reopened);
+        assert_eq!(
+            FaucetJournal::open(dir.path())
+                .unwrap()
+                .key_for(intent)
+                .unwrap(),
+            key
         );
     }
 
