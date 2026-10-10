@@ -159,7 +159,9 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     api::provision_initial_balance(&state)
         .await
         .context("provisioning Account 1 with 5 Ironwood ZEC")?;
-    tokio::spawn(api::wallet_sync_loop(state.clone()));
+    let mut background = tokio::task::JoinSet::new();
+    background.spawn(api::wallet_sync_loop(state.clone()));
+    background.spawn(api::payment_confirmation_loop(state.clone()));
     let app = api::router(state);
     let address: SocketAddr = std::env::var("THS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
@@ -167,13 +169,97 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         .context("invalid THS_LISTEN")?;
     tracing::info!(%address, "dashboard ready");
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    serve_with_background(listener, app, background).await
+}
+
+async fn serve_with_background(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    mut background: tokio::task::JoinSet<()>,
+) -> Result<()> {
+    // A stopped or panicked recovery task must not leave HTTP serving as if
+    // server-owned background work were still supervised.
+    tokio::select! {
+        result = axum::serve(listener, app).into_future() => result?,
+        result = background.join_next() => {
+            result.context("background task set unexpectedly empty")??;
+            anyhow::bail!("server background task unexpectedly exited");
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_background_failure_stops_http(panics: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ready" }));
+        let mut background = tokio::task::JoinSet::new();
+        let (cancelled, cancellation) = tokio::sync::oneshot::channel::<()>();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        background.spawn(async move {
+            // Dropping this sender proves the sibling task was cancelled.
+            let _cancelled = cancelled;
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        let (exit, exiting) = tokio::sync::oneshot::channel();
+        background.spawn(async move {
+            exiting.await.unwrap();
+            assert!(!panics, "injected recovery task panic");
+        });
+        let server = tokio::spawn(serve_with_background(listener, app, background));
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        exit.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        if panics {
+            assert!(
+                error
+                    .downcast_ref::<tokio::task::JoinError>()
+                    .unwrap()
+                    .is_panic()
+            );
+        } else {
+            assert_eq!(
+                error.to_string(),
+                "server background task unexpectedly exited"
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), cancellation)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn background_task_exit_stops_http_and_cancels_siblings() {
+        assert_background_failure_stops_http(false).await;
+    }
+
+    #[tokio::test]
+    async fn background_task_panic_stops_http_and_cancels_siblings() {
+        assert_background_failure_stops_http(true).await;
+    }
 
     #[test]
     fn configures_the_hidden_treasury_as_miner() {
