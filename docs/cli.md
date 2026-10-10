@@ -141,7 +141,9 @@ ths list
 ### `ths doctor [--json]`
 
 Checks that Docker is reachable and prints the launcher's configuration
-directory.
+directory. If Docker is unreachable, the command exits nonzero in both output
+modes. With `--json`, stdout still contains one diagnostic JSON object with
+`ok: false` and `docker: null`; the error is written to stderr.
 
 ```console
 ths doctor
