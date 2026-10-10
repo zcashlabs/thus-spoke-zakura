@@ -230,6 +230,10 @@ impl Runtime {
     }
 
     pub fn doctor(&self, json: bool) -> Result<()> {
+        self.doctor_with(json, false)
+    }
+
+    fn doctor_with(&self, json: bool, diagnostics_to_stderr: bool) -> Result<()> {
         let docker = docker_output(["version", "--format", "{{.Server.Version}}"]);
         let result = serde_json::json!({
             "docker": docker.as_ref().ok(),
@@ -239,7 +243,10 @@ impl Runtime {
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else if let Ok(version) = docker {
-            println!("✓ Docker {version}\n✓ Config: {}", self.root.display());
+            print_progress(
+                diagnostics_to_stderr,
+                format_args!("✓ Docker {version}\n✓ Config: {}", self.root.display()),
+            );
         } else {
             bail!("Docker is not reachable; start Docker Desktop or the Docker daemon");
         }
@@ -272,12 +279,19 @@ impl Runtime {
         port_offset: u16,
     ) -> Result<()> {
         host_ports(port_offset)?;
-        self.doctor(false)?;
+        self.doctor_with(false, json)?;
         for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
             require_image(&image)?;
         }
         let shutdown = Shutdown::install()?;
-        self.start_with(name, no_open, json, port_offset, &DockerHost, &shutdown)
+        self.start_with(
+            name,
+            no_open,
+            json,
+            port_offset,
+            &DockerHost { json },
+            &shutdown,
+        )
     }
 
     pub fn status(&self, name: &InstanceName, json: bool) -> Result<()> {
@@ -628,10 +642,6 @@ impl Runtime {
         self.delete_instance_resources_with(name, &DockerCli)
     }
 
-    fn delete_partial_instance_resources(&self, name: &InstanceName) -> Result<()> {
-        self.delete_instance_resources_with_mode(name, &DockerCli, true)
-    }
-
     fn delete_instance_resources_with(
         &self,
         name: &InstanceName,
@@ -791,6 +801,20 @@ trait DockerResourceCommands {
 
 struct DockerCli;
 
+struct StartupDocker {
+    json: bool,
+}
+
+impl DockerResourceCommands for StartupDocker {
+    fn output(&self, args: &[&str]) -> Result<String> {
+        docker_output_args(args)
+    }
+
+    fn run(&self, args: &[&str]) -> Result<()> {
+        docker_command_with_output(args, None, self.json)
+    }
+}
+
 impl DockerResourceCommands for DockerCli {
     fn output(&self, args: &[&str]) -> Result<String> {
         docker_output_args(args)
@@ -857,9 +881,6 @@ fn owned_resource(
     Ok(Some(id.to_owned()))
 }
 
-fn ensure_network(prefix: &str, name: &InstanceName) -> Result<()> {
-    ensure_network_with(prefix, name, &DockerCli)
-}
 fn ensure_network_with(
     prefix: &str,
     name: &InstanceName,
@@ -871,9 +892,6 @@ fn ensure_network_with(
             .with_context(|| format!("Docker did not create network {prefix}"))?;
     }
     Ok(())
-}
-fn ensure_volume(volume: &str, name: &InstanceName) -> Result<()> {
-    ensure_volume_with(volume, name, &DockerCli)
 }
 fn ensure_volume_with(
     volume: &str,
@@ -887,12 +905,17 @@ fn ensure_volume_with(
     }
     Ok(())
 }
-fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
+fn ensure_zakura(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+) -> Result<()> {
     let target = format!("{prefix}-zakura");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
+    if owned_resource(docker, "container", &target, name)?.is_none() {
         let rpc_bind = loopback_publish(ports.rpc, 18232);
         let p2p_bind = loopback_publish(ports.p2p, 18233);
-        docker([
+        docker.run(&[
             "create",
             "--name",
             &target,
@@ -919,12 +942,17 @@ fn ensure_zakura(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result
     }
     Ok(())
 }
-fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
+fn ensure_lightwalletd(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+) -> Result<()> {
     let target = format!("{prefix}-lightwalletd");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
+    if owned_resource(docker, "container", &target, name)?.is_none() {
         let image = lightwalletd_image();
         let lightwalletd_bind = loopback_publish(ports.lightwalletd, 9067);
-        docker([
+        docker.run(&[
             "create",
             "--name",
             &target,
@@ -960,15 +988,20 @@ fn ensure_lightwalletd(prefix: &str, name: &InstanceName, ports: &HostPorts) -> 
     }
     Ok(())
 }
-fn ensure_app(prefix: &str, name: &InstanceName, ports: &HostPorts) -> Result<()> {
+fn ensure_app(
+    prefix: &str,
+    name: &InstanceName,
+    ports: &HostPorts,
+    docker: &impl DockerResourceCommands,
+) -> Result<()> {
     let target = format!("{prefix}-app");
-    if owned_resource(&DockerCli, "container", &target, name)?.is_none() {
+    if owned_resource(docker, "container", &target, name)?.is_none() {
         let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
         let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
         let public_p2p = format!("127.0.0.1:{}", ports.p2p);
         let dashboard_bind = loopback_publish(ports.dashboard, 8080);
         let image = app_image();
-        docker([
+        docker.run(&[
             "create",
             "--name",
             &target,
@@ -1200,15 +1233,17 @@ trait StartHost {
     fn wait_for_shutdown(&self, shutdown: &Shutdown) -> Result<()>;
 }
 
-struct DockerHost;
+struct DockerHost {
+    json: bool,
+}
 
 impl StartHost for DockerHost {
     fn delete(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
-        runtime.delete_instance_resources(name)
+        runtime.delete_instance_resources_with(name, &StartupDocker { json: self.json })
     }
 
     fn delete_partial(&self, runtime: &Runtime, name: &InstanceName) -> Result<()> {
-        runtime.delete_partial_instance_resources(name)
+        runtime.delete_instance_resources_with_mode(name, &StartupDocker { json: self.json }, true)
     }
 
     fn allocate(
@@ -1219,21 +1254,22 @@ impl StartHost for DockerHost {
         port_offset: u16,
     ) -> Result<Endpoints> {
         fs::create_dir_all(runtime.instance_dir(name))?;
+        let docker = StartupDocker { json: self.json };
         let prefix = prefix(name);
         let ports = host_ports(port_offset)?;
         require_free_loopback(ports.dashboard)?;
         require_free_loopback(ports.rpc)?;
         require_free_loopback(ports.p2p)?;
         require_free_loopback(ports.lightwalletd)?;
-        ensure_network(&prefix, name)?;
+        ensure_network_with(&prefix, name, &docker)?;
         shutdown.check()?;
         for suffix in ["chain", "wallet", "lightwalletd", "config"] {
-            ensure_volume(&format!("{prefix}-{suffix}"), name)?;
+            ensure_volume_with(&format!("{prefix}-{suffix}"), name, &docker)?;
         }
         shutdown.check()?;
 
-        if owned_resource(&DockerCli, "container", &format!("{prefix}-init"), name)?.is_none() {
-            docker([
+        if owned_resource(&docker, "container", &format!("{prefix}-init"), name)?.is_none() {
+            docker.run(&[
                 "create",
                 "--name",
                 &format!("{prefix}-init"),
@@ -1251,16 +1287,16 @@ impl StartHost for DockerHost {
                 "/config",
             ])?;
             shutdown.check()?;
-            docker(["start", "-a", &format!("{prefix}-init")])?;
+            docker.run(&["start", "-a", &format!("{prefix}-init")])?;
             shutdown.check()?;
         }
 
-        ensure_zakura(&prefix, name, &ports)?;
+        ensure_zakura(&prefix, name, &ports, &docker)?;
         shutdown.check()?;
-        ensure_lightwalletd(&prefix, name, &ports)?;
+        ensure_lightwalletd(&prefix, name, &ports, &docker)?;
         shutdown.check()?;
         let zakura_container = format!("{prefix}-zakura");
-        docker(["start", &zakura_container])?;
+        docker.run(&["start", &zakura_container])?;
         shutdown.check()?;
         let zakura_rpc = format!(
             "http://127.0.0.1:{}",
@@ -1272,11 +1308,11 @@ impl StartHost for DockerHost {
             Duration::from_secs(120),
             shutdown,
         )?;
-        docker(["start", &format!("{prefix}-lightwalletd")])?;
+        docker.run(&["start", &format!("{prefix}-lightwalletd")])?;
         shutdown.check()?;
-        ensure_app(&prefix, name, &ports)?;
+        ensure_app(&prefix, name, &ports, &docker)?;
         shutdown.check()?;
-        docker(["start", &format!("{prefix}-app")])?;
+        docker.run(&["start", &format!("{prefix}-app")])?;
         shutdown.check()?;
         let endpoints = endpoints_for(&ports);
         runtime.write_instance(name, &endpoints)?;
@@ -1337,10 +1373,10 @@ impl Runtime {
             host,
             active: false,
         };
-        println!("Preparing a fresh {name} environment…");
+        print_progress(json, format_args!("Preparing a fresh {name} environment…"));
         host.delete(self, name)?;
         cleanup.active = true;
-        println!("Starting {name}…");
+        print_progress(json, format_args!("Starting {name}…"));
         let endpoints = host.allocate(self, name, shutdown, port_offset)?;
         shutdown.check()?;
         host.wait_ready(
@@ -1361,10 +1397,13 @@ impl Runtime {
             println!("\nPress Ctrl+C to stop and delete this development environment.");
         }
         host.wait_for_shutdown(shutdown)?;
-        println!("\nStopping and deleting {name}…");
+        print_progress(json, format_args!("\nStopping and deleting {name}…"));
         host.delete(self, name)?;
         cleanup.active = false;
-        println!("Deleted {name} and all of its development data.");
+        print_progress(
+            json,
+            format_args!("Deleted {name} and all of its development data."),
+        );
         Ok(())
     }
 }
@@ -1551,8 +1590,27 @@ fn docker_inherit_in(args: &[&str], current_dir: &std::path::Path) -> Result<()>
     docker_command(args, Some(current_dir))
 }
 fn docker_command(args: &[&str], current_dir: Option<&std::path::Path>) -> Result<()> {
+    docker_command_with_output(args, current_dir, false)
+}
+
+fn print_progress(to_stderr: bool, message: fmt::Arguments<'_>) {
+    if to_stderr {
+        eprintln!("{message}");
+    } else {
+        println!("{message}");
+    }
+}
+
+fn docker_command_with_output(
+    args: &[&str],
+    current_dir: Option<&std::path::Path>,
+    to_stderr: bool,
+) -> Result<()> {
     let mut command = Command::new("docker");
     command.args(args);
+    if to_stderr {
+        command.stdout(Stdio::from(std::io::stderr()));
+    }
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
     }
