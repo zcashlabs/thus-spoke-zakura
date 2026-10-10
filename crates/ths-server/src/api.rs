@@ -4567,6 +4567,7 @@ mod tests {
         recovered: Mutex<Option<PreparedPayment>>,
         height: AtomicU64,
         fail_next: AtomicBool,
+        queued_next: AtomicBool,
     }
 
     #[tokio::test]
@@ -4643,6 +4644,15 @@ mod tests {
                 .push(raw_transaction.to_vec());
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 anyhow::bail!("response lost");
+            }
+            if self.queued_next.swap(false, Ordering::SeqCst) {
+                crate::wallet::check_broadcast_response(
+                    zcash_client_backend::proto::service::SendResponse {
+                        error_code: -1,
+                        error_message:
+                            "transaction dropped because it is already queued for download".into(),
+                    },
+                )?;
             }
             Ok(())
         }
@@ -4731,6 +4741,92 @@ mod tests {
         assert_eq!(
             store.activity_for_key("same").unwrap().unwrap().status,
             "prepared"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_retry_keeps_the_original_payment_pending_until_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.db");
+        let store = Store::open(&path).unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same-queued", None)
+            .unwrap();
+        let prepared = store
+            .record_prepared(&claim.id, "original-txid", b"original signed bytes", 140)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        store.initialize().unwrap();
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(false), Ok(true)])),
+            height: AtomicU64::new(139),
+            queued_next: AtomicBool::new(true),
+            ..Default::default()
+        };
+        let PreparedSubmission::Broadcast(pending) =
+            submit_prepared(&store, &runtime, &prepared).await.unwrap()
+        else {
+            panic!("queued bytes must not be replaced");
+        };
+        assert_eq!(pending.id, prepared.id);
+        assert_eq!(pending.txid, "original-txid");
+        assert_eq!(pending.status, "broadcast");
+        assert!(pending.block_hash.is_none());
+        assert_eq!(
+            store
+                .prepared_transaction(&pending.id)
+                .unwrap()
+                .raw_transaction,
+            b"original signed bytes"
+        );
+        // A later lookup observes the same transaction without another broadcast.
+        assert!(matches!(
+            submit_prepared(&store, &runtime, &pending).await.unwrap(),
+            PreparedSubmission::Broadcast(_)
+        ));
+        assert_eq!(
+            *runtime.broadcasts.lock().unwrap(),
+            [b"original signed bytes"]
+        );
+        let same = store
+            .claim_transfer(1, 2, "ironwood", "ironwood", 12_000, "same-queued", None)
+            .unwrap();
+        assert_eq!(same.id, pending.id);
+        assert_eq!(same.txid, pending.txid);
+    }
+
+    #[tokio::test]
+    async fn queued_external_faucet_retry_preserves_its_payment_and_bytes() {
+        let store = Store::open(":memory:").unwrap();
+        store.initialize().unwrap();
+        let claim = store
+            .claim_address_faucet("external-regtest-address", 12_000, "queued-address")
+            .unwrap();
+        let prepared = store
+            .record_address_prepared(&claim.id, "address-txid", b"address signed bytes", 140)
+            .unwrap();
+        let runtime = RecordingPaymentSubmitter {
+            lookups: Mutex::new(VecDeque::from([Ok(false)])),
+            height: AtomicU64::new(139),
+            queued_next: AtomicBool::new(true),
+            ..Default::default()
+        };
+        let AddressSubmission::Broadcast(pending) =
+            submit_address_prepared(&store, &runtime, &prepared)
+                .await
+                .unwrap()
+        else {
+            panic!("queued payment must remain pending");
+        };
+        assert_eq!(pending.id, prepared.id);
+        assert_eq!(pending.txid, prepared.txid);
+        assert_eq!(pending.status, "broadcast");
+        assert!(pending.block_hash.is_none());
+        assert_eq!(
+            *runtime.broadcasts.lock().unwrap(),
+            [b"address signed bytes"]
         );
     }
 
