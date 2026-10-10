@@ -3,7 +3,7 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { classifyQuery } from './classify-query';
 import { Button } from '@/components/ui/Button';
-import { api } from '@/lib/api';
+import { api, ApiError, errorMessage } from '@/lib/api';
 
 export function SearchBar() {
   const navigate = useNavigate();
@@ -33,7 +33,15 @@ export function SearchBar() {
         const prefix = type === 'block' ? 'block' : 'tx';
         void navigate(`/explorer/${prefix}/${result.hash}`);
       })
-      .catch(() => setError('No block or transaction on this chain has that hash.'))
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) {
+          setError('No block or transaction on this chain has that hash.');
+        } else if (error instanceof TypeError) {
+          setError('Could not complete the search. Check your connection and try again.');
+        } else {
+          setError(errorMessage(error));
+        }
+      })
       .finally(() => setResolving(false));
   };
 

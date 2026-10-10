@@ -15,6 +15,8 @@ describe('classifyQuery', () => {
     const hash = 'cb45d3bb523989b81da2b91ba7c5cdfeeace2f6e1a34a397b8e212729038905c';
     expect(classifyQuery(hash)).toEqual({ hash });
     expect(classifyQuery(hash.toUpperCase())).toEqual({ hash });
+    const numericHash = '0'.repeat(64);
+    expect(classifyQuery(numericHash)).toEqual({ hash: numericHash });
   });
 
   it('explains why a unified address has no public history', () => {
