@@ -217,7 +217,7 @@ Running `ths` with no command starts the default environment.
 | `ths list` | List environments and their container status |
 | `ths stop` | Stop and delete the environment |
 | `ths reset --force` | Force-delete one environment and all its data |
-| `ths doctor` | Check Docker and local configuration |
+| `ths doctor [--json]` | Check Docker and local configuration; exit nonzero if Docker is unreachable |
 | `ths pull` | Pull the exact images for this launcher version |
 | `ths update --check` | Check for a newer release |
 | `ths update` | Install the latest verified release |

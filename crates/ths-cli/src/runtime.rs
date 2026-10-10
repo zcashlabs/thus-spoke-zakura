@@ -266,8 +266,11 @@ impl Runtime {
         });
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
-        } else if let Ok(version) = docker {
-            println!("✓ Docker {version}\n✓ Config: {}", self.root.display());
+        }
+        if let Ok(version) = docker {
+            if !json {
+                println!("✓ Docker {version}\n✓ Config: {}", self.root.display());
+            }
         } else {
             bail!("Docker is not reachable; start Docker Desktop or the Docker daemon");
         }
