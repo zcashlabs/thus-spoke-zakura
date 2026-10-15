@@ -59,6 +59,13 @@ The dashboard reads `GET /api/v1/mining/jobs` for the latest job, or
 the same block count returns the same job within that server lifetime; a
 fresh CLI invocation requests new mining.
 
+The dashboard retains the mining request key in session storage before
+submitting it. If the browser blocks access to that storage, Mine stays open
+and shows an error when you submit; no mining request is sent. Allow site
+storage and retry. A retry after a lost response reuses the retained key,
+including after closing and reopening the dialog, unless the latest job has
+already completed or failed.
+
 Read the node and wallet view through the running instance's API:
 
 ```console

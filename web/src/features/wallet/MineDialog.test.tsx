@@ -37,6 +37,69 @@ function OpenMine() {
 }
 
 describe('MineDialog', () => {
+  it.each(['getter', 'getItem', 'setItem', 'removeItem'] as const)(
+    'keeps Mine usable and blocks POST when session storage %s fails',
+    async (failure) => {
+      const fetchSpy = mockJob(
+        failure === 'removeItem' ? { ...running, state: 'completed' } : null,
+      );
+      const deny = () => {
+        throw new DOMException('Access denied', 'SecurityError');
+      };
+      const storageSpy =
+        failure === 'getter'
+          ? vi.spyOn(window, 'sessionStorage', 'get').mockImplementation(deny)
+          : vi.spyOn(Storage.prototype, failure).mockImplementation(deny);
+      const onOpenChange = vi.fn();
+      renderWithProviders(<MineDialog open onOpenChange={onOpenChange} />);
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Mine blocks' })).toBeEnabled(),
+      );
+      await userEvent.click(screen.getByRole('button', { name: 'Mine blocks' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(/session storage/i);
+      expect(fetchSpy.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0);
+      await userEvent.keyboard('{Escape}');
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      storageSpy.mockRestore();
+    },
+  );
+
+  it('keeps the retained key when a retry cannot access storage, then reuses it after recovery', async () => {
+    const keys: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      await Promise.resolve();
+      if (init?.method === 'POST') {
+        keys.push(
+          (
+            JSON.parse(typeof init.body === 'string' ? init.body : '{}') as {
+              idempotency_key: string;
+            }
+          ).idempotency_key,
+        );
+        throw new TypeError('response lost');
+      }
+      return Response.json({ job: null });
+    });
+    const first = renderWithProviders(<MineDialog open onOpenChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mine blocks' })).toBeEnabled());
+    await userEvent.click(screen.getByRole('button', { name: 'Mine blocks' }));
+    await screen.findByText(/response lost/);
+    first.unmount();
+    const denied = vi.spyOn(window, 'sessionStorage', 'get').mockImplementation(() => {
+      throw new DOMException('Access denied', 'SecurityError');
+    });
+    renderWithProviders(<MineDialog open onOpenChange={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mine blocks' })).toBeEnabled());
+    await userEvent.click(screen.getByRole('button', { name: 'Mine blocks' }));
+    await screen.findByText(/session storage/i);
+    expect(keys).toHaveLength(1);
+    denied.mockRestore();
+    await userEvent.click(screen.getByRole('button', { name: 'Mine blocks' }));
+    await screen.findByText(/response lost/);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
   it('restores a running job on a fresh mount without starting mining and polls completion', async () => {
     let job = running;
     const fetchSpy = vi

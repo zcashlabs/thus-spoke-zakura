@@ -42,23 +42,23 @@ function useInvalidateWallet() {
 function operationKey<T>(
   kind: string,
   fingerprint: (variables: T) => string,
-  storageArea = sessionStorage,
+  storageArea = () => sessionStorage,
 ) {
   const storageKey = (variables: T) => `ths:${kind}:${fingerprint(variables)}`;
   return {
     nameFor: storageKey,
     keyFor(variables: T) {
       const itemKey = storageKey(variables);
-      let key = storageArea.getItem(itemKey);
+      const storage = storageArea();
+      let key = storage.getItem(itemKey);
       if (!key) {
         key = idempotencyKey();
       }
-      storageArea.setItem(itemKey, key);
+      storage.setItem(itemKey, key);
       return key;
     },
     clear(variables: T) {
-      storageArea.removeItem(storageKey(variables));
-      if (storageArea === localStorage) sessionStorage.removeItem(storageKey(variables));
+      storageArea().removeItem(storageKey(variables));
     },
   };
 }
@@ -241,8 +241,19 @@ export function useStartMining(): UseMutationResult<MiningJob, Error, number> {
     mutationFn: (blocks: number) => {
       const state = queryClient.getQueryData<{ job: MiningJob | null }>(queryKeys.mining)?.job
         ?.state;
-      if (state === 'completed' || state === 'failed') operation.clear(blocks);
-      return api.startMining(blocks, operation.keyFor(blocks));
+      let key: string;
+      try {
+        // Storage can be denied even when its getter is accessed. Retain the
+        // key before POST so a lost response can be retried after remounting.
+        if (state === 'completed' || state === 'failed') operation.clear(blocks);
+        key = operation.keyFor(blocks);
+      } catch (cause) {
+        throw new Error(
+          'Unable to access session storage for mining. Allow site storage and try again.',
+          { cause },
+        );
+      }
+      return api.startMining(blocks, key);
     },
     retry: false,
     onSuccess: async (job, blocks) => {
