@@ -129,8 +129,10 @@ impl Store {
         }
         let tx = db.transaction()?;
         insert_activity(&tx, &request, key, memo)?;
+        // Read database defaults before committing so admission and replay agree.
+        let activity = activity_by_id(&tx, &request.id)?;
         tx.commit()?;
-        Ok(request)
+        Ok(activity)
     }
 
     #[cfg(test)]
