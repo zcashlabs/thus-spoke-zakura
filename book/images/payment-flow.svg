@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 420" width="912" height="420" role="img" aria-label="A validated payment is durably claimed as preparing. The wallet and server save prepared transaction bytes before broadcast, then the server checks confirmation. Identical keys resume the saved payment; changed details or memo conflict.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 0 912 420" width="912" height="420" role="img" aria-label="A validated payment is durably claimed as preparing, and the POST returns that stored claim. Background work saves prepared transaction bytes before broadcast, then checks confirmation. An identical key returns the recorded outcome and leaves confirmation to background work; changed details or memo conflict.">
 <style>
 svg {
   --bg: #fdfaf8;
@@ -49,14 +49,13 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 <text class="l" x="616.5" y="121.0" text-anchor="middle">Claim in ths.db</text>
 <text class="s" x="616.5" y="139.0" text-anchor="middle">durable preparing state</text>
 <rect class="note" x="747.0" y="92" width="205.0" height="64" rx="8"/>
-<text class="l" x="849.5" y="121.0" text-anchor="middle">Resume saved state</text>
-<text class="s" x="849.5" y="139.0" text-anchor="middle">same key + same details</text>
+<text class="l" x="849.5" y="121.0" text-anchor="middle">Return the claim</text>
+<text class="s" x="849.5" y="139.0" text-anchor="middle">202 pending, 200 terminal</text>
 <path class="flow" d="M253.0 124 L273.0 124" marker-end="url(#ar-a)"/>
 <path class="flow" d="M486.0 124 L506.0 124" marker-end="url(#ar-a)"/>
 <path class="flow" d="M719.0 124 L739.0 124" marker-end="url(#ar-a)"/>
-<text class="s" x="733.0" y="80" text-anchor="middle">same key</text>
 <path class="flow" d="M616.5 156 L616.5 196 L189.33333333333334 196 L189.33333333333334 232" marker-end="url(#ar-a)"/>
-<text class="s" x="500" y="188" text-anchor="middle">new key</text>
+<text class="s" x="500" y="188" text-anchor="middle">background</text>
 <rect class="card" x="48.0" y="240" width="282.6666666666667" height="64" rx="8"/>
 <text class="l" x="189.33333333333334" y="269.0" text-anchor="middle">Save prepared bytes</text>
 <text class="s" x="189.33333333333334" y="287.0" text-anchor="middle">wallet journal + ths.db</text>
