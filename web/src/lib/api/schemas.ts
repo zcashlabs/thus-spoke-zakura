@@ -162,6 +162,7 @@ export const txInputSchema = z.looseObject({
   coinbase: z.string().optional(),
   txid: z.string().optional(),
   vout: z.number().int().optional(),
+  prevout_unavailable: z.boolean().optional(),
   /** Copied from the spent output when the explorer can resolve the prevout. */
   valueZat: z.number().int().optional(),
   scriptPubKey: z
@@ -187,6 +188,7 @@ export type TxInput = z.infer<typeof txInputSchema>;
 
 export const transactionSchema = z.looseObject({
   txid: z.string(),
+  transparent_inputs_complete: z.boolean().optional(),
   height: z.number().int().optional(),
   blockhash: z.string().optional(),
   blocktime: z.number().int().optional(),

@@ -159,6 +159,32 @@ describe('TransactionDetail', () => {
     expect(fetched.filter((url) => url.includes(`/transactions/${PREV_TXID}`))).toEqual([]);
   });
 
+  it('warns when previous output details are unavailable', async () => {
+    renderTx({
+      txid: TXID,
+      transparent_inputs_complete: false,
+      vin: [{ txid: PREV_TXID, vout: 0, prevout_unavailable: true }],
+      vout: [{ n: 0, valueZat: 90_000_000, scriptPubKey: { addresses: [] } }],
+      vShieldedSpend: [],
+      vShieldedOutput: [],
+    });
+
+    expect(await screen.findByText('Some input details are unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/could not resolve one or more previous outputs/i)).toBeInTheDocument();
+    expect(screen.getByText('Previous output details unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Fully transparent, but some public input addresses and amounts could not be retrieved.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'Fully transparent. Every input, output, address and amount is public chain data.',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it('does not call a shielded transfer fully transparent when it pays a fee', async () => {
     // Splitting "shielded" into zero-balance and fee-paying cases left this
     // footer keyed off the wrong flag, so a fee-paying Orchard transfer was

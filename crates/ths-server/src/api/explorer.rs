@@ -86,40 +86,41 @@ fn transparent_prevout_ids(tx: &Value) -> Vec<String> {
 fn attach_transparent_prevouts(
     tx: &mut Value,
     prev_txs: &std::collections::HashMap<String, Value>,
-) {
+) -> bool {
     let Some(vin) = tx.get_mut("vin").and_then(Value::as_array_mut) else {
-        return;
+        return true;
     };
+    let mut complete = true;
     for input in vin {
         if input.get("coinbase").is_some() {
             continue;
         }
-        let Some(prev_txid) = input.get("txid").and_then(Value::as_str).map(str::to_owned) else {
-            continue;
-        };
-        let Some(n) = input.get("vout").and_then(Value::as_u64) else {
-            continue;
-        };
-        let Some(prev) = prev_txs.get(&prev_txid) else {
-            continue;
-        };
-        let Some(vout) = prev.get("vout").and_then(Value::as_array) else {
-            continue;
-        };
-        let Some(out) = vout
-            .iter()
-            .find(|out| out.get("n").and_then(Value::as_u64) == Some(n))
-            .or_else(|| vout.get(n as usize))
-        else {
-            continue;
-        };
-        if let Some(value_zat) = out.get("valueZat").cloned() {
+        let out = input
+            .get("txid")
+            .and_then(Value::as_str)
+            .and_then(|txid| prev_txs.get(txid))
+            .and_then(|prev| prev.get("vout"))
+            .and_then(Value::as_array)
+            .and_then(|vout| {
+                let n = input.get("vout").and_then(Value::as_u64)?;
+                vout.iter()
+                    .find(|out| out.get("n").and_then(Value::as_u64) == Some(n))
+                    .or_else(|| vout.get(n as usize))
+            });
+        if let Some(out) = out
+            && let (Some(value_zat), Some(script)) = (
+                out.get("valueZat").cloned(),
+                out.get("scriptPubKey").cloned(),
+            )
+        {
             input["valueZat"] = value_zat;
-        }
-        if let Some(script) = out.get("scriptPubKey").cloned() {
             input["scriptPubKey"] = script;
+            continue;
         }
+        input["prevout_unavailable"] = Value::Bool(true);
+        complete = false;
     }
+    complete
 }
 
 pub(crate) async fn transaction(
@@ -134,11 +135,25 @@ pub(crate) async fn transaction(
         .map_err(|e| not_found(e, NO_TRANSACTION))?;
     let mut prev_txs = std::collections::HashMap::new();
     for prev_id in transparent_prevout_ids(&tx) {
-        if let Ok(prev) = state.0.rpc.transaction(&prev_id).await {
-            prev_txs.insert(prev_id, prev);
+        match state.0.rpc.transaction(&prev_id).await {
+            Ok(prev) => {
+                prev_txs.insert(prev_id, prev);
+            }
+            Err(error) => tracing::warn!(
+                error = %format_args!("{error:#}"),
+                transaction = %txid,
+                previous_transaction = %prev_id,
+                "resolving a transparent input failed"
+            ),
         }
     }
-    attach_transparent_prevouts(&mut tx, &prev_txs);
+    let complete = attach_transparent_prevouts(&mut tx, &prev_txs);
+    if let Some(tx) = tx.as_object_mut() {
+        tx.insert(
+            "transparent_inputs_complete".to_owned(),
+            Value::Bool(complete),
+        );
+    }
     Ok(Json(tx))
 }
 pub(crate) async fn mempool(State(state): State<AppState>) -> ApiResult<Json<Value>> {
