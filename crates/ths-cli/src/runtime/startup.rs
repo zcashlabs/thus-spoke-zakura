@@ -5,6 +5,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
     ) -> Result<()> {
@@ -46,6 +47,7 @@ impl Runtime {
         self.start_owned(
             name,
             no_open,
+            detach,
             json,
             port_offset,
             &DockerHost,
@@ -219,6 +221,8 @@ pub(super) enum Ended {
     Interrupted,
     /// Another command already deleted it.
     DeletedElsewhere,
+    /// `start --detach` reached readiness and left the environment running.
+    Detached,
 }
 
 pub(super) trait StartHost {
@@ -648,17 +652,28 @@ impl Drop for CleanupOnDrop<'_> {
 
 impl Runtime {
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_with(
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         host: &dyn StartHost,
         shutdown: &Shutdown,
     ) -> Result<()> {
         let context = LifecycleContext::new(LifecyclePolicy::default());
-        self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
+        self.start_with_policy(
+            name,
+            no_open,
+            detach,
+            json,
+            port_offset,
+            host,
+            shutdown,
+            &context,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
@@ -666,6 +681,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         host: &dyn StartHost,
@@ -677,6 +693,7 @@ impl Runtime {
         self.start_owned(
             name,
             no_open,
+            detach,
             json,
             port_offset,
             host,
@@ -707,6 +724,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         host: &dyn StartHost,
@@ -753,6 +771,14 @@ impl Runtime {
                 );
             }
             ownership.release_lifecycle();
+            if detach {
+                if !json {
+                    println!(
+                        "\nRunning in the background. Delete it with `ths --name {name} stop`."
+                    );
+                }
+                return Ok(Ended::Detached);
+            }
             if !no_open
                 && let Err(error) = host.open_url(&allocated.endpoints.dashboard, shutdown, context)
                 && !shutdown.try_interrupted()
@@ -768,6 +794,11 @@ impl Runtime {
             }
             host.wait_for_shutdown(&allocated.app_container, shutdown)
         })();
+        if matches!(primary, Ok(Ended::Detached)) {
+            // Ready: from here the environment belongs to `stop` / `reset`, not this process.
+            cleanup.state = CleanupGuard::Inactive;
+            return Ok(());
+        }
         cleanup.state = CleanupGuard::Explicit;
         let primary = primary.map_err(|error| ownership.session().explain(name, error));
         if matches!(primary, Ok(Ended::DeletedElsewhere)) {

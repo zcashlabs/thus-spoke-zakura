@@ -73,11 +73,25 @@ fn separates_building_from_starting() {
         cli.command,
         Some(Command::Start {
             no_open: false,
+            detach: false,
             port_offset: 10
         })
     ));
 
     assert!(Cli::try_parse_from(["ths", "start", "--port-offset", "1"]).is_ok());
+
+    for flag in ["--detach", "-d"] {
+        let cli = Cli::try_parse_from(["ths", "start", flag]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Start {
+                no_open: false,
+                detach: true,
+                port_offset: 0
+            })
+        ));
+    }
+    assert!(Cli::try_parse_from(["ths", "start", "--detach", "--no-open"]).is_ok());
 }
 
 #[test]

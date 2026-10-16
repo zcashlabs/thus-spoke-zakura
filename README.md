@@ -384,6 +384,7 @@ Running `ths` with no command starts the default environment.
 | --- | --- |
 | `ths` | Start a fresh environment and open the dashboard. Readiness is 120 seconds per phase, ordinary startup commands are 30 seconds, initialization is 120 seconds, and cleanup is a separate 120 seconds |
 | `ths start --no-open` | Start without opening a browser, with the same phase budgets as `ths` |
+| `ths start --detach` | Start, return once ready and leave it running for scripts and CI; `ths stop` deletes it. Implies `--no-open` |
 | `ths --json start --no-open` | Print endpoints as JSON on stdout, with startup diagnostics on stderr |
 | `ths start --port-offset 10` | Start on loopback ports shifted by 10 for another instance |
 | `ths status` | Show health and endpoint information |

@@ -49,6 +49,21 @@ error and retains `lifecycle-recovery.json`; see [Chapter 1](getting-started.md)
 ths
 ths start --no-open      # don't open a browser tab
 ths --name alice start --port-offset 10  # start a second, independent environment
+ths --name ci start --detach             # return once ready; leave it running
+```
+
+`--detach` (`-d`) is for scripts and CI that need a chain for the length of a
+run. `start` does the same fresh setup and readiness wait, prints the same
+endpoints (`--json` prints the same document), then exits 0 and leaves the
+environment running; it implies `--no-open`. Nothing deletes a detached
+environment automatically: `ths stop` or `ths reset --force` does. A startup
+failure, or Ctrl+C before the environment is ready, still deletes it and exits
+non-zero. Environments stay ephemeral.
+
+```console
+ths --name ci start --detach --port-offset 100
+ths --name ci faucet <address> --amount 5
+ths --name ci stop
 ```
 
 The default loopback ports are dashboard `32805`, Zakura RPC `18232`, P2P
@@ -634,6 +649,7 @@ account 1 to account 3, all without opening the dashboard.
 | --- | --- |
 | `ths` | Start a fresh environment and open the dashboard |
 | `ths start --no-open` | Start without opening a browser |
+| `ths start --detach` | Return once ready and leave the environment running; `ths stop` deletes it |
 | `ths start --port-offset <N>` | Shift loopback host ports by a multiple of 10 for another instance |
 | `ths wait [--timeout]` | Wait for existing node/index/wallet settlement |
 | `ths run [--timeout] -- <command>` | Run a child in a fresh settled instance, then clean up |

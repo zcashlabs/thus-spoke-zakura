@@ -29,12 +29,14 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
         no_open: false,
+        detach: false,
         port_offset: 0,
     }) {
         Command::Start {
             no_open,
+            detach,
             port_offset,
-        } => runtime.start(&name, no_open, cli.json, port_offset),
+        } => runtime.start(&name, no_open, detach, cli.json, port_offset),
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run { timeout, command } => {
             return runtime
