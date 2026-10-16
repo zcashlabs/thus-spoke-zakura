@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AddressDetail } from '@/features/explorer/AddressDetail';
 import { BlockDetail } from '@/features/explorer/BlockDetail';
 import { TransactionDetail } from '@/features/explorer/TransactionDetail';
+import { MempoolPanel } from '@/features/explorer/MempoolPanel';
+import { WalletActionsContext } from '@/features/wallet/wallet-actions-context';
 import { renderWithProviders, requestUrl } from '@/test/utils';
 import { useServerEvents } from './useServerEvents';
 
@@ -103,6 +105,7 @@ describe('useServerEvents', () => {
       [{ queryKey: ['send-quote'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['blocks'] }],
+      [{ queryKey: ['mempool'] }],
       [{ queryKey: ['block'] }],
       [{ queryKey: ['transaction'] }],
       [{ queryKey: ['address'] }],
@@ -134,6 +137,26 @@ describe('useServerEvents', () => {
 
     expect(screen.queryByText('Loading transaction…')).not.toBeInTheDocument();
     expect(await screen.findByText('4 conf')).toBeInTheDocument();
+  });
+
+  it('removes a mined transaction from the mempool on a chain update', async () => {
+    let transactions = [TXID];
+    routes = { '/mempool': () => ({ transactions }) };
+    renderPage(
+      '/explorer',
+      '/explorer',
+      <WalletActionsContext
+        value={{ openMine: vi.fn(), openSend: vi.fn(), openFaucet: vi.fn(), openRequest: vi.fn() }}
+      >
+        <MempoolPanel />
+      </WalletActionsContext>,
+    );
+    await screen.findByRole('link', { name: TXID });
+    transactions = [];
+    FakeEventSource.current?.emit('chain');
+    expect(await screen.findByText('No transactions are waiting to be mined.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: TXID })).not.toBeInTheDocument();
+    expect(requestsTo('/mempool')).toBe(2);
   });
 
   it('refreshes an open address page on a new block', async () => {

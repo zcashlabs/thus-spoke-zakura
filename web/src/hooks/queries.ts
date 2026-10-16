@@ -7,6 +7,7 @@ import {
   type Block,
   type BlockPage,
   type MiningJob,
+  type Mempool,
   type SendQuote,
   type SendQuoteInput,
   type Status,
@@ -24,6 +25,7 @@ export const queryKeys = {
   activity: (limit: number) => ['activity', limit] as const,
   payment: (key: string) => ['activity', 'payment', key] as const,
   blocks: (before?: number) => ['blocks', before ?? 'tip'] as const,
+  mempool: ['mempool'] as const,
   block: (id: string) => ['block', id] as const,
   transaction: (txid: string) => ['transaction', txid] as const,
   address: (address: string) => ['address', address] as const,
@@ -72,6 +74,15 @@ export function useBlock(id: string): UseQueryResult<Block> {
     queryKey: queryKeys.block(id),
     queryFn: () => api.block(id),
     enabled: id.length > 0,
+  });
+}
+
+export function useMempool(): UseQueryResult<Mempool> {
+  return useQuery({
+    queryKey: queryKeys.mempool,
+    queryFn: api.mempool,
+    // External broadcasts do not advance the chain or emit a server event.
+    refetchInterval: 2_000,
   });
 }
 

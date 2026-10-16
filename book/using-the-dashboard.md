@@ -188,6 +188,14 @@ not exposed as the user-account transfer shown by Recent activity. The
 server's activity record knows the development account IDs, while the
 Explorer follows the public chain.
 
+The **Pending transactions** panel lists transactions the node has received but
+has not yet included in a block. It refreshes automatically, including when an
+external app broadcasts without advancing the chain. Open a transaction ID to
+inspect it before mining. **Mine 1 block** opens the existing mining controls
+with one block selected; confirm there to start the job. Once a transaction is
+mined, it leaves the pending list. An empty list means the node reports no
+pending transactions; a failed read shows an error instead.
+
 ![The Explorer page: a single search field accepting a block height, block hash, transaction ID, or t-address, above a Blocks table listing recent heights with their block hash, transaction count, size, and time.](images/explorer.png)
 
 **Network** shows the node height, tip hash, account count, and published

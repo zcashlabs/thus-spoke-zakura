@@ -2,7 +2,8 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { renderWithProviders } from '@/test/utils';
+import { renderWithProviders, requestUrl } from '@/test/utils';
+import { WalletActionsContext } from '@/features/wallet/wallet-actions-context';
 import { api, ApiError } from '@/lib/api';
 import { ExplorerPage } from './ExplorerPage';
 
@@ -10,26 +11,61 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderAt(path: string) {
-  vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+const TXID = 'ab'.repeat(32);
+
+function renderAt(path: string, transactions: string[] | Error = []) {
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
     Promise.resolve(
-      new Response(JSON.stringify({ blocks: [], next_before: null }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }),
+      new Response(
+        JSON.stringify(
+          requestUrl(input).includes('/mempool')
+            ? transactions instanceof Error
+              ? { error: { message: transactions.message, status: 500 } }
+              : { transactions }
+            : { blocks: [], next_before: null },
+        ),
+        {
+          status:
+            requestUrl(input).includes('/mempool') && transactions instanceof Error ? 500 : 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      ),
     ),
   );
 
   return renderWithProviders(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/explorer/*" element={<ExplorerPage />} />
-      </Routes>
-    </MemoryRouter>,
+    <WalletActionsContext
+      value={{ openMine: vi.fn(), openSend: vi.fn(), openFaucet: vi.fn(), openRequest: vi.fn() }}
+    >
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/explorer/*" element={<ExplorerPage />} />
+        </Routes>
+      </MemoryRouter>
+    </WalletActionsContext>,
   );
 }
 
 describe('ExplorerPage', () => {
+  it('shows pending transaction links before they enter a block', async () => {
+    renderAt('/explorer', [TXID]);
+    expect(await screen.findByRole('link', { name: TXID })).toHaveAttribute(
+      'href',
+      `/explorer/tx/${TXID}`,
+    );
+  });
+
+  it('explains an empty mempool', async () => {
+    renderAt('/explorer');
+    expect(await screen.findByText('No transactions are waiting to be mined.')).toBeInTheDocument();
+  });
+
+  it('reports a failed mempool read instead of claiming it is empty', async () => {
+    renderAt('/explorer', new Error('Zakura unavailable'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/unexpected error/i);
+    expect(screen.queryByText('No transactions are waiting to be mined.')).not.toBeInTheDocument();
+  });
+
   it('explains an unknown explorer path instead of rendering nothing', async () => {
     // `/explorer/*` swallows the app-level catch-all, so this page needs its
     // own fallback or the route is a silent dead end.

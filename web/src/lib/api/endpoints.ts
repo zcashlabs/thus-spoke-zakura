@@ -8,6 +8,7 @@ import {
   addressSchema,
   blockPageSchema,
   blockSchema,
+  mempoolSchema,
   miningJobSchema,
   miningJobResponseSchema,
   paymentRequestSchema,
@@ -65,6 +66,8 @@ export const api = {
   block: (id: string | number) => request(`/blocks/${id}`, blockSchema),
 
   transaction: (txid: string) => request(`/transactions/${txid}`, transactionSchema),
+
+  mempool: () => request('/mempool', mempoolSchema),
 
   address: (address: string) => request(`/addresses/${address}`, addressSchema),
 

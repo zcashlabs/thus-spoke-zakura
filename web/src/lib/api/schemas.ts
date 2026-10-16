@@ -157,6 +157,11 @@ export const blockPageSchema = z.object({
 });
 export type BlockPage = z.infer<typeof blockPageSchema>;
 
+export const mempoolSchema = z.object({
+  transactions: z.array(z.string().regex(/^[0-9a-f]{64}$/i)),
+});
+export type Mempool = z.infer<typeof mempoolSchema>;
+
 /** Transparent inputs. A coinbase input has no previous output to reference. */
 export const txInputSchema = z.looseObject({
   coinbase: z.string().optional(),
