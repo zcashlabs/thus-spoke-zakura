@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { accountSchema, miningJobSchema, miningJobResponseSchema, statusSchema } from './schemas';
+import {
+  accountSchema,
+  miningJobSchema,
+  miningJobResponseSchema,
+  statusSchema,
+  transactionSchema,
+} from './schemas';
 
 const baseStatus = {
   instance: 'default',
@@ -65,6 +71,38 @@ describe('accountSchema', () => {
     const account = accountSchema.parse(legacyAccount);
     expect(account.unified_full_viewing_key).toBeUndefined();
     expect(account.transparent_zatoshi).toBe(123n);
+  });
+});
+
+describe('transactionSchema', () => {
+  const transaction = {
+    txid: 'ab'.repeat(32),
+    vin: [],
+    vShieldedSpend: [],
+    vShieldedOutput: [],
+  };
+
+  it('accepts outputs with distinct node-provided indices', () => {
+    const parsed = transactionSchema.parse({
+      ...transaction,
+      vout: [
+        { n: 0, valueZat: 1 },
+        { n: 1, valueZat: 2 },
+      ],
+    });
+    expect(parsed.vout.map((output) => output.n)).toEqual([0, 1]);
+  });
+
+  it.each([
+    { vout: [{ valueZat: 1 }, { n: 1, valueZat: 2 }] },
+    {
+      vout: [
+        { n: 0, valueZat: 1 },
+        { n: 0, valueZat: 2 },
+      ],
+    },
+  ])('rejects outputs with missing or duplicate indices: $vout', ({ vout }) => {
+    expect(transactionSchema.safeParse({ ...transaction, vout }).success).toBe(false);
   });
 });
 

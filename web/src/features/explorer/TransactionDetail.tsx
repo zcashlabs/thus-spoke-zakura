@@ -58,7 +58,7 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
               <td>
                 {to ? (
                   <Link to={to} className="text-accent-strong font-mono hover:underline">
-                    <span className="block truncate" title={resolved.prevTxid}>
+                    <span className="block truncate" title={resolved.address ?? resolved.prevTxid}>
                       {label}
                     </span>
                   </Link>

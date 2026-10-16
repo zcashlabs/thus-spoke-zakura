@@ -71,7 +71,7 @@ describe('TransactionDetail', () => {
     });
 
     await waitFor(() => expect(screen.getByText('1 transparent input')).toBeInTheDocument());
-    expect(screen.getByText(INPUT_ADDRESS)).toBeInTheDocument();
+    expect(screen.getByText(INPUT_ADDRESS)).toHaveAttribute('title', INPUT_ADDRESS);
     expect(screen.getByText('1 ZEC')).toBeInTheDocument();
   });
 
@@ -170,6 +170,7 @@ describe('TransactionDetail', () => {
     });
 
     expect(await screen.findByText('Some input details are unavailable')).toBeInTheDocument();
+    expect(screen.getByTitle(PREV_TXID)).toHaveTextContent(PREV_TXID.slice(0, 8));
     expect(screen.getByText(/could not resolve one or more previous outputs/i)).toBeInTheDocument();
     expect(screen.getByText('Previous output details unavailable')).toBeInTheDocument();
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
