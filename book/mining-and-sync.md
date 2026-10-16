@@ -59,6 +59,16 @@ The dashboard reads `GET /api/v1/mining/jobs` for the latest job, or
 the same block count returns the same job within that server lifetime; a
 fresh CLI invocation requests new mining.
 
+Before starting a job, the dashboard retains its idempotency key in browser
+session storage. If browser policy denies storage access or the key cannot be
+saved, the Mine dialog stays open and shows a storage error; no mining request
+is sent. Allow site storage before retrying. After an uncertain response, keep
+the existing session storage so a retry can reuse the same key.
+
+If storage cleanup fails after the server accepts a job, the dashboard still
+shows the accepted job and follows its progress. The dialog reports cleanup
+failure separately; it does not mean the mining request was rejected.
+
 Read the node and wallet view through the running instance's API:
 
 ```console
