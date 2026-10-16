@@ -46,8 +46,7 @@ blocks; the public explorer cannot identify their recipient or read a memo.
 
 This Regtest chain activates NU7 at height 1. The API offers transparent and
 Ironwood pools; it rejects `orchard` because Orchard no longer accepts deposits
-under NU6.3. Ironwood is this chain's shielded pool; `orchard` is not an alias
-for `ironwood`.
+under NU6.3. Ironwood is this chain's shielded pool;
 
 ![Mining pays every block reward to hidden Account 6's transparent balance; shielding a matured reward moves it to Account 6's Ironwood balance, which is the pool every faucet payment spends from into accounts 1 to 5.](images/account-pools.svg)
 
