@@ -66,6 +66,8 @@ The dialog does the fee arithmetic for you. As soon as it has an account and
 a pool it asks `POST /api/v1/send/quote`, and the hint under the amount field
 shows the quoted spendable amount and network fee for that account and pool.
 The **Max** button fills in that spendable figure. An amount above it is rejected.
+An amount above 21,000,000 ZEC, the maximum supply, is rejected before the
+request is sent.
 
 ![The Send ZEC dialog over the Wallet page: Payment request input and Apply button above From account 1 and Ironwood Source pool, Destination Account 2 and Ironwood Destination pool, Amount (ZEC) 1 with Max and a live fee quote, and the memo hello from Regtest with its UTF-8 byte count.](images/send.png)
 
@@ -120,9 +122,10 @@ Ironwood recipient addresses.
 This calls `POST /api/v1/zip321/request` and displays a
 copyable URI and QR code for that account's unified address.
 
-A blank amount lets the sender choose; this generates a request and moves no funds. Editing
-any field hides the previous result until you generate again. Memos use the
-same 512-byte text limit. The memo encoded in the URI or QR code is readable
+A blank amount lets the sender choose; this generates a request and moves no funds.
+An amount above 21,000,000 ZEC is rejected. Editing any field hides the previous
+result until you generate again. Memos use the same 512-byte text limit. The memo
+encoded in the URI or QR code is readable
 to anyone holding the request; transaction memo encryption occurs only when
 an actual Ironwood payment is made. Generation does not read received
 transaction memos.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sendSchema } from './schemas';
+import { requestSchema, sendSchema } from './schemas';
 
 const base = {
   from_account: '1',
@@ -100,6 +100,22 @@ describe('sendSchema', () => {
     }
   });
 
+  it('accepts the 21,000,000 ZEC supply and rejects anything above it', () => {
+    const atSupply = sendSchema.safeParse({ ...base, amount: '21000000' });
+    expect(atSupply.success).toBe(true);
+    if (atSupply.success) expect(atSupply.data.amount).toBe(2_100_000_000_000_000n);
+
+    for (const amount of ['21000000.00000001', '21000001']) {
+      const result = sendSchema.safeParse({ ...base, amount });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.find((issue) => issue.path[0] === 'amount')?.message).toBe(
+          'Amount must not exceed 21,000,000 ZEC.',
+        );
+      }
+    }
+  });
+
   it('accepts a memo to an ironwood destination', () => {
     expect(memoIssue({ ...base, memo: 'rent for October' })).toBeUndefined();
     expect(sendSchema.safeParse({ ...base, memo: 'rent for October' }).success).toBe(true);
@@ -122,5 +138,26 @@ describe('sendSchema', () => {
   it('refuses a memo ending in NUL', () => {
     expect(memoIssue({ ...base, memo: 'hi\0' })).toMatch(/NUL/);
     expect(memoIssue({ ...base, memo: 'a\0b' })).toBeUndefined();
+  });
+});
+
+describe('requestSchema', () => {
+  const request = { account_id: '1', amount: '', memo: '' };
+
+  it('accepts a blank amount and the 21,000,000 ZEC supply', () => {
+    expect(requestSchema.safeParse(request).success).toBe(true);
+    const atSupply = requestSchema.safeParse({ ...request, amount: '21000000' });
+    expect(atSupply.success).toBe(true);
+    if (atSupply.success) expect(atSupply.data.amount).toBe(2_100_000_000_000_000n);
+  });
+
+  it('rejects an amount above the 21,000,000 ZEC supply', () => {
+    const result = requestSchema.safeParse({ ...request, amount: '21000001' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.find((issue) => issue.path[0] === 'amount')?.message).toBe(
+        'Amount must not exceed 21,000,000 ZEC.',
+      );
+    }
   });
 });

@@ -112,6 +112,15 @@ describe('RequestDialog', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('rejects an amount above the 21,000,000 ZEC supply', async () => {
+    renderWithProviders(<RequestDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await userEvent.type(screen.getByLabelText('Amount (ZEC, optional)'), '21000001');
+
+    expect(await screen.findByText('Amount must not exceed 21,000,000 ZEC.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate request' })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('never exposes a stale request while generation is pending', async () => {
     let resolveSecond: ((response: Response) => void) | undefined;
     fetchMock.mockRestore();

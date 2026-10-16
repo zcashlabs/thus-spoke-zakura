@@ -723,6 +723,14 @@ describe('SendDialog', () => {
     expect(sendCalls(fetchMock)).toHaveLength(0);
   });
 
+  it('refuses an amount above the 21,000,000 ZEC supply without calling the API', async () => {
+    await submitAmount('21000001');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Amount must not exceed 21,000,000 ZEC.',
+    );
+    expect(sendCalls(fetchMock)).toHaveLength(0);
+  });
+
   it('refuses more than eight decimal places without calling the API', async () => {
     await submitAmount('0.000000001');
     expect(await screen.findByRole('alert')).toHaveTextContent('8 decimal places');
