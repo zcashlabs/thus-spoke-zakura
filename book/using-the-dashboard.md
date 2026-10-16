@@ -100,9 +100,14 @@ the UI action or the command for one intended payment.
 1. **Pair 1 — where the money comes from.** The source account is one of
    1–5, and the source pool decides what is spent: `transparent` spends
    that account's UTXOs, `ironwood` spends its shielded notes.
-2. **Pair 2 — what the receiver gets.** The destination account is one of
-   1–5 and may match the source when the pools differ. `ironwood` pays its unified address;
-   `transparent` pays its t-address.
+2. **Pair 2 — what the receiver gets.** Choose a **Destination** account
+   from 1–5, or select **Other address** and fill in **Destination address**.
+   For an account, `ironwood` pays its unified address and `transparent` pays
+   its t-address. The account may match the source when the pools differ.
+   For **Other address**, use a transparent Regtest address or a unified
+   Regtest address with an Ironwood receiver. The dialog chooses
+   **Destination pool** from the address and the server validates it before
+   sending.
 3. **The fee is on top of the amount**, taken from the source account. That
    is why `max_zatoshi` from the quote, not the balance, is the ceiling.
 4. **A transparent source rarely spends exactly.** Transparent inputs must
@@ -129,14 +134,17 @@ Ironwood recipient addresses.
 ## Create a request for another sender
 
 - On Wallet, select **Request** to open **Request ZEC**.
-- Choose **Receivingaccount**, optionally enter **Amount (ZEC, optional)** and a memo, then select **Generate request**.
+- Choose **Receiving account**, optionally enter **Amount (ZEC, optional)** and a memo, then select **Generate request**.
 
 This calls `POST /api/v1/zip321/request` and displays a
 copyable URI and QR code for that account's unified address.
 
-A blank amount lets the sender choose; this generates a request and moves no funds. Editing
-any field hides the previous result until you generate again. Memos use the
-same 512-byte text limit. The memo encoded in the URI or QR code is readable
+A blank amount lets the sender choose; this generates a request and moves no funds.
+Editing any field hides the generated URI and QR code while the values differ
+from those used to generate them. Restoring the same values shows the result
+again without regenerating. To create a request with different values, select
+**Generate request** again. Memos use the same 512-byte text limit.
+The memo encoded in the URI or QR code is readable
 to anyone holding the request; transaction memo encryption occurs only when
 an actual Ironwood payment is made. Generation does not read received
 transaction memos.
