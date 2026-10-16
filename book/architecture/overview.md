@@ -80,9 +80,9 @@ For the exact container and endpoint lifecycle, revisit [Chapter
 1](../getting-started.md). For the meaning of an account
 balance, continue to [Chapter 3](../accounts-and-balances.md).
 
-**Source map:** [launcher runtime](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-cli/src/runtime.rs),
-[server startup](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/main.rs),
-[API snapshot](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/api.rs),
+**Source map:** [launcher runtime](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/crates/ths-cli/src/runtime),
+[server startup](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/bootstrap.rs),
+[wallet snapshot](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/sync.rs),
 [reconciliation](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/reconcile.rs),
 and [dashboard queries](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/web/src/hooks/queries.ts).
 

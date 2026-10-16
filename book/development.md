@@ -64,10 +64,14 @@ use `cargo run -p thus-spoke-zakura -- --name alice wait --timeout 180`.
 
 | Need | Start reading |
 | --- | --- |
-| Launcher commands, Docker ports, instance cleanup | `crates/ths-cli/src/main.rs` and `runtime.rs` |
-| Server routes, payment and mine handlers, wallet snapshot | `crates/ths-server/src/api.rs` |
-| User accounts, treasury boundary, activity and keys | `crates/ths-server/src/db.rs` |
-| Wallet scan, transaction construction, spendability | `crates/ths-server/src/wallet.rs` |
+| Launcher commands and flags | `crates/ths-cli/src/args.rs` and `commands.rs` |
+| Docker ports, instance startup and cleanup | `crates/ths-cli/src/runtime/`, starting with `instance.rs`, `startup.rs`, and `cleanup.rs` |
+| Server routes | `crates/ths-server/src/api.rs` |
+| Payment and mine handlers | `crates/ths-server/src/api/payments.rs` and `api/mining.rs` |
+| Payment progression, confirmation, and treasury replenishment | `crates/ths-server/src/payments/` |
+| Wallet snapshot and sync status | `crates/ths-server/src/state.rs` and `sync.rs` |
+| User accounts, treasury boundary, activity and keys | `crates/ths-server/src/db.rs` and `db/` |
+| Wallet scan, transaction construction, spendability | `crates/ths-server/src/wallet.rs` and `wallet/payments.rs` |
 | Canonical checkpoint and reorganization handling | `crates/ths-server/src/reconcile.rs` |
 | Dashboard requests, schemas, and query invalidation | `web/src/lib/api/` and `web/src/hooks/` |
 
