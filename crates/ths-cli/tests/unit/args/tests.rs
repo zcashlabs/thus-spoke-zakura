@@ -322,3 +322,38 @@ fn shield_and_unshield_accept_exactly_one_amount_mode() {
         assert!(parse(&["--amount", "1", "--max"]).is_err());
     }
 }
+
+#[test]
+fn completions_accept_only_bash_zsh_and_fish() {
+    for (shell, expected) in [
+        ("bash", CompletionShell::Bash),
+        ("zsh", CompletionShell::Zsh),
+        ("fish", CompletionShell::Fish),
+    ] {
+        let cli = Cli::try_parse_from(["ths", "completions", shell]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions { shell }) if shell == expected
+        ));
+    }
+
+    let cli =
+        Cli::try_parse_from(["ths", "--name", "alice", "--json", "completions", "zsh"]).unwrap();
+    assert!(cli.json);
+    assert_eq!(cli.name.unwrap().to_string(), "alice");
+    assert!(matches!(
+        cli.command,
+        Some(Command::Completions {
+            shell: CompletionShell::Zsh
+        })
+    ));
+
+    assert!(Cli::try_parse_from(["ths", "completions"]).is_err());
+    assert!(Cli::try_parse_from(["ths", "completions", "zsh", "bash"]).is_err());
+    for shell in ["", " ", "powershell", "elvish", "ZSH", "Bash", "nu"] {
+        assert!(
+            Cli::try_parse_from(["ths", "completions", shell]).is_err(),
+            "accepted shell {shell:?}"
+        );
+    }
+}

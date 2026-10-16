@@ -421,6 +421,7 @@ Running `ths` with no command starts the default environment.
 | `ths update --check` | Check for a newer release |
 | `ths update` | Install the latest verified release |
 | `ths uninstall` | Remove the installed launcher executable |
+| `ths completions bash\|zsh\|fish` | Print a shell completion script that covers every command and flag |
 
 Everything under `ths wallet` acts on the development wallet held by the
 running `ths` server. See [book/cli.md](book/cli.md) for the full command
@@ -445,6 +446,35 @@ ths --name alice start --port-offset 10
 `--port-offset` is a multiple of 10 added to every default host port
 (dashboard 32815, RPC 18242, P2P 18243, lightwalletd 9077). If those binds
 are taken, start fails rather than remapping.
+
+### Shell completions
+
+`ths completions` prints a completion script for bash, zsh, or fish. The
+script covers every command and flag. It does not start an environment.
+Save it where your shell loads completions, then open a new terminal.
+
+```console
+# bash (requires the bash-completion package)
+mkdir -p ~/.local/share/bash-completion/completions
+ths completions bash > ~/.local/share/bash-completion/completions/ths
+
+# zsh
+mkdir -p ~/.zsh/completions
+ths completions zsh > ~/.zsh/completions/_ths
+
+# fish
+mkdir -p ~/.config/fish/completions
+ths completions fish > ~/.config/fish/completions/ths.fish
+```
+
+Zsh loads `~/.zsh/completions` only when that directory is on `fpath` before
+`compinit`. Add this to `~/.zshrc` if it is not already there:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -U compinit
+compinit
+```
 
 ## Develop from source
 

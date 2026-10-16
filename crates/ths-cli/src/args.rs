@@ -123,6 +123,12 @@ pub(crate) enum Command {
     List,
     /// Check local Docker and configuration prerequisites.
     Doctor,
+    /// Print a shell completion script.
+    Completions {
+        /// Shell that will load the script.
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +236,24 @@ pub(crate) struct SendArgs {
     /// Text memo for the recipient (up to 512 bytes; ironwood destinations only).
     #[arg(long, value_parser = parse_memo)]
     pub(crate) memo: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub(crate) enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl CompletionShell {
+    pub(crate) fn generator(self) -> clap_complete::Shell {
+        match self {
+            Self::Bash => clap_complete::Shell::Bash,
+            Self::Zsh => clap_complete::Shell::Zsh,
+            Self::Fish => clap_complete::Shell::Fish,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]

@@ -645,6 +645,38 @@ account 1 to account 3, all without opening the dashboard.
 
 ---
 
+## `ths completions bash|zsh|fish`
+
+Prints a completion script for bash, zsh, or fish. The script covers every
+`ths` command and flag, including `wallet` subcommands. It does not start an
+environment or contact Docker. Save it where your shell loads completions,
+then open a new terminal.
+
+```console
+# bash (requires the bash-completion package)
+mkdir -p ~/.local/share/bash-completion/completions
+ths completions bash > ~/.local/share/bash-completion/completions/ths
+
+# zsh
+mkdir -p ~/.zsh/completions
+ths completions zsh > ~/.zsh/completions/_ths
+
+# fish
+mkdir -p ~/.config/fish/completions
+ths completions fish > ~/.config/fish/completions/ths.fish
+```
+
+Zsh loads `~/.zsh/completions` only when that directory is on `fpath` before
+`compinit`:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -U compinit
+compinit
+```
+
+---
+
 ## Command summary
 
 | Command | What it does |
@@ -675,6 +707,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths doctor` | Check Docker and local configuration |
 | `ths update [--check]` | Check for or install a newer release |
 | `ths uninstall` | Remove the installed launcher executable |
+| `ths completions bash\|zsh\|fish` | Print a shell completion script for every command and flag |
 
 Every command accepts `--name` for isolated environments. For more on running
 them side by side, see [Chapter

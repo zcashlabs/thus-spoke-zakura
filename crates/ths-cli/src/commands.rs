@@ -1,9 +1,11 @@
 mod wallet;
 
-use std::{process::ExitCode, time::Duration};
+use std::{io::Write, process::ExitCode, time::Duration};
+
+use clap::CommandFactory;
 
 use crate::{
-    args::{Cli, Command, Pool, SendArgs, WalletCommand},
+    args::{Cli, Command, CompletionShell, Pool, SendArgs, WalletCommand},
     runtime::{InstanceName, Runtime},
     updater,
 };
@@ -18,6 +20,11 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
     if matches!(cli.command, Some(Command::Uninstall)) {
         return updater::uninstall();
+    }
+    // The script is the entire stdout. Runtime discovery and the startup
+    // update notice must not run first, or they would corrupt it.
+    if let Some(Command::Completions { shell }) = cli.command {
+        return print_completions(shell);
     }
     if should_check_for_updates(&cli)
         && let Some(notice) = updater::startup_notice()
@@ -113,8 +120,31 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Reset { force } => runtime.reset(&name, force),
         Command::List => runtime.list(cli.json),
         Command::Doctor => runtime.doctor(cli.json),
+        Command::Completions { .. } => {
+            unreachable!("completions are printed before runtime discovery")
+        }
     }?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_completions(shell: CompletionShell) -> anyhow::Result<ExitCode> {
+    let mut script = Vec::new();
+    write_completions(shell, &mut script);
+    let mut stdout = std::io::stdout().lock();
+    // A preview such as `ths completions zsh | head` closes stdout early.
+    // clap_complete treats that write error as fatal; a completion script is
+    // not a failed command when the reader stops.
+    if let Err(error) = stdout.write_all(&script).and_then(|()| stdout.flush())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(error.into());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn write_completions(shell: CompletionShell, buf: &mut dyn Write) {
+    let mut command = Cli::command();
+    clap_complete::generate(shell.generator(), &mut command, "ths", buf);
 }
 
 fn should_check_for_updates(cli: &Cli) -> bool {
