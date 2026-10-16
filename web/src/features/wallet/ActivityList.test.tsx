@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { renderWithProviders } from '@/test/utils';
 import { ApiError } from '@/lib/api';
 import { ActivityList } from './ActivityList';
@@ -55,6 +56,60 @@ describe('ActivityList same-account transfers', () => {
     expect(within(row!).getByText(source)).toBeInTheDocument();
     expect(within(row!).getByText(destination)).toBeInTheDocument();
     expect(screen.getByText('1 event')).toBeInTheDocument();
+  });
+});
+
+function CurrentRoute() {
+  return <output aria-label="Current route">{useLocation().pathname}</output>;
+}
+
+describe('ActivityList error row', () => {
+  const txid = 'ab'.repeat(32);
+
+  function renderFailedSend() {
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/wallet']}>
+        <CurrentRoute />
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'failed-send',
+                kind: 'send',
+                from_account: 1,
+                to_account: 2,
+                to_address: null,
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 1_000_000n,
+                txid,
+                block_hash: null,
+                status: 'failed',
+                last_error: 'transaction expired',
+                created_at: '2026-10-02 12:00:00',
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('opens the transaction on a plain click', async () => {
+    renderFailedSend();
+    await userEvent.click(screen.getByText('Failed: transaction expired'));
+    expect(screen.getByLabelText('Current route')).toHaveTextContent(`/explorer/tx/${txid}`);
+  });
+
+  it('stays on the current page on a modifier click', async () => {
+    const user = userEvent.setup();
+    renderFailedSend();
+    await user.keyboard('{Meta>}');
+    await user.click(screen.getByText('Failed: transaction expired'));
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('/wallet');
   });
 });
 

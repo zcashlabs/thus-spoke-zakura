@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/cn';
+import { useRowNavigation } from './row-navigation';
 
 /**
  * One table shell for every tabular surface, so the activity log and the block
@@ -56,7 +56,7 @@ export function Row({
   to?: string;
   className?: string;
 }) {
-  const navigate = useNavigate();
+  const openRow = useRowNavigation(to);
 
   return (
     <tr
@@ -65,7 +65,7 @@ export function Row({
       // row's implicit `row` role and strip the table relationships; keyboard
       // and screen reader users navigate via the link inside the first cell,
       // which every clickable row is required to carry.
-      onClick={to ? () => void navigate(to) : undefined}
+      onClick={openRow}
       className={cn(
         'border-line hover:bg-accent-soft animate-fade-in border-b transition-colors last:border-b-0',
         '[&>td]:px-5 [&>td]:py-3.5 [&>td]:align-middle',

@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { AlertTriangle, ArrowDownToLine, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { absoluteTime, shortHash, timeAgo } from '@/lib/format';
@@ -10,6 +10,7 @@ import { SkeletonRows } from '@/components/ui/Skeleton';
 import { Badge } from '@/components/ui/Badge';
 import { statusTone } from '@/components/ui/status-tone';
 import { DataTable, NumCell, Row, type Column } from '@/components/ui/DataTable';
+import { useRowNavigation } from '@/components/ui/row-navigation';
 import { Panel } from '@/components/ui/Panel';
 
 const COLUMNS: Column[] = [
@@ -48,7 +49,7 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
   const transfer = isFaucet
     ? `Faucet → ${recipientLabel(activity)}`
     : `Account ${activity.from_account ?? '?'} → ${recipientLabel(activity)}`;
-  const navigate = useNavigate();
+  const openTransaction = useRowNavigation(transactionPath);
 
   return (
     <>
@@ -125,7 +126,7 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
       {activity.last_error && (
         <tr
           style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
-          onClick={transactionPath ? () => void navigate(transactionPath) : undefined}
+          onClick={openTransaction}
           className={cn(
             'border-line hover:bg-accent-soft animate-fade-in border-b transition-colors last:border-b-0',
             transactionPath && 'cursor-pointer',
