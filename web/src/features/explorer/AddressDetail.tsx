@@ -5,7 +5,8 @@ import { DataRow, Panel, PanelNote } from '@/components/ui/Panel';
 import { CopyButton } from '@/components/ui/CopyButton';
 import { Badge } from '@/components/ui/Badge';
 import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
-import { useAddress } from '@/hooks/queries';
+import { useAccounts, useAddress } from '@/hooks/queries';
+import { AccountLabel } from './AccountLabel';
 import { errorMessage } from '@/lib/api';
 import { formatZecAmount } from '@/lib/money';
 import { shortHash } from '@/lib/format';
@@ -15,6 +16,7 @@ import { BACK_LINK } from './back-link';
 export function AddressDetail() {
   const { address = '' } = useParams<{ address: string }>();
   const info = useAddress(address);
+  const accounts = useAccounts();
 
   if (info.isPending) return <LoadingState label="Loading address…" />;
   if (info.isError) {
@@ -70,6 +72,9 @@ export function AddressDetail() {
           </DataRow>
           <DataRow label="Type">Transparent</DataRow>
         </dl>
+        <div className="px-5">
+          <AccountLabel accounts={accounts.data} address={info.data.address} />
+        </div>
         <PanelNote>
           Only transparent addresses have public balances. Shielded funds held by this account are
           not represented here, and no amount of chain data would reveal them.

@@ -20,6 +20,20 @@ history, supplies these balances.
 
 ![The Wallet page: a total balance banner over five account cards, each showing Ironwood and transparent balances, a truncated unified address, and Fund and Send buttons. Request and Send ZEC controls sit above the cards, Faucet and Mine are in the header, and Recent activity is below.](images/wallet.png)
 
+Select an account's name to open its detail page. The full unified address and
+transparent address each have a copy button. The unified full viewing key is
+also shown and copyable when the server supplies it; an older server that omits
+the key simply has no viewing-key row. These pages cover development accounts
+1–5 only.
+
+Explorer also recognises those accounts. Searching the exact unified address of
+a local account opens the same account page. Known transparent addresses in
+transaction and address views have an **Account N** link beside their public
+chain information. Unknown transparent addresses keep their normal Explorer
+view; an unknown unified address still has no public chain-history page.
+Viewing keys appear only on the account detail page, not in Explorer rows or
+search results.
+
 Two buttons open the faucet, and they are labelled differently. **Faucet**
 in the page header is the general one, and it only appears on Wallet — the
 Explorer and Network pages show just **Mine**. On each account card,

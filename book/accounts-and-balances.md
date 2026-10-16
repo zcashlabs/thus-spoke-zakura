@@ -32,6 +32,13 @@ it does **not** give you different keys.
 Use `ths wallet balances` or `GET /api/v1/accounts` to read the five addresses
 for the instance you are using.
 
+In the dashboard, select a Wallet account's name to inspect and copy its full
+unified and transparent addresses. Its stable page is `/wallet/accounts/1`
+through `/wallet/accounts/5`. The page also offers the unified full viewing key
+when the server includes it; it never shows spending keys. Searching a known
+local unified address in Explorer reaches this same account page. That is a
+wallet identity lookup, not a public history lookup for a shielded address.
+
 Say that plainly: these keys are public knowledge. Anyone who has read this
 project can derive every address and every spending key your instance uses.
 That is fine, because it is what makes the environment disposable and

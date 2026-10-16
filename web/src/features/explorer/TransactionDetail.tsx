@@ -6,8 +6,9 @@ import { Badge } from '@/components/ui/Badge';
 import { DataTable, NumCell, Row, type Column } from '@/components/ui/DataTable';
 import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
 import { SakuraMark } from '@/components/ui/SakuraMark';
-import { useTransaction } from '@/hooks/queries';
-import { errorMessage, type TxInput } from '@/lib/api';
+import { useAccounts, useTransaction } from '@/hooks/queries';
+import { errorMessage, type Account, type TxInput } from '@/lib/api';
+import { AccountLabel } from './AccountLabel';
 import { formatZecAmount } from '@/lib/money';
 import { chainTime, shortHash } from '@/lib/format';
 import { actionSummary, summariseShielding, transactionFee } from './shielding';
@@ -32,7 +33,7 @@ function inputKey(input: TxInput, index: number): string {
     : String(index);
 }
 
-function PublicInputs({ vin }: { vin: TxInput[] }) {
+function PublicInputs({ vin, accounts }: { vin: TxInput[]; accounts: Account[] | undefined }) {
   // The server resolves every prevout before it hands the transaction over, so
   // refetching each previous transaction here would repeat that work — and each
   // refetch triggers another round of it server-side.
@@ -65,6 +66,9 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
                 ) : (
                   <span className="text-ink block truncate font-mono">{label}</span>
                 )}
+                {resolved.address && (
+                  <AccountLabel accounts={accounts} address={resolved.address} />
+                )}
               </td>
               <NumCell className="font-semibold">
                 {resolved.valueZat === undefined ? '—' : formatZecAmount(BigInt(resolved.valueZat))}
@@ -80,6 +84,7 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
 export function TransactionDetail() {
   const { txid = '' } = useParams<{ txid: string }>();
   const transaction = useTransaction(txid);
+  const accounts = useAccounts();
 
   if (transaction.isPending) return <LoadingState label="Loading transaction…" />;
   if (transaction.isError) {
@@ -227,7 +232,7 @@ export function TransactionDetail() {
         )}
       </Panel>
 
-      {tx.vin.length > 0 && <PublicInputs vin={tx.vin} />}
+      {tx.vin.length > 0 && <PublicInputs vin={tx.vin} accounts={accounts.data} />}
 
       {tx.vout.length > 0 && (
         <Panel
@@ -255,6 +260,7 @@ export function TransactionDetail() {
                     ) : (
                       <span className="text-ink-muted block truncate font-mono">—</span>
                     )}
+                    {address && <AccountLabel accounts={accounts.data} address={address} />}
                   </td>
                   <NumCell className="font-semibold">
                     {out.valueZat === undefined ? '—' : formatZecAmount(BigInt(out.valueZat))}

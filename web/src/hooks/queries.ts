@@ -1,4 +1,5 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { userAccounts } from '@/lib/accounts';
 import {
   api,
   type Account,
@@ -34,8 +35,10 @@ export function useStatus(): UseQueryResult<Status> {
   return useQuery({ queryKey: queryKeys.status, queryFn: api.status });
 }
 
+export const accountsQueryOptions = { queryKey: queryKeys.accounts, queryFn: () => api.accounts() };
+
 export function useAccounts(): UseQueryResult<Account[]> {
-  return useQuery({ queryKey: queryKeys.accounts, queryFn: api.accounts });
+  return useQuery({ ...accountsQueryOptions, select: userAccounts });
 }
 
 export function useActivity(limit = 30): UseQueryResult<Activity[]> {
