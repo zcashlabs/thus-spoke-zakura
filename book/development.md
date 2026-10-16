@@ -165,3 +165,10 @@ recovery, and queued-response cases on every push and PR. The other cases in
 `tests/activity_recovery.rs` cover startup funding, pool transfers, and
 external faucets. The fixture owns and cleans up only its own Docker resources;
 it fails on a timeout or incomplete cleanup.
+
+The reorg/rollback regression observes the server's `SendTransaction` calls
+through the existing gRPC proxy to check that rollback, idempotent replay, and
+restart do not rebroadcast orphaned payments. Mempool absence is not that proof:
+Zakura's own RPC retry queue can re-admit an earlier submission even while the
+server is stopped. Canonical inclusion, balances, signed bytes, payment identity,
+and the reconciled wallet checkpoint are checked separately.

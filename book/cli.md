@@ -346,8 +346,11 @@ ths wait
 ```
 
 Without `--keep-txs`, ths does not rebroadcast dropped transactions; replacement
-mining still uses the node's mempool. With it, ths attempts to reinclude the
-original non-coinbase transactions and verifies their replacement-block inclusion.
+mining still uses the node's mempool. Zakura can independently requeue a prior
+RPC submission, so neither rollback nor reorg guarantees an empty mempool or
+prevents later inclusion of a dropped transaction. With `--keep-txs`, ths
+attempts to reinclude the original non-coinbase transactions and verifies their
+replacement-block inclusion.
 Invalid anchors or other admission failures may prevent reinclusion. Failures
 are reported in both output modes; `--json` also lists `retained_txids` and
 `failed_transactions`. The CLI exits nonzero if any transaction was not retained,
@@ -360,6 +363,8 @@ wallet snapshot restore: unexpired local transactions can still reserve inputs.
 The server owns admitted work after client disconnection. An error or lost
 response can follow a partial chain change; inspect the current tip before
 retrying. Neither invalidation nor replacement mining is automatically retried.
+Transient lightwalletd read failures during reorg repair are retried within the
+wallet synchronization deadline, without repeating the chain mutation.
 
 ---
 

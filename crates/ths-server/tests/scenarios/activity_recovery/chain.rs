@@ -3,8 +3,13 @@ use super::*;
 pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_state() -> Result<()> {
     for keep_txs in [false, true] {
         let mut fixture = RegtestStack::new(PathBuf::from(env!("CARGO_BIN_EXE_ths-server")))?;
+        let mut broadcast_proxy = None;
         let scenario = async {
             fixture.start().await?;
+            broadcast_proxy =
+                Some(QueuedBroadcastProxy::start(fixture.lightwalletd_port()?).await?);
+            let proxy = broadcast_proxy.as_ref().unwrap();
+            fixture.restart_with_lightwalletd(proxy.port()).await?;
             let client = Client::new();
             let ancestor_accounts: Vec<serde_json::Value> = request_json(
                 &client,
@@ -32,7 +37,13 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
                 Some(&body),
                 SEND_TIMEOUT,
             )
-            .await?;
+            .await
+            .context("confirming original payment")?;
+            let original_broadcasts = proxy.broadcast_counts();
+            anyhow::ensure!(
+                original_broadcasts.0 > 0,
+                "original broadcast was not observed"
+            );
             let original_transactions = constructed_transactions(fixture.data_dir())?;
             let original_journal = prepared_payment_journal(fixture.data_dir())?;
             let _: serde_json::Value = request_json(
@@ -42,7 +53,8 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
                 Some(&json!({"blocks":2})),
                 SEND_TIMEOUT,
             )
-            .await?;
+            .await
+            .context("mining original suffix")?;
             let before: ChainInfo =
                 rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
             let ancestor: String = rpc(
@@ -67,7 +79,13 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
                 Some(&json!({"depth":3,"keep_txs":keep_txs})),
                 SEND_TIMEOUT,
             )
-            .await?;
+            .await
+            .context("reorging original suffix")?;
+            let broadcasts_after_reorg = proxy.broadcast_counts();
+            anyhow::ensure!(
+                keep_txs || broadcasts_after_reorg == original_broadcasts,
+                "reorg without keep_txs rebroadcast a payment"
+            );
             anyhow::ensure!(
                 result["old_tip"]["height"] == before.blocks
                     && result["new_tip"]["height"] == before.blocks,
@@ -187,7 +205,8 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
                 Some(&json!({"depth":3})),
                 SEND_TIMEOUT,
             )
-            .await?;
+            .await
+            .context("rolling back replacement suffix")?;
             anyhow::ensure!(
                 rollback["new_tip"]["height"] == before.blocks - 3
                     && rollback["new_tip"]["hash"] == ancestor
@@ -270,10 +289,10 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
                     && prepared_payment_journal(fixture.data_dir())? == original_journal,
                 "rollback/restart changed the saved payment or signed transactions"
             );
-            let mempool: Vec<String> =
-                rpc(&client, fixture.node_url(), "getrawmempool", json!([])).await?;
+            // Zakura can requeue a prior RPC submission independently of ths.
+            // Observe ths's gRPC submissions, not the node's mempool contents.
             anyhow::ensure!(
-                !mempool.contains(&original.txid),
+                proxy.broadcast_counts() == broadcasts_after_reorg,
                 "orphaned payment was rebroadcast after rollback/restart"
             );
             let wallet = Connection::open_with_flags(
@@ -306,7 +325,11 @@ pub(super) async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_sta
         }
         .await;
         let cleanup = fixture.shutdown().await;
-        preserve_scenario_failure(scenario, cleanup)?;
+        let proxy_cleanup = match broadcast_proxy.as_mut() {
+            Some(proxy) => proxy.shutdown().await,
+            None => Ok(()),
+        };
+        preserve_scenario_failure(scenario, preserve_scenario_failure(cleanup, proxy_cleanup))?;
     }
     Ok(())
 }

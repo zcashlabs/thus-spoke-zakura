@@ -94,11 +94,14 @@ pub(crate) fn startup_retryable(error: &anyhow::Error) -> bool {
         return error.code == -28;
     }
     if let Some(error) = error.downcast_ref::<tonic::Status>() {
+        // lightwalletd aborts block streams while repairing its cache after a
+        // reorg. Restart readiness/synchronization, not the chain mutation.
         return matches!(
             error.code(),
             tonic::Code::Unavailable
                 | tonic::Code::DeadlineExceeded
                 | tonic::Code::ResourceExhausted
+                | tonic::Code::Aborted
         );
     }
     error.downcast_ref::<tonic::transport::Error>().is_some()
