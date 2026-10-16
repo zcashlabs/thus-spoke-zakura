@@ -1,5 +1,5 @@
 import { Search } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { classifyQuery } from './classify-query';
 import { Button } from '@/components/ui/Button';
@@ -10,6 +10,16 @@ export function SearchBar() {
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [resolving, setResolving] = useState(false);
+  // ExplorerPage remounts this bar on every navigation, so once it unmounts
+  // the user has moved on and a late search result must be ignored.
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -30,10 +40,12 @@ export function SearchBar() {
     void api
       .search(result.hash)
       .then(({ type }) => {
+        if (!mounted.current) return;
         const prefix = type === 'block' ? 'block' : 'tx';
         void navigate(`/explorer/${prefix}/${result.hash}`);
       })
       .catch((error: unknown) => {
+        if (!mounted.current) return;
         if (error instanceof ApiError && error.status === 404) {
           setError('No block or transaction on this chain has that hash.');
         } else if (error instanceof TypeError) {
@@ -42,7 +54,9 @@ export function SearchBar() {
           setError(errorMessage(error));
         }
       })
-      .finally(() => setResolving(false));
+      .finally(() => {
+        if (mounted.current) setResolving(false);
+      });
   };
 
   return (

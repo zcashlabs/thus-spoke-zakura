@@ -1,4 +1,4 @@
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Route, Routes, useLocation } from 'react-router-dom';
 import { SearchBar } from './SearchBar';
 import { BlockList } from './BlockList';
 import { BlockDetail } from './BlockDetail';
@@ -8,9 +8,12 @@ import { ErrorState } from '@/components/ui/StateBlock';
 import { BACK_LINK } from './back-link';
 
 export function ExplorerPage() {
+  const { key } = useLocation();
+
   return (
     <>
-      <SearchBar />
+      {/* A fresh search bar per navigation, even to the same page, drops any pending search. */}
+      <SearchBar key={key} />
       <Routes>
         <Route index element={<BlockList />} />
         <Route path="block/:id" element={<BlockDetail />} />
