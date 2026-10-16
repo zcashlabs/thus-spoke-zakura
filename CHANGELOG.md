@@ -4,6 +4,11 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
+- **Wallet quotes from the CLI:** `ths wallet quote --from <N> --source-pool
+  <POOL> --destination-pool <POOL>` prints an account's spendable funds, fee,
+  and maximum send for one pool route without sending, with integer zatoshi
+  fields under `--json`.
+  [#294](https://github.com/zcashlabs/thus-spoke-zakura/issues/294)
 - **Explorer search feedback:** Numeric 64-character hashes are searched as hashes,
   missing hashes are distinguished from service failures, and transparent
   addresses are no longer mislabeled as P2PKH.

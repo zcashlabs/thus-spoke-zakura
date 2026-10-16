@@ -99,6 +99,11 @@ $ curl -fsS "$DASHBOARD_URL/api/v1/send/quote" -H 'content-type: application/jso
 - `fee_zatoshi` reports its fee,
 - and `max_zatoshi` reports the quoted maximum send amount.
 
+From a terminal, `ths wallet quote --from 1 --source-pool ironwood
+--destination-pool ironwood` asks for the same quote and prints it in ZEC, or
+in zatoshi with `--json`; see the
+[CLI reference](cli.md#ths-wallet-quote---from-n---source-pool-pool---destination-pool-pool).
+
 These values depend on the selected inputs and current wallet state; a quote
 does not reserve funds or guarantee a later send succeeds. Compare an intended
 amount against `max_zatoshi` rather than the displayed balance. When a send

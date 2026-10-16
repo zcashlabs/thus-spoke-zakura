@@ -299,8 +299,10 @@ struct PaymentUri {
     memo: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SendQuote {
+    available_zatoshi: u64,
+    fee_zatoshi: u64,
     max_zatoshi: u64,
 }
 
@@ -308,6 +310,22 @@ struct SendQuote {
 pub(crate) enum TransferAmount {
     Exact(u64),
     Max,
+}
+
+fn send_quote_request(
+    client: &reqwest::blocking::Client,
+    dashboard: &str,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> reqwest::blocking::RequestBuilder {
+    client
+        .post(format!("{dashboard}/api/v1/send/quote"))
+        .json(&serde_json::json!({
+            "from_account": from,
+            "source_pool": source_pool,
+            "destination_pool": destination_pool,
+        }))
 }
 
 fn quote_max_amount(
@@ -322,18 +340,15 @@ fn quote_max_amount(
     let timeout = remaining(deadline)
         .ok_or_else(|| anyhow!("maximum transfer quote timed out"))
         .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
-    let quote: SendQuote = client
-        .post(format!("{dashboard}/api/v1/send/quote"))
-        .json(&serde_json::json!({
-            "from_account": from,
-            "source_pool": source_pool,
-            "destination_pool": destination_pool,
-        }))
-        .timeout(timeout)
-        .send()
-        .map_err(anyhow::Error::from)
-        .and_then(decode_response)
-        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
+    let quote: SendQuote =
+        send_quote_request(client, dashboard, from, source_pool, destination_pool)
+            .timeout(timeout)
+            .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
+            .with_context(|| {
+                format!("asking environment {name} for the maximum transfer amount")
+            })?;
     if quote.max_zatoshi == 0 {
         bail!(
             "account {from} has no spendable {source_pool} funds remaining after the network fee"
@@ -1345,6 +1360,55 @@ impl Runtime {
         }
         Ok(())
     }
+
+    pub fn wallet_quote(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_quote_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            from,
+            source_pool,
+            destination_pool,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_quote_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        require_wallet_ready(dashboard, client, name)?;
+        let quote = send_quote(dashboard, client, name, from, source_pool, destination_pool)?;
+        let route = RouteQuote {
+            from_account: from,
+            source_pool,
+            destination_pool,
+            quote: &quote,
+        };
+        if json {
+            writeln!(out, "{}", serde_json::to_string_pretty(&route)?)?;
+        } else {
+            writeln!(out, "{}", quote_lines(name, &route))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1367,11 +1431,11 @@ struct WalletSyncStatus {
     error: Option<String>,
 }
 
-pub(crate) fn account_balances(
+fn require_wallet_ready(
     dashboard: &str,
     client: &reqwest::blocking::Client,
     name: &InstanceName,
-) -> Result<Vec<Account>> {
+) -> Result<()> {
     let status: ServerStatus = client
         .get(format!("{dashboard}/api/v1/status"))
         .send()
@@ -1379,7 +1443,7 @@ pub(crate) fn account_balances(
         .and_then(decode_response)
         .with_context(|| format!("checking wallet sync for environment {name}"))?;
     match status.wallet_sync.state.as_str() {
-        "ready" => {}
+        "ready" => Ok(()),
         "syncing" => bail!("wallet for environment {name} is still syncing; try again later"),
         "error" => bail!(
             "wallet synchronization failed for environment {name}: {}",
@@ -1391,6 +1455,14 @@ pub(crate) fn account_balances(
         ),
         state => bail!("wallet for environment {name} has unknown sync state `{state}`"),
     }
+}
+
+pub(crate) fn account_balances(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+) -> Result<Vec<Account>> {
+    require_wallet_ready(dashboard, client, name)?;
     client
         .get(format!("{dashboard}/api/v1/accounts"))
         .send()
@@ -1414,6 +1486,63 @@ pub(crate) fn balance_lines(accounts: &[Account]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn send_quote(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> Result<SendQuote> {
+    send_quote_request(client, dashboard, from, source_pool, destination_pool)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| {
+            format!(
+                "asking environment {name} to quote account {from} from {source_pool} to {destination_pool}"
+            )
+        })
+}
+
+#[derive(Serialize)]
+struct RouteQuote<'a> {
+    from_account: u8,
+    source_pool: &'a str,
+    destination_pool: &'a str,
+    #[serde(flatten)]
+    quote: &'a SendQuote,
+}
+
+fn quote_lines(name: &InstanceName, route: &RouteQuote) -> String {
+    let RouteQuote {
+        from_account,
+        source_pool,
+        destination_pool,
+        quote,
+    } = route;
+    let mut lines = vec![
+        format!(
+            "Maximum-spend quote for account {from_account} ({source_pool} -> {destination_pool}) on {name}"
+        ),
+        format!(
+            "  Available     {} ZEC",
+            format_zec(quote.available_zatoshi)
+        ),
+        format!("  Fee           {} ZEC", format_zec(quote.fee_zatoshi)),
+        format!("  Maximum send  {} ZEC", format_zec(quote.max_zatoshi)),
+    ];
+    if quote.max_zatoshi == 0 {
+        lines.push(format!(
+            "Account {from_account} has nothing spendable in the {source_pool} pool after the fee."
+        ));
+    }
+    lines.push(
+        "This is a snapshot of the current wallet, not a reservation. Nothing was sent.".to_owned(),
+    );
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

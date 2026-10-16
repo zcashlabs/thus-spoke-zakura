@@ -135,6 +135,19 @@ pub(crate) enum WalletCommand {
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: Option<u32>,
     },
+    /// Show an account's spendable funds, fee, and maximum send for one pool
+    /// route, without sending.
+    Quote {
+        /// Account index to quote (1-5).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        from: u8,
+        /// Pool the quoted send would spend from.
+        #[arg(long = "source-pool", value_enum)]
+        source_pool: Pool,
+        /// Pool the quoted send would pay into. The fee depends on it.
+        #[arg(long = "destination-pool", value_enum)]
+        destination_pool: Pool,
+    },
     /// Send faucet funds from the treasury to one or more accounts.
     Faucet {
         /// Account indices to fund (1-5), e.g. --accounts 1,2,3,5.

@@ -616,6 +616,150 @@ fn balances_reject_syncing_and_failed_wallets_before_reading_accounts() {
     }
 }
 
+const READY: &str = r#"{"wallet_sync":{"state":"ready","error":null}}"#;
+
+fn quote_with(
+    runtime: &Runtime,
+    instance: &InstanceName,
+    url: &str,
+    source_pool: &str,
+    destination_pool: &str,
+    json: bool,
+) -> (Result<()>, String) {
+    let mut out = Vec::new();
+    let result = runtime.wallet_quote_with(
+        instance,
+        url,
+        &reqwest::blocking::Client::new(),
+        &mut out,
+        2,
+        source_pool,
+        destination_pool,
+        json,
+    );
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn quote_prints_the_route_and_server_fields_without_submitting_a_payment() {
+    let (_dir, runtime, _) = payment_runtime();
+    let demo = name("demo");
+    fs::create_dir_all(runtime.instance_dir(&demo)).unwrap();
+    const QUOTE: &str =
+        r#"{"available_zatoshi":500000000,"fee_zatoshi":15000,"max_zatoshi":499985000}"#;
+
+    let (url, requests) = serve(vec![("200 OK", READY), ("200 OK", QUOTE)]);
+    let (result, out) = quote_with(&runtime, &demo, &url, "ironwood", "transparent", true);
+    result.unwrap();
+    assert_eq!(
+        json_stdout(out.as_bytes()),
+        serde_json::json!({
+            "from_account": 2,
+            "source_pool": "ironwood",
+            "destination_pool": "transparent",
+            "available_zatoshi": 500_000_000,
+            "fee_zatoshi": 15_000,
+            "max_zatoshi": 499_985_000,
+        })
+    );
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "GET /api/v1/status HTTP/1.1");
+    assert_eq!(requests[1].0, "POST /api/v1/send/quote HTTP/1.1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].1).unwrap(),
+        serde_json::json!({
+            "from_account": 2,
+            "source_pool": "ironwood",
+            "destination_pool": "transparent",
+        })
+    );
+    assert_eq!(
+        fs::read_dir(runtime.instance_dir(&demo)).unwrap().count(),
+        0
+    );
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", QUOTE)]);
+    let (result, out) = quote_with(&runtime, &demo, &url, "ironwood", "transparent", false);
+    result.unwrap();
+    assert_eq!(
+        out,
+        "Maximum-spend quote for account 2 (ironwood -> transparent) on demo\n  \
+         Available     5 ZEC\n  \
+         Fee           0.00015 ZEC\n  \
+         Maximum send  4.99985 ZEC\n\
+         This is a snapshot of the current wallet, not a reservation. Nothing was sent.\n"
+    );
+}
+
+#[test]
+fn quote_of_an_empty_pool_is_informational_and_succeeds() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    const EMPTY: &str = r#"{"available_zatoshi":0,"fee_zatoshi":10000,"max_zatoshi":0}"#;
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", EMPTY)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "transparent", "ironwood", true);
+    result.unwrap();
+    assert_eq!(json_stdout(out.as_bytes())["max_zatoshi"], 0);
+    assert_eq!(json_stdout(out.as_bytes())["available_zatoshi"], 0);
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", EMPTY)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "transparent", "ironwood", false);
+    result.unwrap();
+    for expected in [
+        "  Available     0 ZEC\n",
+        "  Fee           0.0001 ZEC\n",
+        "  Maximum send  0 ZEC\n",
+        "Account 2 has nothing spendable in the transparent pool after the fee.\n",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}` from {out}");
+    }
+}
+
+#[test]
+fn quote_refuses_a_stale_wallet_and_reports_server_failures() {
+    let (_dir, runtime, alpha) = payment_runtime();
+
+    let (url, requests) = serve(vec![(
+        "200 OK",
+        r#"{"wallet_sync":{"state":"syncing","error":null}}"#,
+    )]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", true);
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "wallet for environment alpha is still syncing; try again later"
+    );
+    assert!(out.is_empty());
+    assert_eq!(requests.try_iter().count(), 1);
+
+    for (status, body, expected) in [
+        (
+            "400 Bad Request",
+            r#"{"error":{"message":"source_pool must be transparent or ironwood","status":400}}"#,
+            "rejected (400 Bad Request)",
+        ),
+        (
+            "500 Internal Server Error",
+            r#"{"error":{"message":"proposing max spend: failed","status":500}}"#,
+            "rejected (500 Internal Server Error)",
+        ),
+        ("200 OK", r#"{"max_zatoshi":1}"#, "decoding response"),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", READY), (status, body)]);
+        let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", true);
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(
+            error.starts_with(
+                "asking environment alpha to quote account 2 from ironwood to ironwood: "
+            ),
+            "{error}"
+        );
+        assert!(error.contains(expected), "{error}");
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+}
+
 #[test]
 fn uri_sends_resolve_the_amount_before_submission() {
     const WITH_AMOUNT: &str = r#"{"address":"uregtest1external","destination_pool":"ironwood","amount_zatoshi":123,"memo":"hi"}"#;
