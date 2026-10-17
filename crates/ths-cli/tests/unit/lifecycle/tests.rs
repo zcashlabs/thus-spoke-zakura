@@ -132,6 +132,7 @@ fn nonzero_exit_keeps_diagnostics_and_reaps_the_helper() {
     assert!(failure.stdout.windows(3).any(|window| window == b"out"));
     assert!(failure.stderr.windows(3).any(|window| window == b"err"));
     assert!(failure.to_string().contains("; stderr: err"), "{failure}");
+    assert_eq!(failure.detail, "exit status: 7", "{failure}");
     assert!(failure.helper_reaped);
     assert!(helpers.is_empty());
     fixture.finish();

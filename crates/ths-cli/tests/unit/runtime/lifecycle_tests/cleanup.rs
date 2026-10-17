@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn cleanup_preflight_failure_only_reports_an_existing_recovery_file() {
+    for has_journal in [false, true] {
+        let script = tempfile::tempdir().unwrap();
+        fs::write(
+            script.path().join("docker"),
+            "echo 'Docker unavailable' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let runtime = Runtime {
+            root: script.path().to_path_buf(),
+        };
+        let instance = name("ghost2");
+        let path = runtime.recovery_path(&instance);
+        if has_journal {
+            RecoveryJournal::create(path.clone(), &instance).unwrap();
+        }
+        let policy = cleanup_policy();
+        let context = LifecycleContext::new(policy);
+        let docker = script_docker(&script, &context, policy.startup_docker);
+        let report = runtime
+            .cleanup_core(
+                &instance,
+                &docker,
+                false,
+                Deadline::after(policy.cleanup),
+                &context,
+            )
+            .unwrap();
+
+        assert!(matches!(report.outcome, CleanupOutcome::Uncertain));
+        assert!(report.helpers_finished);
+        assert_eq!(report.recovery_path.as_ref(), has_journal.then_some(&path));
+        let error = report.into_result().unwrap_err().to_string();
+        assert!(error.contains("Docker unavailable"), "{error}");
+        assert_eq!(
+            error.contains("; recovery remains at "),
+            has_journal,
+            "{error}"
+        );
+        assert_eq!(path.is_file(), has_journal);
+        assert_eq!(runtime.instance_dir(&instance).exists(), has_journal);
+    }
+}
+
+#[test]
+fn failed_cleanup_journal_creation_does_not_report_a_recovery_file() {
+    let (runtime, docker, metadata) = owned_cleanup_fixture();
+    let instance = name("alpha");
+    let path = runtime.recovery_path(&instance);
+    fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+    let report = runtime
+        .cleanup_with(&instance, &docker, false, &cleanup_policy())
+        .unwrap();
+
+    assert!(matches!(report.outcome, CleanupOutcome::Uncertain));
+    assert!(report.recovery_path.is_none());
+    let error = report.into_result().unwrap_err().to_string();
+    assert!(error.contains("writing"), "{error}");
+    assert!(!error.contains("; recovery remains at "), "{error}");
+    assert!(!path.exists());
+    assert!(metadata.exists());
+    assert!(docker.removal_calls().is_empty());
+}
+
+#[test]
 fn success_after_the_phase_deadline_is_still_a_timeout() {
     let policy = short_policy();
     let mut fixture = HttpFixture::new(HttpMode::Health(204));

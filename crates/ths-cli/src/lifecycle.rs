@@ -547,7 +547,7 @@ fn finish_exited(
         Err(failure(
             CommandFailureKind::Nonzero,
             &command_name,
-            &format!("exit status {status}"),
+            &status.to_string(),
             stdout,
             stderr,
             true,

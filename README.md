@@ -54,7 +54,7 @@ blocks or `ths rollback --depth 3` to remove them. See the
 
 Press Ctrl+C in the terminal running `ths`. It attempts to delete that
 instance's containers, chain, keys, and wallet data. Check the command result:
-if cleanup fails, keep its recovery files and follow the
+if cleanup fails, keep any recovery files that exist and follow the
 [troubleshooting guide](book/troubleshooting.md).
 
 ## Documentation
