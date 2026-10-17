@@ -157,7 +157,9 @@ Paste a single-payment `zcash:` URI into **Payment request
 (optional)** and select **Apply**. The server resolves its address, pool,
 optional amount, and text memo. Supply the amount when the request omits it.
 Editing the URI disables Send until that revision is applied or the field is
-cleared; a stale parse result cannot authorize the edited request.
+cleared; a stale parse result cannot authorize the edited request. Editing the
+transfer fields while Apply is pending also discards that result. Apply again
+to replace the draft, or clear the request to continue with manual edits.
 
 ![The Send ZEC dialog with a Regtest payment URI filled into Payment request (optional), Apply enabled, and Send ZEC disabled until the request is applied or cleared.](images/payment-request.png)
 

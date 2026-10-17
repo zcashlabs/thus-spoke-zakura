@@ -1116,6 +1116,73 @@ describe('SendDialog', () => {
     expect(body(fetchMock)).not.toHaveProperty('to_account');
   });
 
+  it.each(['amount', 'memo', 'destination', 'pool', 'max', 'reverted amount'] as const)(
+    'preserves a %s edit made while a payment URI is parsing',
+    async (edit) => {
+      const parsed = {
+        address: 'uregtest1external',
+        destination_pool: 'ironwood',
+        to_account: null,
+        amount_zatoshi: 25_000_000,
+        memo: 'coffee',
+      };
+      let finishParsing!: (response: Response) => void;
+      const parsing = new Promise<Response>((resolve) => {
+        finishParsing = resolve;
+      });
+      fetchMock.mockImplementation((input, init) =>
+        requestUrl(input).endsWith('/zip321/parse') ? parsing : sendImpl(QUOTE)(input, init),
+      );
+      await applyPaymentUri('zcash:uregtest1external?amount=0.25');
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Apply' })).toHaveAttribute('aria-busy', 'true'),
+      );
+      const amount = screen.getByLabelText('Amount (ZEC)');
+      if (edit === 'amount' || edit === 'reverted amount') {
+        fireEvent.change(amount, { target: { value: '2' } });
+        if (edit === 'reverted amount') fireEvent.change(amount, { target: { value: '1' } });
+      } else if (edit === 'memo') {
+        fireEvent.change(screen.getByLabelText(/Memo/), { target: { value: 'my draft' } });
+      } else if (edit === 'destination') {
+        await selectTransferField('Destination', 'Account 3');
+      } else if (edit === 'pool') {
+        await selectTransferField('Destination pool', 'Transparent (public)');
+      } else {
+        await userEvent.click(screen.getByRole('button', { name: /Max/ }));
+      }
+      const expectedAmount = (amount as HTMLInputElement).value;
+      await act(async () => {
+        finishParsing(
+          new Response(JSON.stringify(parsed), { headers: { 'content-type': 'application/json' } }),
+        );
+        await parsing;
+      });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Apply' })).not.toHaveAttribute(
+          'aria-busy',
+          'true',
+        ),
+      );
+      expect(amount).toHaveValue(expectedAmount);
+      expect(screen.getByLabelText('Destination')).toHaveTextContent(
+        edit === 'destination' ? 'Account 3' : 'Account 2',
+      );
+      if (edit === 'memo') expect(screen.getByLabelText(/Memo/)).toHaveValue('my draft');
+      if (edit === 'pool')
+        expect(screen.getByLabelText('Destination pool')).toHaveTextContent('Transparent');
+      const sendButton = screen.getByRole('button', { name: /Send ZEC/i });
+      expect(sendButton).toBeDisabled();
+      fireEvent.submit(sendButton.closest('form')!);
+      expect(sendCalls(fetchMock)).toHaveLength(0);
+
+      // Applying again is an explicit decision to replace the edited draft.
+      fetchMock.mockImplementation(sendImpl(QUOTE, undefined, parsed));
+      await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
+      await waitFor(() => expect(amount).toHaveValue('0.25'));
+      expect(screen.getByLabelText('Destination address')).toHaveValue(parsed.address);
+    },
+  );
+
   it.each(['button', 'form'] as const)(
     'blocks %s submission while a payment URI is parsing',
     async (submission) => {

@@ -99,6 +99,19 @@ export function SendDialog({
     },
   });
 
+  const draftRevision = useRef(0);
+  const { subscribe } = form;
+  useEffect(
+    () =>
+      subscribe({
+        formState: { values: true },
+        callback: () => {
+          draftRevision.current += 1;
+        },
+      }),
+    [subscribe],
+  );
+
   const current = sendSchema.safeParse(useWatch({ control: form.control }));
   const variablesFor = (values: SendValues) => ({
     from_account: values.from_account,
@@ -249,10 +262,12 @@ export function SendDialog({
     if (paymentUri.trim() === '') return;
     paymentUriRevision.current += 1;
     const uriRevision = paymentUriRevision.current;
+    const revision = draftRevision.current;
     setPaymentUriNeedsApply(true);
     parseUri.mutate(paymentUri, {
       onSuccess: (parsed) => {
-        if (uriRevision === paymentUriRevision.current) {
+        // Any edit, including Max and changing a value back, invalidates this parse.
+        if (uriRevision === paymentUriRevision.current && revision === draftRevision.current) {
           applyPaymentUri(parsed);
           setPaymentUriNeedsApply(false);
         }
