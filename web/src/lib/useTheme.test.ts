@@ -54,13 +54,35 @@ describe('useTheme', () => {
       );
     });
     expect(result.current[0]).toBe('light');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
 
     act(() => {
       localStorage.removeItem(THEME_STORAGE_KEY);
       window.dispatchEvent(new StorageEvent('storage', { key: THEME_STORAGE_KEY, newValue: null }));
     });
     expect(result.current[0]).toBe('system');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
+
+  it.each(['light', 'dark', 'system'] as const)(
+    'applies %s when another tab stores it',
+    async (preference) => {
+      const { result } = await mountTheme();
+      act(() => result.current[1](preference === 'dark' ? 'light' : 'dark'));
+
+      act(() => {
+        localStorage.setItem(THEME_STORAGE_KEY, preference);
+        window.dispatchEvent(
+          new StorageEvent('storage', { key: THEME_STORAGE_KEY, newValue: preference }),
+        );
+      });
+
+      expect(result.current[0]).toBe(preference);
+      expect(document.documentElement.getAttribute('data-theme')).toBe(
+        preference === 'system' ? null : preference,
+      );
+    },
+  );
 
   it('keeps the selection when storage refuses reads and writes', async () => {
     refuseStorage('getItem');
@@ -143,6 +165,14 @@ describe('useTheme', () => {
 
     act(() => result.current[1]('dark'));
 
+    expect(result.current[0]).toBe('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: THEME_STORAGE_KEY, newValue: 'light' }),
+      );
+    });
     expect(result.current[0]).toBe('dark');
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
   });
