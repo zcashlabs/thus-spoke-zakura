@@ -496,3 +496,9 @@ async fn restart_recovers_claim_before_preparation_without_payment_post() -> Res
 async fn insufficient_send_stays_failed_after_restart_and_later_funding() -> Result<()> {
     recovery::insufficient_send_stays_failed_after_restart_and_later_funding().await
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn dependent_payments_resume_in_admission_order_after_restart() -> Result<()> {
+    recovery::dependent_payments_resume_in_admission_order_after_restart().await
+}

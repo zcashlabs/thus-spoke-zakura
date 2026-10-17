@@ -17,6 +17,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "ordering.rs"]
+mod ordering;
+
 async fn journal_height_rpc(slow: Arc<AtomicBool>) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new().route(
             "/",

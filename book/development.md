@@ -162,6 +162,7 @@ docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:loca
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --list
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact reorg_and_rollback_preserve_canonical_wallet_and_payment_state
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact dependent_payments_resume_in_admission_order_after_restart --nocapture
 ```
 
 Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart
@@ -169,6 +170,15 @@ recovery, and queued-response cases on every push and PR. The other cases in
 `tests/activity_recovery.rs` cover startup funding, pool transfers, and
 external faucets. The fixture owns and cleans up only its own Docker resources;
 it fails on a timeout or incomplete cleanup.
+
+The dependent-payment case seeds a retained Faucet→Send→Send chain while the
+server is stopped, with reversed IDs and tied timestamps. Restart must confirm
+all three original operations without another submission. Controlled automatic
+mining failures first keep the funder in the mempool; both dependents must
+attempt preparation and remain pending for insufficient funds. The fixture
+restarts, mines the original funder, and allows progression again. It checks
+actual chain inclusion and wallet balances, then restarts again and replays
+each key to verify unchanged identities, journals, balances, and chain tip.
 
 The reorg/rollback regression observes the server's `SendTransaction` calls
 through the existing gRPC proxy to check that rollback, idempotent replay, and

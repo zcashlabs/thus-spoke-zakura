@@ -11,6 +11,7 @@ use super::submission::submit_address_prepared;
 use super::treasury::prepare_with_replenishment;
 use super::treasury::record_prepared_address_payment;
 use crate::db::Activity;
+use crate::db::ActivityRecovery;
 use crate::db::AddressFaucet;
 use crate::db::Store;
 use crate::db::TREASURY_ACCOUNT_ID;
@@ -37,23 +38,9 @@ pub(crate) enum PaymentCollection {
 
 #[derive(Default)]
 pub(crate) struct PaymentTraversal {
-    pub(crate) activity_cursor: Option<String>,
+    pub(crate) activity_cursor: Option<i64>,
     pub(crate) address_cursor: Option<String>,
     pub(crate) next_collection: PaymentCollection,
-}
-
-pub(crate) enum ActivityRecovery {
-    Intent(crate::db::ActivityIntent),
-    Legacy(Activity),
-}
-
-impl ActivityRecovery {
-    pub(crate) fn id(&self) -> &str {
-        match self {
-            Self::Intent(intent) => &intent.activity.id,
-            Self::Legacy(activity) => &activity.id,
-        }
-    }
 }
 
 pub(crate) async fn payment_confirmation_loop(state: AppState) {
@@ -79,7 +66,7 @@ pub(crate) async fn payment_confirmation_loop(state: AppState) {
 pub(crate) async fn progress_payment_intents(
     state: &AppState,
     deadline: Instant,
-    activity_cursor: &mut Option<String>,
+    activity_cursor: &mut Option<i64>,
     address_cursor: &mut Option<String>,
 ) -> anyhow::Result<()> {
     let mut traversal = PaymentTraversal {
@@ -102,27 +89,11 @@ pub(crate) async fn progress_payment_intents_with_traversal(
         state,
         dispatch_deadline: Some(deadline),
     };
-    let mut activities: Vec<_> = state
-        .0
-        .store
-        .unresolved_activities()?
-        .into_iter()
-        .map(ActivityRecovery::Intent)
-        .collect();
-    activities.extend(
-        state
-            .0
-            .store
-            .unconfirmed_legacy_activities()?
-            .into_iter()
-            .map(ActivityRecovery::Legacy),
-    );
-    activities.sort_by(|left, right| left.id().cmp(right.id()));
+    let activities = state.0.store.pending_activities()?;
     let mut address_faucets = state.0.store.unresolved_address_faucets()?;
     address_faucets.sort_by(|left, right| left.payment.id.cmp(&right.payment.id));
-    let activity_start = traversal.activity_cursor.as_ref().map_or(0, |id| {
-        activities.partition_point(|activity| activity.id() <= id.as_str())
-            % activities.len().max(1)
+    let activity_start = traversal.activity_cursor.as_ref().map_or(0, |order| {
+        activities.partition_point(|(position, _)| position <= order) % activities.len().max(1)
     });
     let address_start = traversal.address_cursor.as_ref().map_or(0, |id| {
         address_faucets.partition_point(|intent| intent.payment.id.as_str() <= id.as_str())
@@ -146,11 +117,12 @@ pub(crate) async fn progress_payment_intents_with_traversal(
         };
         match collection {
             PaymentCollection::Activity => {
-                let activity = &activities[(activity_start + activity_offset) % activities.len()];
+                let (order, activity) =
+                    &activities[(activity_start + activity_offset) % activities.len()];
                 activity_offset += 1;
                 // Persist the resume point before lock or execution waits, including
                 // an attempt that uses the rest of this pass's dispatch budget.
-                traversal.activity_cursor = Some(activity.id().to_owned());
+                traversal.activity_cursor = Some(*order);
                 traversal.next_collection = PaymentCollection::Address;
                 let mut observed = match activity {
                     ActivityRecovery::Intent(intent) => intent.activity.clone(),

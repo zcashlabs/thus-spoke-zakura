@@ -173,11 +173,11 @@ impl PaymentLifecycle for PaymentAttempt<'_> {
             return Ok(false);
         }
         let current = self.state.0.store.activity(&activity.id)?;
-        let updated = self.state.0.store.fail(&activity.id, error)?;
+        let updated = self.state.0.store.fail_unfunded_send(&activity.id, error)?;
         if updated != current {
             notify(self.state, "wallet");
         }
-        Ok(true)
+        Ok(updated.status == "failed")
     }
 }
 

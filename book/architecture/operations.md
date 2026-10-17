@@ -78,6 +78,23 @@ restart. Status reads do not start payment work.
 continues. Keep the same key after a timeout. Reusing it with different
 payment details is rejected.
 
+### Earlier payments and dependent sends
+
+The worker visits account payments in their stored admission order, including
+retained legacy transactions. Their random IDs and timestamp ties do not set
+that order. It keeps its position across bounded passes and alternates with
+external-address faucets so one slow collection does not always go first.
+
+Admission order is not a promise that every earlier payment has finished. A
+pass can stop while an earlier payment is still pending. If a Send then has
+insufficient funds, it stays `preparing` while an earlier unresolved payment
+could fund its source account and pool, including Ironwood change from an
+earlier spend. It keeps its original key and can progress after that payment
+confirms. An unrelated payment, a payment accepted later, or a terminal
+payment does not defer this failure. Once no earlier funding dependency
+remains, the existing transaction-reconciliation checks still decide whether
+insufficient funds can safely become terminal `failed`.
+
 ## Call the API with a deliberate key
 
 This example uses integer zatoshi. Run it against the live dashboard URL of
