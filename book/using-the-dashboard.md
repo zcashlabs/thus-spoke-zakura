@@ -25,6 +25,9 @@ in the page header is the general one, and it only appears on Wallet — the
 Explorer and Network pages show just **Mine**. On each account card,
 **Fund** opens the same dialog with that account preselected.
 
+Recent activity ages update while the page is idle. This only refreshes the
+displayed time; payment status still comes from the server.
+
 ## Fund Account 2's transparent pool
 
 1. Select **Fund** on Account 2's card, or **Faucet** in the header.
