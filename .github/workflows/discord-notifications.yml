@@ -1,0 +1,48 @@
+name: Discord Notifications
+
+# High-signal, low-noise pull request activity for the community Discord.
+# Documented in docs/discord-notifications.md.
+#
+#   🚀 PR opened / ready for review    🔁 PR reopened
+#   🟣 PR merged                       🔴 PR closed without merging
+#   ❌ CI failed (PRs and default branch)
+#   👀 Review requested / 🟢 Approved  (off by default; enable with the
+#                                       repository variable
+#                                       DISCORD_REVIEW_NOTIFICATIONS=true)
+#
+# pull_request_target and workflow_run run in the base repository so the
+# DISCORD_WEBHOOK secret is available for fork PRs. This workflow must never
+# check out or execute pull request code.
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened, closed, review_requested]
+  workflow_run:
+    workflows: [CI, Discord Review Relay]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.workflow_run.name == 'CI' &&
+        github.event.workflow_run.conclusion == 'failure') ||
+      (github.event.workflow_run.name == 'Discord Review Relay' &&
+        github.event.workflow_run.conclusion == 'success')
+    steps:
+      # Checks out the base commit this workflow was loaded from, never the PR head.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_REVIEW_NOTIFICATIONS: ${{ vars.DISCORD_REVIEW_NOTIFICATIONS }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/discord-notify.sh
