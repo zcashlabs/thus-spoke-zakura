@@ -71,7 +71,7 @@ describe('TransactionDetail', () => {
     });
 
     await waitFor(() => expect(screen.getByText('1 transparent input')).toBeInTheDocument());
-    expect(screen.getByText(INPUT_ADDRESS)).toBeInTheDocument();
+    expect(screen.getByText(INPUT_ADDRESS)).toHaveAttribute('title', INPUT_ADDRESS);
     expect(screen.getByText('1 ZEC')).toBeInTheDocument();
   });
 
@@ -157,6 +157,33 @@ describe('TransactionDetail', () => {
     // prevout resolution, and each refetch triggers another round of it.
     const fetched = fetchSpy.mock.calls.map(([input]) => requestUrl(input as RequestInfo));
     expect(fetched.filter((url) => url.includes(`/transactions/${PREV_TXID}`))).toEqual([]);
+  });
+
+  it('warns when previous output details are unavailable', async () => {
+    renderTx({
+      txid: TXID,
+      transparent_inputs_complete: false,
+      vin: [{ txid: PREV_TXID, vout: 0, prevout_unavailable: true }],
+      vout: [{ n: 0, valueZat: 90_000_000, scriptPubKey: { addresses: [] } }],
+      vShieldedSpend: [],
+      vShieldedOutput: [],
+    });
+
+    expect(await screen.findByText('Some input details are unavailable')).toBeInTheDocument();
+    expect(screen.getByTitle(PREV_TXID)).toHaveTextContent(PREV_TXID.slice(0, 8));
+    expect(screen.getByText(/could not resolve one or more previous outputs/i)).toBeInTheDocument();
+    expect(screen.getByText('Previous output details unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Fully transparent, but some public input addresses and amounts could not be retrieved.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'Fully transparent. Every input, output, address and amount is public chain data.',
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it('does not call a shielded transfer fully transparent when it pays a fee', async () => {
