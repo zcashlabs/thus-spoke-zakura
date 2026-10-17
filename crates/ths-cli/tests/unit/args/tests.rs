@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn parses_explorer_commands_with_global_options() {
+    for args in [
+        vec!["ths", "--name", "alice", "--json", "tx", "txid"],
+        vec!["ths", "tx", "txid", "--json", "--name", "alice"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(cli.json);
+        assert_eq!(cli.name.unwrap().to_string(), "alice");
+        assert!(matches!(cli.command, Some(Command::Tx { txid }) if txid == "txid"));
+    }
+    let cli = Cli::try_parse_from(["ths", "block"]).unwrap();
+    assert!(matches!(cli.command, Some(Command::Block { id: None })));
+    for id in [
+        "0",
+        "100",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        let cli = Cli::try_parse_from(["ths", "block", id, "--name", "alice", "--json"]).unwrap();
+        assert!(cli.json);
+        assert_eq!(cli.name.unwrap().to_string(), "alice");
+        assert!(matches!(cli.command, Some(Command::Block { id: Some(value) }) if value == id));
+    }
+    assert!(Cli::try_parse_from(["ths", "tx"]).is_err());
+    assert!(Cli::try_parse_from(["ths", "block", "1", "2"]).is_err());
+}
+
+#[test]
 fn parses_reorg_and_rollback_depths() {
     for args in [
         vec!["ths", "reorg", "--depth", "3"],

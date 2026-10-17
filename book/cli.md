@@ -30,7 +30,7 @@ to run in order. For a worked dashboard flow, see [Chapter
   CLI.)
 - Amounts are ZEC decimal strings with up to 8 decimal places, e.g. `1`,
   `0.5`, `2.25000001`. These are disposable Regtest coins with no value.
-- Commands that call the app (`mine`, `reorg`, `rollback`, `faucet`, and `wallet` subcommands) require
+- Commands that call the app (`tx`, `block`, `mine`, `reorg`, `rollback`, `faucet`, and `wallet` subcommands) require
   a running environment. Start one first with `ths` (or `ths --name <NAME>`).
   `stop` and `reset --force` can remove resources left by an interrupted run.
 
@@ -368,6 +368,19 @@ wallet synchronization deadline, without repeating the chain mutation.
 
 ---
 
+## Explorer: `ths tx <TXID>` / `ths block [ID]`
+
+Read the same transaction or block data as the dashboard explorer. Block IDs
+can be heights or hashes; omitting the ID shows the chain tip.
+Human output lists every returned field; `--json` prints the complete API object.
+Unknown transactions or blocks exit nonzero with the server's 404 message.
+
+```console
+ths tx "$TXID" --json  # Set TXID to a transaction ID first.
+ths block
+ths block 100 --json
+```
+
 ## Funding an address: `ths faucet <ADDRESS> [--amount <ZEC>]`
 
 Sends disposable Regtest ZEC from the treasury directly to any Regtest unified
@@ -696,6 +709,8 @@ account 1 to account 3, all without opening the dashboard.
 | `ths status [--json]` | Show app-container running state and endpoints |
 | `ths open` | Open the running dashboard |
 | `ths endpoints [--json]` | Print endpoints for scripts and developer tools |
+| `ths tx <TXID> [--json]` | Show explorer transaction data |
+| `ths block [ID] [--json]` | Show a block by height or hash, or the chain tip when omitted |
 | `ths mine <N>` | Mine blocks and synchronize the wallet |
 | `ths reorg --depth N [--keep-txs]` | Replace recent blocks, optionally attempting transaction reinclusion |
 | `ths rollback --depth N` | Remove recent blocks without replacements |

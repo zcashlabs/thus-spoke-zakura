@@ -1,6 +1,115 @@
 use super::*;
 
 #[test]
+fn explorer_reads_detail_routes_and_preserves_every_field() {
+    let body = serde_json::json!({
+        "txid": "transaction", "hash": "block", "height": 100, "confirmations": 2,
+        "vin": [{"txid": "previous", "vout": 0, "valueZat": 100_000,
+            "scriptPubKey": {"addresses": ["tmInput"]}}],
+        "vout": [{"n": 0, "valueZat": 90_000, "scriptPubKey": {"addresses": ["tmOutput"]}}],
+        "ironwood": {"actions": [{"nullifier": "nf"}]}, "finalironwoodroot": "root",
+        "future_server_field": {"large_integer": u64::MAX, "optional": null}
+    });
+    for (resource, id) in [
+        ("transactions", "transaction"),
+        ("blocks", "0"),
+        ("blocks", "block"),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", body.to_string())]);
+        let value =
+            explorer_data(&url, &reqwest::blocking::Client::new(), resource, Some(id)).unwrap();
+        assert_eq!(value, body);
+        assert_eq!(
+            requests.recv().unwrap().0,
+            format!("GET /api/v1/{resource}/{id} HTTP/1.1")
+        );
+        assert!(requests.try_recv().is_err());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&render_explorer(&value, true).unwrap())
+                .unwrap(),
+            body
+        );
+        let human = render_explorer(&value, false).unwrap();
+        for (key, field) in body.as_object().unwrap() {
+            assert!(
+                human.contains(&format!(
+                    "{key}: {}",
+                    serde_json::to_string_pretty(field).unwrap()
+                )),
+                "{human}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explorer_block_without_id_looks_up_the_node_tip_by_hash() {
+    let (url, requests) = serve(vec![
+        (
+            "200 OK",
+            r#"{"node":{"blocks":100,"bestblockhash":"tip"},"wallet_sync":{"state":"syncing"}}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"hash":"tip","height":100,"finalironwoodroot":"root"}"#,
+        ),
+    ]);
+    let value = explorer_data(&url, &reqwest::blocking::Client::new(), "blocks", None).unwrap();
+    assert_eq!(value["hash"], "tip");
+    assert_eq!(value["finalironwoodroot"], "root");
+    assert_eq!(requests.recv().unwrap().0, "GET /api/v1/status HTTP/1.1");
+    assert_eq!(
+        requests.recv().unwrap().0,
+        "GET /api/v1/blocks/tip HTTP/1.1"
+    );
+}
+
+#[test]
+fn explorer_preserves_server_not_found_messages_and_other_failures() {
+    for (resource, message) in [
+        (
+            "transactions",
+            "No transaction with that ID on this chain. It may not have been mined yet.",
+        ),
+        ("blocks", "No block at that height or hash on this chain."),
+    ] {
+        let body = serde_json::json!({"error":{"message":message,"status":404}}).to_string();
+        let (url, requests) = serve(vec![("404 Not Found", body.clone())]);
+        let error = explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            resource,
+            Some("unknown"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("rejected (404 Not Found): {body}")
+        );
+        assert_eq!(requests.try_iter().count(), 1);
+    }
+    for (status, body, expected) in [
+        (
+            "500 Internal Server Error",
+            "node unavailable",
+            "rejected (500 Internal Server Error): node unavailable",
+        ),
+        ("200 OK", "not JSON", "decoding response"),
+        ("drop", "", "error sending request"),
+    ] {
+        let (url, _requests) = serve(vec![(status, body)]);
+        let error = explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            "transactions",
+            Some("txid"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+}
+
+#[test]
 fn chain_changes_forward_the_command_and_report_retention_failures_in_both_outputs() {
     let response = serde_json::json!({
         "depth":3,"old_tip":{"height":108,"hash":"old-tip"},
@@ -54,6 +163,34 @@ fn chain_changes_forward_the_command_and_report_retention_failures_in_both_outpu
 }
 
 #[test]
+fn explorer_tip_lookup_fails_without_fetching_another_block() {
+    for (status, body, expected) in [
+        (
+            "200 OK",
+            r#"{"node":null}"#,
+            "the environment did not report a node tip",
+        ),
+        (
+            "200 OK",
+            r#"{"node":{}}"#,
+            "the environment did not report a node tip",
+        ),
+        (
+            "503 Service Unavailable",
+            "still starting",
+            "rejected (503 Service Unavailable): still starting",
+        ),
+    ] {
+        let (url, requests) = serve(vec![(status, body)]);
+        let error =
+            explorer_data(&url, &reqwest::blocking::Client::new(), "blocks", None).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(requests.recv().unwrap().0, "GET /api/v1/status HTTP/1.1");
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[test]
 fn chain_changes_do_not_retry_rejected_or_lost_responses() {
     for status in ["409 Conflict", "drop"] {
         let (url, requests) = serve(vec![(status, "busy")]);
@@ -67,6 +204,40 @@ fn chain_changes_do_not_retry_rejected_or_lost_responses() {
         assert_eq!(requests.recv().unwrap().0, "POST /api/v1/reorg HTTP/1.1");
         assert!(requests.try_recv().is_err());
     }
+}
+
+#[test]
+fn explorer_rejects_dot_only_ids_without_a_request() {
+    for resource in ["blocks", "transactions"] {
+        for id in [".", ".."] {
+            let (url, requests) = serve(vec![("200 OK", r#"{"blocks":[],"next_before":null}"#)]);
+            let error = explorer_data(&url, &reqwest::blocking::Client::new(), resource, Some(id))
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("invalid explorer identifier: {id:?}")
+            );
+            assert!(requests.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn explorer_encodes_ids_as_a_single_path_segment() {
+    let (url, requests) = serve(vec![("404 Not Found", "missing")]);
+    assert!(
+        explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            "transactions",
+            Some("a/b?c#d")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        requests.recv().unwrap().0,
+        "GET /api/v1/transactions/a%2Fb%3Fc%23d HTTP/1.1"
+    );
 }
 
 #[test]

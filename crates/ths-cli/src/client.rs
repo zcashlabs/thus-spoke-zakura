@@ -426,6 +426,20 @@ impl Runtime {
         Ok((dashboard, client))
     }
 
+    pub fn explorer(
+        &self,
+        name: &InstanceName,
+        resource: &str,
+        id: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let value = explorer_data(&dashboard, &client, resource, id)
+            .with_context(|| format!("reading explorer {resource} from environment {name}"))?;
+        println!("{}", render_explorer(&value, json)?);
+        Ok(())
+    }
+
     pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
         self.mine_with(
@@ -1228,6 +1242,56 @@ pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
         bail!("rejected ({status}): {detail}");
     }
     response.json().context("decoding response")
+}
+
+pub(crate) fn explorer_data(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    resource: &str,
+    id: Option<&str>,
+) -> Result<serde_json::Value> {
+    let tip;
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let status: serde_json::Value = client
+                .get(format!("{dashboard}/api/v1/status"))
+                .send()
+                .map_err(anyhow::Error::from)
+                .and_then(decode_response)?;
+            tip = status
+                .pointer("/node/bestblockhash")
+                .and_then(serde_json::Value::as_str)
+                .context("the environment did not report a node tip")?
+                .to_owned();
+            &tip
+        }
+    };
+    if matches!(id, "." | "..") {
+        bail!("invalid explorer identifier: {id:?}");
+    }
+    let mut url = reqwest::Url::parse(&format!("{dashboard}/api/v1/{resource}"))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("invalid dashboard URL"))?
+        .push(id);
+    client
+        .get(url)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+}
+
+pub(crate) fn render_explorer(value: &serde_json::Value, json: bool) -> Result<String> {
+    if json {
+        return Ok(serde_json::to_string_pretty(value)?);
+    }
+    value
+        .as_object()
+        .context("expected an explorer object")?
+        .iter()
+        .map(|(key, value)| Ok(format!("{key}: {}", serde_json::to_string_pretty(value)?)))
+        .collect::<Result<Vec<_>>>()
+        .map(|lines| lines.join("\n"))
 }
 
 /// Only retries a transport-level send failure, where it is unknown whether
