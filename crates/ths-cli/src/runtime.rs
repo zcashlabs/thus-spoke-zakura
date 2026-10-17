@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     str::FromStr,
     sync::{
         Arc, Mutex, PoisonError,

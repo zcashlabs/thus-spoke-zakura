@@ -207,9 +207,29 @@ pub(super) fn docker_output<const N: usize>(args: [&str; N]) -> Result<String> {
 pub(super) fn docker_output_args(args: &[&str]) -> Result<String> {
     let output = docker_cli().args(args).output().context("running Docker")?;
     if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        bail!(
+            "{}",
+            docker_failure_message(args, &output.status, &output.stderr)
+        );
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+/// Docker usually explains itself on stderr, but it does not always: a daemon
+/// killed mid-call, a signal, or a wrapper that prints nothing can exit
+/// nonzero with no diagnostic at all. A message built only from stderr is then
+/// empty, so every caller that reads Docker output reports a blank reason and
+/// nothing identifies which probe went wrong. Name the command and its status
+/// unconditionally, and append stderr only when Docker actually produced one.
+pub(super) fn docker_failure_message(args: &[&str], status: &ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    let mut message = format!("docker {} failed ({status})", args.join(" "));
+    if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr);
+    }
+    message
 }
 
 pub(super) fn docker_cli() -> Command {

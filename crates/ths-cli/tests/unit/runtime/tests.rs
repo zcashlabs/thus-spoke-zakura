@@ -6,6 +6,8 @@ use std::{
 
 #[path = "tests/client.rs"]
 mod client;
+#[path = "tests/docker.rs"]
+mod docker;
 #[path = "tests/images.rs"]
 mod images;
 #[path = "tests/instance.rs"]
