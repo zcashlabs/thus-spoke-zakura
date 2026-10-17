@@ -8,6 +8,7 @@ import {
   testAccounts,
 } from '@/test/utils';
 import { SendDialog } from './SendDialog';
+import { useWalletActions } from './wallet-actions-context';
 
 /**
  * SendDialog moves real funds, so the behaviour worth pinning is what reaches
@@ -1378,6 +1379,122 @@ describe('SendDialog', () => {
     });
     expect(body(fetchMock).to_account).toBeUndefined();
   });
+
+  it.each([
+    ['closed', 'resolved'],
+    ['closed', 'rejected'],
+    ['replaced', 'resolved'],
+    ['replaced', 'rejected'],
+  ] as const)(
+    'does not submit or retain a payment when the quoting form is %s (quote %s)',
+    async (change, outcome) => {
+      let finishQuote!: (response: Response) => void;
+      let rejectQuote!: (reason: Error) => void;
+      const quoting = new Promise<Response>((resolve, reject) => {
+        finishQuote = resolve;
+        rejectQuote = reject;
+      });
+      fetchMock.mockImplementation((input, init) =>
+        requestUrl(input).endsWith('/send/quote') && requestBody(init).from_account === 1
+          ? quoting
+          : sendImpl(QUOTE)(input, init),
+      );
+      function Actions() {
+        const actions = useWalletActions();
+        return (
+          <>
+            <button onClick={() => actions.openSend(1)}>Open Send</button>
+            <button onClick={() => actions.openSend(3)}>Replace Send</button>
+          </>
+        );
+      }
+      renderWithProviders(<Actions />);
+      await userEvent.click(screen.getByRole('button', { name: 'Open Send' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Send ZEC' }));
+      expect(sendCalls(fetchMock)).toHaveLength(0);
+      if (change === 'closed') {
+        await userEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      } else {
+        // Invoke the provider's replacement action while the current modal is open.
+        fireEvent.click(screen.getByRole('button', { name: 'Replace Send', hidden: true }));
+        expect(screen.getByLabelText('From account')).toHaveTextContent('Account 3');
+      }
+      const localBefore = { ...localStorage };
+      const sessionBefore = { ...sessionStorage };
+      await act(async () => {
+        if (outcome === 'resolved') finishQuote(new Response(JSON.stringify(QUOTE)));
+        else rejectQuote(new TypeError('Quote connection lost'));
+        await quoting.catch(() => undefined); // The query hook owns the intentional rejection.
+      });
+      expect(sendCalls(fetchMock)).toHaveLength(0);
+      expect({ ...localStorage }).toEqual(localBefore);
+      expect({ ...sessionStorage }).toEqual(sessionBefore);
+      expect(screen.queryByText('Payments')).not.toBeInTheDocument();
+      if (change === 'replaced') {
+        expect(screen.getByLabelText('From account')).toHaveTextContent('Account 3');
+        expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1');
+      }
+    },
+  );
+
+  it.each(['accepted', 'response lost'] as const)(
+    'preserves tracking and recovery after closing a started send (%s)',
+    async (outcome) => {
+      let finishSend!: (response: Response) => void;
+      let rejectSend!: (reason: Error) => void;
+      const sending = new Promise<Response>((resolve, reject) => {
+        finishSend = resolve;
+        rejectSend = reject;
+      });
+      let payment: typeof PENDING | undefined;
+      let posts = 0;
+      fetchMock.mockImplementation((input, init) => {
+        if (requestUrl(input).endsWith('/send')) {
+          posts += 1;
+          if (posts === 1) return sending;
+          payment = { ...PENDING, status: 'confirmed' };
+        }
+        return sendImpl(QUOTE, payment)(input, init);
+      });
+      function Actions() {
+        const actions = useWalletActions();
+        return <button onClick={() => actions.openSend(1)}>Open Send</button>;
+      }
+      renderWithProviders(<Actions />);
+      await userEvent.click(screen.getByRole('button', { name: 'Open Send' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Send ZEC' }));
+      await waitFor(() => expect(sendCalls(fetchMock)).toHaveLength(1));
+      const original = body(fetchMock);
+      const record = `ths:send:retained:${original.idempotency_key}`;
+      const saved = localStorage.getItem(record);
+      expect(saved).toBeTruthy();
+      await userEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      await act(async () => {
+        if (outcome === 'accepted') {
+          payment = PENDING;
+          finishSend(new Response(JSON.stringify(payment)));
+        } else {
+          rejectSend(new TypeError('Send response lost'));
+        }
+        await sending.catch(() => undefined); // The mutation owns the intentional rejection.
+      });
+      await waitFor(() =>
+        expect(screen.getByText('Payments').closest('button')).toHaveAccessibleName(/1 unresolved/),
+      );
+      expect(localStorage.getItem(record)).toBe(saved);
+      expect(sendCalls(fetchMock)).toHaveLength(1);
+      await userEvent.click(screen.getByRole('button', { name: 'Open Send' }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Resume payment' }));
+      await waitFor(() => expect(sendCalls(fetchMock)).toHaveLength(2));
+      expect(requestBody(sendCalls(fetchMock)[1]?.[1])).toEqual(original);
+      await waitFor(() => expect(localStorage.getItem(record)).toBeNull());
+      await waitFor(() =>
+        expect(screen.getByText('Payments').closest('button')).toHaveAccessibleName(/1 confirmed/),
+      );
+    },
+  );
 
   it('cancels a waiting send when the payment URI is edited without applying it', async () => {
     let finishQuote!: (response: Response) => void;

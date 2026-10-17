@@ -338,7 +338,8 @@ export function SendDialog({
           setCheckingSendQuote(false);
         }
       }
-      if (uriRevision !== paymentUriRevision.current) {
+      // Closing the form before quoting finishes must not create a new payment.
+      if (!mounted.current || uriRevision !== paymentUriRevision.current) {
         releaseSendSubmission();
         return;
       }

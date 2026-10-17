@@ -83,6 +83,9 @@ a pool it asks `POST /api/v1/send/quote`, and the hint under the amount field
 shows the quoted spendable amount and network fee for that account and pool.
 The **Max** button fills in that spendable figure. An amount above it is rejected.
 
+Closing Send while the fee check is pending cancels that submission. A payment
+already submitted keeps running and remains available through **Payments**.
+
 ![The Send ZEC dialog over the Wallet page: Payment request input and Apply button above From account 1 and Ironwood Source pool, Destination Account 2 and Ironwood Destination pool, Amount (ZEC) 1 with Max and a live fee quote, and the memo hello from Regtest with its UTF-8 byte count.](images/send.png)
 
 CLI equivalent:
