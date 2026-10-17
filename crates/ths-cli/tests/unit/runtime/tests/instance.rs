@@ -35,6 +35,109 @@ fn default_offset_uses_stable_loopback_ports() {
 }
 
 #[test]
+fn automatic_ports_are_published_only_on_loopback() {
+    assert_eq!(loopback_publish(0, 18232), "127.0.0.1::18232");
+    assert_eq!(loopback_publish(0, 8080), "127.0.0.1::8080");
+}
+
+#[test]
+fn removable_instance_locks_preserve_exclusion_and_allow_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_owned(),
+    };
+    for _ in 0..3 {
+        let mut lock = runtime.lock_instance(&name("alpha")).unwrap();
+        lock.remove_when_dropped();
+        assert!(runtime.lock_instance(&name("alpha")).is_err());
+        assert!(runtime.root.join(".locks/alpha.lock").exists());
+        drop(lock);
+        assert!(!runtime.root.join(".locks/alpha.lock").exists());
+    }
+    let lock = runtime.lock_instance(&name("alpha")).unwrap();
+    drop(lock);
+    assert!(runtime.root.join(".locks/alpha.lock").exists());
+}
+
+#[test]
+fn removable_instance_locks_remain_exclusive_during_concurrent_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let active = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let active = &active;
+            let root = dir.path();
+            scope.spawn(move || {
+                let runtime = Runtime {
+                    root: root.to_owned(),
+                };
+                for _ in 0..25 {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let mut lock = loop {
+                        match runtime.lock_instance(&name("alpha")) {
+                            Ok(lock) => break lock,
+                            Err(error) => {
+                                assert!(error.to_string().contains("already in use"), "{error:#}");
+                                assert!(Instant::now() < deadline);
+                                thread::yield_now();
+                            }
+                        }
+                    };
+                    lock.remove_when_dropped();
+                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                    thread::yield_now();
+                    assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                    lock.finish().unwrap();
+                }
+            });
+        }
+    });
+    assert!(!dir.path().join(".locks/alpha.lock").exists());
+}
+
+#[test]
+fn instance_lock_registry_contention_is_bounded_and_preserves_the_named_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_owned(),
+    };
+    let mut lock = runtime.lock_instance(&name("alpha")).unwrap();
+    lock.remove_when_dropped();
+    let registry = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(runtime.root.join(".locks/.registry.lock"))
+        .unwrap();
+    registry.lock().unwrap();
+    let started = Instant::now();
+    let error = runtime.lock_instance(&name("beta")).err().unwrap();
+    assert!(error.to_string().contains("registry is busy"));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!runtime.root.join(".locks/beta.lock").exists());
+    let started = Instant::now();
+    drop(lock);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(runtime.root.join(".locks/alpha.lock").exists());
+    registry.unlock().unwrap();
+    let mut lock = runtime.lock_instance(&name("alpha")).unwrap();
+    lock.remove_when_dropped();
+    drop(lock);
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+
+    let mut lock = runtime.lock_instance(&name("alpha")).unwrap();
+    lock.remove_when_dropped();
+    registry.lock().unwrap();
+    let error = lock.finish().unwrap_err();
+    assert!(error.to_string().contains("registry is busy"));
+    assert!(runtime.root.join(".locks/alpha.lock").exists());
+    registry.unlock().unwrap();
+    let mut lock = runtime.lock_instance(&name("alpha")).unwrap();
+    lock.remove_when_dropped();
+    lock.finish().unwrap();
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+}
+
+#[test]
 fn port_offset_shifts_all_four_hosts_by_the_same_stride() {
     let base = host_ports(0).unwrap();
     let shifted = host_ports(10).unwrap();

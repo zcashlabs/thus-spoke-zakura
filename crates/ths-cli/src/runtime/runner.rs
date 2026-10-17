@@ -117,8 +117,8 @@ impl Runtime {
                 .context("startup timeout is too large")?,
         );
         context.overall_deadline = Some(deadline);
-        host_ports(0)?;
-        let ownership = self.own_start(name, &shutdown, &context)?;
+        let mut ownership = self.own_start(name, &shutdown, &context)?;
+        ownership.remove_lifecycle_when_dropped();
         let prepared = {
             let requested = || shutdown.try_interrupted();
             let docker = LifecycleDocker::production(
@@ -170,7 +170,6 @@ impl Runtime {
         shutdown: &Shutdown,
         context: &LifecycleContext,
     ) -> Result<u8> {
-        host_ports(0)?;
         let ownership = self.own_start(name, shutdown, context)?;
         self.run_owned(
             name,
@@ -192,8 +191,9 @@ impl Runtime {
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
-        ownership: StartOwnership,
+        mut ownership: StartOwnership,
     ) -> Result<u8> {
+        ownership.remove_lifecycle_when_dropped();
         let session = ownership.session();
         let deadline = context.overall_deadline.context("missing run deadline")?;
         if deadline.expired() {
@@ -218,7 +218,7 @@ impl Runtime {
         println!("Preparing a fresh {name} environment…");
         let primary = (|| {
             let mut journal = recovery::RecoveryJournal::create(self.recovery_path(name), name)?;
-            let allocated = host.allocate(self, name, shutdown, 0, context, &mut journal)?;
+            let allocated = host.allocate(self, name, shutdown, None, context, &mut journal)?;
             if allocated.zakura_container_id.is_empty()
                 || allocated
                     .resources
@@ -273,6 +273,11 @@ impl Runtime {
         let cleaned = host
             .delete_partial(self, name, context, Deadline::after(context.policy.cleanup))
             .and_then(CleanupReport::into_result);
+        let unlocked = ownership.finish_lifecycle();
+        let cleaned = match (cleaned, unlocked) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(cleanup), Err(unlock)) => Err(anyhow!("{cleanup:#}; {unlock:#}")),
+        };
         match (primary, cleaned) {
             (Ok(ChildOutcome::Exited(code)), Ok(())) => Ok(code),
             (Ok(ChildOutcome::Signaled), Ok(())) => Ok(1),

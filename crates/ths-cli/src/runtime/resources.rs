@@ -517,36 +517,40 @@ pub(super) fn start_container(
 }
 
 pub(super) fn inspect_endpoints(prefix: &str) -> Result<Endpoints> {
+    inspect_endpoints_with(
+        &DockerCli,
+        &format!("{prefix}-app"),
+        &format!("{prefix}-zakura"),
+        &format!("{prefix}-lightwalletd"),
+    )
+}
+
+pub(super) fn inspect_endpoints_with(
+    docker: &impl DockerResourceCommands,
+    app: &str,
+    zakura: &str,
+    lightwalletd: &str,
+) -> Result<Endpoints> {
     Ok(Endpoints {
         dashboard: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-app"), "8080/tcp")?
+            published_port_with(docker, app, "8080/tcp")?
         ),
         rpc: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-zakura"), "18232/tcp")?
+            published_port_with(docker, zakura, "18232/tcp")?
         ),
         lightwalletd: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-lightwalletd"), "9067/tcp")?
+            published_port_with(docker, lightwalletd, "9067/tcp")?
         ),
         p2p: format!(
             "127.0.0.1:{}",
-            published_port(&format!("{prefix}-zakura"), "18233/tcp")?
+            published_port_with(docker, zakura, "18233/tcp")?
         ),
         network: default_regtest(),
         tls: false,
     })
-}
-pub(super) fn published_port(container: &str, port: &str) -> Result<u16> {
-    docker_output([
-        "inspect",
-        "--format",
-        &format!("{{{{(index (index .NetworkSettings.Ports \"{port}\") 0).HostPort}}}}"),
-        container,
-    ])?
-    .parse()
-    .context("Docker returned an invalid published port")
 }
 /// Lists only running containers, so a stopped or missing one is `false` rather than an error.
 pub(crate) fn container_running(name: &str) -> Result<bool> {

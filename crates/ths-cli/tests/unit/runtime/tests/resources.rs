@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn endpoint_inspection_uses_each_containers_actual_published_ports() {
+    let mut docker = RecordingDocker::new("", "", "");
+    for (container, internal, published) in [
+        ("app-id", "8080/tcp", "41001"),
+        ("zakura-id", "18232/tcp", "41002"),
+        ("zakura-id", "18233/tcp", "41003"),
+        ("lightwalletd-id", "9067/tcp", "41004"),
+    ] {
+        docker.extra_output.insert(
+            format!("inspect --format {{{{(index (index .NetworkSettings.Ports \"{internal}\") 0).HostPort}}}} {container}"),
+            published.into(),
+        );
+    }
+    let endpoints =
+        inspect_endpoints_with(&docker, "app-id", "zakura-id", "lightwalletd-id").unwrap();
+    assert_eq!(endpoints.dashboard, "http://127.0.0.1:41001");
+    assert_eq!(endpoints.rpc, "http://127.0.0.1:41002");
+    assert_eq!(endpoints.p2p, "127.0.0.1:41003");
+    assert_eq!(endpoints.lightwalletd, "http://127.0.0.1:41004");
+    docker.extra_output.clear();
+    assert!(inspect_endpoints_with(&docker, "app-id", "zakura-id", "lightwalletd-id").is_err());
+}
+
+#[test]
 fn foreign_volume_collision_preserves_all_resources() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Runtime {

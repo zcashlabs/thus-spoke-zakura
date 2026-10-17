@@ -82,8 +82,9 @@ command in your current directory, then attempts bounded instance cleanup.
 The **120-second** default timeout covers startup and settlement; it does not
 limit child execution. No browser opens. Without `--name`, the name is
 `run-<32 UUID hex digits>`; an explicit name must be fresh. Existing metadata
-or resources cause a collision error rather than reuse. `run` uses the default
-ports and has no `--port-offset`; concurrent runs can therefore collide on ports.
+or resources cause a collision error rather than reuse. Docker assigns free
+loopback ports to each run. Cleanup removes the run's per-instance lock file;
+failures are reported.
 
 ```console
 ths run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'

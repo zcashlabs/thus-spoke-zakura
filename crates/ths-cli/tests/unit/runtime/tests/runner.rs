@@ -1,4 +1,27 @@
 use super::*;
+
+#[test]
+fn run_removes_its_lock_when_the_startup_deadline_has_already_expired() {
+    let (host, events) = RecordingHost::new();
+    let mut context = LifecycleContext::new(LifecyclePolicy::default());
+    context.overall_deadline = Some(Deadline::after(Duration::ZERO));
+    let (_sender, shutdown) = Shutdown::channel();
+    let runtime = runtime_for_tests();
+    let error = runtime
+        .run_with_policy(
+            &name("alpha"),
+            &[OsString::from("true")],
+            &runtime.root,
+            &host,
+            &shutdown,
+            &context,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("timeout"));
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+    assert!(events.lock().unwrap().is_empty());
+}
+
 #[test]
 fn run_timeout_after_allocation_skips_child_and_cleans_its_instance() {
     let (mut host, events) = RecordingHost::new();
@@ -18,6 +41,7 @@ fn run_timeout_after_allocation_skips_child_and_cleans_its_instance() {
         )
         .unwrap_err();
     assert!(format!("{error:#}").contains("timeout"), "{error:#}");
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
     let events = events.lock().unwrap();
     assert!(events.contains(&"allocate:alpha".to_owned()));
     assert!(events.contains(&"delete:alpha".to_owned()));
@@ -221,6 +245,8 @@ fn run_preserves_child_exit_code_and_cleans_after_settlement() {
         )
         .unwrap();
     assert_eq!(code, 42);
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+    assert_eq!(*host.allocated_offsets.lock().unwrap(), [None]);
     let events = events.lock().unwrap();
     assert!(events.contains(&"runtime_status".to_owned()));
     assert!(events.contains(&"child:alpha".to_owned()));
@@ -254,6 +280,7 @@ fn failed_cleanup_reports_error_without_replacing_child_exit_code() {
         )
         .unwrap();
     assert_eq!(code, 42);
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
 }
 
 #[test]
@@ -275,6 +302,7 @@ fn run_refuses_existing_instance_without_cleanup() {
         )
         .unwrap_err();
     assert!(format!("{error:#}").contains("already exists"));
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
     assert!(events.lock().unwrap().is_empty());
 }
 
@@ -303,7 +331,7 @@ fn child_receives_project_directory_and_regtest_endpoints() {
         &command,
         dir.path(),
         &name("alpha"),
-        &endpoints_for(&host_ports(0).unwrap()),
+        &endpoints_for(&host_ports(10).unwrap()),
         &shutdown,
         Duration::from_millis(50),
     )
@@ -317,11 +345,11 @@ fn child_receives_project_directory_and_regtest_endpoints() {
     for expected in [
         "THS_INSTANCE=alpha",
         "THS_NETWORK=regtest",
-        "THS_API_URL=http://127.0.0.1:32805",
-        "THS_ZAKURA_RPC_URL=http://127.0.0.1:18232",
-        "THS_LIGHTWALLETD_URL=http://127.0.0.1:9067",
+        "THS_API_URL=http://127.0.0.1:32815",
+        "THS_ZAKURA_RPC_URL=http://127.0.0.1:18242",
+        "THS_LIGHTWALLETD_URL=http://127.0.0.1:9077",
         "THS_LIGHTWALLETD_TLS=false",
-        "THS_P2P_ADDR=127.0.0.1:18233",
+        "THS_P2P_ADDR=127.0.0.1:18243",
     ] {
         assert!(
             output.lines().any(|line| line == expected),

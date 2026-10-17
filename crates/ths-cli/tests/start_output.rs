@@ -212,7 +212,7 @@ impl Drop for Fixture {
 fn respond_ready(mut stream: TcpStream) {
     let mut request = [0; 2048];
     let _ = stream.read(&mut request);
-    let body = r#"{"result":"test-tip"}"#;
+    let body = r#"{"result":"test-tip","node_height":1,"lightwalletd_height":1,"wallet_scanned_height":1,"wallet_sync_state":"ready","settled":true,"settlement_blocker":null}"#;
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -313,6 +313,33 @@ fn output_after_shutdown(
         fs::read_to_string(fixture.directory.path().join("commands")).unwrap(),
         fixture.port_offset,
     )
+}
+
+#[test]
+fn run_advertises_allocated_service_ports_to_the_app() {
+    let fixture = Fixture::new();
+    let mut child = fixture
+        .command()
+        .args(["--name", &fixture.name, "run", "--", "true"])
+        .spawn()
+        .unwrap();
+    let success = finish(&mut child).success();
+    let output = child.wait_with_output().unwrap();
+    assert!(success, "{}", String::from_utf8_lossy(&output.stderr));
+    let commands = fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
+    let app = commands
+        .lines()
+        .find(|line| line.starts_with(&format!("create --name ths-{}-app ", fixture.name)))
+        .unwrap();
+    let port = 18_232 + fixture.port_offset;
+    for expected in [
+        format!("THS_PUBLIC_ZAKURA_RPC=http://127.0.0.1:{port}"),
+        format!("THS_PUBLIC_LIGHTWALLETD=http://127.0.0.1:{port}"),
+        format!("THS_PUBLIC_P2P=127.0.0.1:{port}"),
+    ] {
+        assert!(app.contains(&expected), "missing {expected}: {app}");
+    }
+    assert!(app.contains("-p 127.0.0.1::8080"));
 }
 
 #[test]

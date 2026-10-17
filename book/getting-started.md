@@ -145,7 +145,7 @@ endpoints. It does **not** report the node height or wallet scan status.
 | `network` | The chain this instance runs: always `"regtest"`. |
 | `tls` | Always `false`; nothing here uses TLS. |
 
-Host ports are **fixed defaults**, all published on `127.0.0.1`: dashboard
+`ths start` uses **fixed defaults**, all published on `127.0.0.1`: dashboard
 `32805`, Zakura RPC `18232`, P2P `18233`, lightwalletd `9067`. They do not
 change between runs, and the launcher never picks a substitute — if one is
 occupied, startup fails and names it. `ths start --port-offset <N>` shifts
@@ -159,7 +159,7 @@ wallet sync state if you need more than process status.
 
 ## Give another experiment its own name
 
-A second instance needs its own ports. Since every instance wants the same
+A second instance needs its own ports. Since every `ths start` wants the same
 four defaults, the name alone is not enough:
 
 ```console

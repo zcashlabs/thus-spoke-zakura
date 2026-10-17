@@ -153,6 +153,7 @@ struct RecordingHost {
     allocate_delay: Duration,
     ready_delay: Duration,
     run_status: Option<RuntimeStatus>,
+    allocated_offsets: Mutex<Vec<Option<u16>>>,
     while_running: Option<Box<dyn Fn() -> Ended>>,
     real_child: bool,
     stopping_seen: Arc<AtomicBool>,
@@ -175,6 +176,7 @@ impl RecordingHost {
                 allocate_delay: Duration::ZERO,
                 ready_delay: Duration::ZERO,
                 run_status: None,
+                allocated_offsets: Mutex::new(Vec::new()),
                 while_running: None,
                 real_child: false,
                 stopping_seen: Arc::new(AtomicBool::new(false)),
@@ -317,11 +319,12 @@ impl StartHost for RecordingHost {
         _runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
-        _port_offset: u16,
+        port_offset: Option<u16>,
         _context: &LifecycleContext,
         _journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
         self.push(&format!("allocate:{name}"));
+        self.allocated_offsets.lock().unwrap().push(port_offset);
         std::thread::sleep(self.allocate_delay);
         shutdown.check()?;
         Ok(AllocatedInstance {
