@@ -1,23 +1,480 @@
 use super::*;
 
 #[test]
+fn chain_changes_forward_the_command_and_report_retention_failures_in_both_outputs() {
+    let response = serde_json::json!({
+        "depth":3,"old_tip":{"height":108,"hash":"old-tip"},
+        "new_tip":{"height":108,"hash":"new-tip"},
+        "removed_hashes":["a","b","c"],"replacement_hashes":["d","e","f"],
+        "retained_txids":["kept"],"failed_transactions":[{"txid":"dropped","error":"invalid anchor"}]
+    });
+    for (operation, keep_txs, body) in [
+        (
+            "reorg",
+            true,
+            serde_json::json!({"depth":3,"keep_txs":true}),
+        ),
+        (
+            "reorg",
+            false,
+            serde_json::json!({"depth":3,"keep_txs":false}),
+        ),
+        ("rollback", false, serde_json::json!({"depth":3})),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", response.to_string())]);
+        let result = change_chain(
+            &url,
+            &reqwest::blocking::Client::new(),
+            operation,
+            3,
+            keep_txs,
+        )
+        .unwrap();
+        let (request_line, request_body) = requests.recv().unwrap();
+        assert_eq!(request_line, format!("POST /api/v1/{operation} HTTP/1.1"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request_body).unwrap(),
+            body
+        );
+        let json = render_chain_change(&result, &name("alpha"), operation, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            response
+        );
+        let text = render_chain_change(&result, &name("alpha"), operation, false).unwrap();
+        assert!(text.contains("3 blocks on alpha"));
+        assert!(text.contains("New tip: 108 (new-tip)"));
+        assert!(text.contains("Not retained: dropped: invalid anchor"));
+        assert!(text.starts_with(if operation == "reorg" {
+            "Reorganized"
+        } else {
+            "Rolled back"
+        }));
+    }
+}
+
+#[test]
+fn chain_changes_do_not_retry_rejected_or_lost_responses() {
+    for status in ["409 Conflict", "drop"] {
+        let (url, requests) = serve(vec![(status, "busy")]);
+        let error =
+            change_chain(&url, &reqwest::blocking::Client::new(), "reorg", 3, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inspect the current tip before retrying")
+        );
+        assert_eq!(requests.recv().unwrap().0, "POST /api/v1/reorg HTTP/1.1");
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[test]
 fn responses_decode_or_report_their_status_and_body() {
     let (url, _requests) = serve(vec![
-        ("200 OK", r#"{"blocks":1,"hashes":["tip"]}"#),
+        (
+            "200 OK",
+            r#"{"id":"job-1","requested_blocks":1,"completed_blocks":1,"state":"completed","error":null,"progress_uncertain":false,"hashes":["tip"]}"#,
+        ),
         ("409 Conflict", "already claimed"),
         ("200 OK", "not json"),
     ]);
     let client = reqwest::blocking::Client::new();
     let get = || client.get(&url).send().unwrap();
 
-    let mined: MineResult = decode_response(get()).unwrap();
-    assert_eq!(mined.hashes, ["tip"]);
-    let rejected = decode_response::<MineResult>(get())
-        .unwrap_err()
-        .to_string();
+    let job: MiningJob = decode_response(get()).unwrap();
+    assert_eq!(job.state, MiningJobState::Completed);
+    let rejected = decode_response::<MiningJob>(get()).unwrap_err().to_string();
     assert_eq!(rejected, "rejected (409 Conflict): already claimed");
-    let malformed = format!("{:#}", decode_response::<MineResult>(get()).unwrap_err());
+    let malformed = format!("{:#}", decode_response::<MiningJob>(get()).unwrap_err());
     assert!(malformed.starts_with("decoding response: "), "{malformed}");
+}
+
+/// Mining journals do real file locking, so tests need an isolated root
+/// instead of sharing one.
+fn runtime_with_instance_dir(instance: &InstanceName) -> (tempfile::TempDir, Runtime) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    fs::create_dir_all(runtime.instance_dir(instance)).unwrap();
+    (dir, runtime)
+}
+
+#[test]
+fn mine_polls_until_completion_and_reports_the_confirmed_count() {
+    let (url, requests) = serve(vec![
+        (
+            "202 Accepted",
+            r#"{"id":"job-1","requested_blocks":3,"completed_blocks":0,"state":"mining","error":null,"progress_uncertain":false}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"id":"job-1","requested_blocks":3,"completed_blocks":1,"state":"mining","error":null,"progress_uncertain":false}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"id":"job-1","requested_blocks":3,"completed_blocks":3,"state":"completed","error":null,"progress_uncertain":false,"hashes":["a","b","c"]}"#,
+        ),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let mut out = Vec::new();
+    runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            3,
+            false,
+        )
+        .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("New tip: c"), "{text}");
+
+    // The POST carries a JSON body; the two GET polls that follow carry none.
+    let mut requests = requests.try_iter();
+    let post: serde_json::Value = serde_json::from_str(&requests.next().unwrap().1).unwrap();
+    assert_eq!(post["blocks"], 3);
+    assert!(post["idempotency_key"].is_string());
+    assert_eq!(requests.count(), 2, "expected exactly two GET polls");
+
+    // A completed job's key is forgotten, so mining the same count again
+    // starts a fresh job rather than replaying this frozen one.
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "mining")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn mine_reports_partial_progress_alongside_the_servers_error() {
+    let (url, _requests) = serve(vec![
+        (
+            "202 Accepted",
+            r#"{"id":"job-1","requested_blocks":5,"completed_blocks":0,"state":"mining","error":null,"progress_uncertain":false}"#,
+        ),
+        (
+            "200 OK",
+            r#"{"id":"job-1","requested_blocks":5,"completed_blocks":2,"state":"failed","error":"generate failed","progress_uncertain":true}"#,
+        ),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let mut out = Vec::new();
+    let error = runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            5,
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "generate failed");
+
+    let output = json_stdout(&out);
+    assert_eq!(output["id"], "job-1");
+    assert_eq!(output["blocks"], 2);
+    assert_eq!(output["requested_blocks"], 5);
+    assert_eq!(output["state"], "failed");
+    assert_eq!(output["progress_uncertain"], true);
+    assert_eq!(output["error"], "generate failed");
+
+    // A terminal job, failed or not, is forgotten the same way.
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "mining")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Always fails to write, as a broken pipe or a full disk would.
+struct FailingWriter;
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the pipe is closed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn mine_keeps_the_journal_key_when_writing_the_json_result_fails() {
+    let (url, _requests) = serve(vec![(
+        "202 Accepted",
+        r#"{"id":"job-1","requested_blocks":1,"completed_blocks":1,"state":"completed","error":null,"progress_uncertain":false,"hashes":["tip"]}"#,
+    )]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            FailingWriter,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            true,
+        )
+        .unwrap_err();
+
+    // The job completed, but its result was never actually delivered, so the
+    // key must survive: clearing it here would let a retry start a second
+    // job for output the caller never received.
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "mining")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(saved.contains_key("mine:1"));
+}
+
+#[test]
+fn submission_retries_pause_between_attempts_instead_of_busy_looping() {
+    // Each attempt fails instantly (a dropped connection, not a stall), so
+    // without a pause between attempts this would retry as fast as the
+    // network allows instead of at a reasonable rate.
+    let (url, requests) = serve(vec![("drop", ""); 20]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let mut out = Vec::new();
+    let error = runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_millis(900),
+            1,
+            false,
+        )
+        .unwrap_err();
+    let full_error = format!("{error:#}");
+    assert!(
+        full_error.contains("may have been accepted"),
+        "{full_error}"
+    );
+
+    let attempts = requests.try_iter().count();
+    assert!(
+        attempts <= 6,
+        "expected a handful of paused attempts within ~900ms, got {attempts}"
+    );
+}
+
+#[test]
+fn mine_status_line_reports_progress_for_every_state() {
+    let mining = MiningJob {
+        id: "job-1".into(),
+        requested_blocks: 5,
+        completed_blocks: 2,
+        state: MiningJobState::Mining,
+        error: None,
+        progress_uncertain: false,
+        hashes: None,
+    };
+    assert_eq!(
+        mine_status_line(&mining, &name("alpha")),
+        "2 of 5 blocks confirmed on alpha. Mining blocks…"
+    );
+
+    let syncing = MiningJob {
+        state: MiningJobState::Syncing,
+        completed_blocks: 5,
+        ..mining.clone()
+    };
+    assert_eq!(
+        mine_status_line(&syncing, &name("alpha")),
+        "5 of 5 blocks confirmed on alpha. Synchronizing wallet…"
+    );
+
+    let completed_without_hashes = MiningJob {
+        state: MiningJobState::Completed,
+        ..syncing.clone()
+    };
+    assert_eq!(
+        mine_status_line(&completed_without_hashes, &name("alpha")),
+        "5 of 5 blocks confirmed on alpha. Mining completed. Wallet synchronized."
+    );
+
+    let completed = MiningJob {
+        hashes: Some(vec!["aaa".into(), "the-tip".into()]),
+        ..completed_without_hashes
+    };
+    assert_eq!(
+        mine_status_line(&completed, &name("alpha")),
+        "5 of 5 blocks confirmed on alpha. Mining completed. Wallet synchronized. New tip: the-tip"
+    );
+
+    let uncertain_failure = MiningJob {
+        state: MiningJobState::Failed,
+        completed_blocks: 1,
+        progress_uncertain: true,
+        ..mining
+    };
+    assert_eq!(
+        mine_status_line(&uncertain_failure, &name("alpha")),
+        "At least 1 of 5 blocks confirmed on alpha; the last mining result is uncertain. Mining job job-1 failed."
+    );
+}
+
+#[test]
+fn a_dropped_poll_connection_is_retried_within_the_deadline() {
+    // Distinct from a stalled poll: the connection is reset immediately, not
+    // held open past the attempt timeout. The job may still be running on
+    // the server, so a disconnected poll must not be treated as the job
+    // itself having failed.
+    let (url, requests) = serve(vec![
+        (
+            "202 Accepted",
+            r#"{"id":"job-1","requested_blocks":1,"completed_blocks":0,"state":"mining","error":null,"progress_uncertain":false}"#.to_owned(),
+        ),
+        ("drop", String::new()),
+        (
+            "200 OK",
+            r#"{"id":"job-1","requested_blocks":1,"completed_blocks":1,"state":"completed","error":null,"progress_uncertain":false,"hashes":["tip"]}"#.to_owned(),
+        ),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let started = Instant::now();
+    let mut out = Vec::new();
+    runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(10),
+            1,
+            false,
+        )
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a dropped poll connection should be retried almost immediately: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(requests.try_iter().count(), 3);
+}
+
+#[test]
+fn a_stalled_poll_times_out_within_the_deadline_instead_of_hanging() {
+    // The server holds the connection open without answering. A single
+    // stalled request must not itself consume the whole deadline: the
+    // per-attempt timeout bounds it well below that.
+    let (url, _requests) = serve(vec![
+        (
+            "202 Accepted",
+            r#"{"id":"job-1","requested_blocks":1,"completed_blocks":0,"state":"mining","error":null,"progress_uncertain":false}"#.to_owned(),
+        ),
+        ("hang", String::new()),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let started = Instant::now();
+    let mut out = Vec::new();
+    let error = runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_millis(500),
+            1,
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("job-1"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a stalled poll must not block anywhere close to the overall deadline: {:?}",
+        started.elapsed()
+    );
+
+    // Still running, not a terminal state: the key survives so a retry picks
+    // the same job back up instead of starting a second one.
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "mining")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert!(saved.contains_key("mine:1"));
+}
+
+#[test]
+fn an_unresolved_submission_key_survives_for_the_next_invocation() {
+    // The initial POST fails outright (no response at all), the failure mode
+    // a same-process retry cannot paper over once its own deadline is spent.
+    // The next `ths mine` with the same block count must still find and
+    // reuse the saved key rather than minting a new one.
+    let unreachable = "http://127.0.0.1:1";
+    let client = reqwest::blocking::Client::new();
+    let alpha = name("alpha");
+    let (_dir, runtime) = runtime_with_instance_dir(&alpha);
+
+    let mut out = Vec::new();
+    runtime
+        .mine_with(
+            &alpha,
+            unreachable,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_millis(300),
+            5,
+            false,
+        )
+        .unwrap_err();
+
+    let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "mining").unwrap();
+    let first_attempt_key = journal.read().unwrap().get("mine:5").unwrap().clone();
+    drop(journal);
+
+    let (url, requests) = serve(vec![(
+        "202 Accepted",
+        r#"{"id":"job-1","requested_blocks":5,"completed_blocks":5,"state":"completed","error":null,"progress_uncertain":false,"hashes":["a"]}"#,
+    )]);
+    let mut out = Vec::new();
+    runtime
+        .mine_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            5,
+            false,
+        )
+        .unwrap();
+
+    let post: serde_json::Value =
+        serde_json::from_str(&requests.try_iter().next().unwrap().1).unwrap();
+    assert_eq!(post["idempotency_key"], first_attempt_key);
 }
 
 #[test]
@@ -240,10 +697,10 @@ fn uri_sends_resolve_the_amount_before_submission() {
     let alpha = name("alpha");
     fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
     for (parsed, amount, valid) in [
-        (WITH_AMOUNT, Some(123), false),
+        (WITH_AMOUNT, Some(TransferAmount::Exact(123)), false),
         (NO_AMOUNT, None, false),
         (WITH_AMOUNT, None, true),
-        (NO_AMOUNT, Some(123), true),
+        (NO_AMOUNT, Some(TransferAmount::Exact(123)), true),
     ] {
         let mut responses = vec![("200 OK", parsed)];
         if valid {
@@ -301,6 +758,321 @@ fn uri_sends_resolve_the_amount_before_submission() {
         );
         assert_eq!(requests.try_iter().count(), 1);
     }
+}
+
+#[test]
+fn max_send_quotes_then_submits_the_quoted_amount() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":2,"to_address":null,"source_pool":"ironwood","destination_pool":"transparent","amount_zatoshi":490,"txid":"max-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let (url, requests) = serve(vec![
+        (
+            "200 OK",
+            r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#,
+        ),
+        ("200 OK", confirmed),
+    ]);
+    let mut out = Vec::new();
+
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "transparent",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap();
+
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].0.starts_with("POST /api/v1/send/quote "));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].1).unwrap(),
+        serde_json::json!({
+            "from_account": 1,
+            "source_pool": "ironwood",
+            "destination_pool": "transparent",
+        })
+    );
+    assert!(requests[1].0.starts_with("POST /api/v1/send "));
+    let submitted: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+    assert_eq!(submitted["amount_zatoshi"], 490);
+    assert_eq!(json_stdout(&out)["amount_zatoshi"], 490);
+}
+
+#[test]
+fn pending_max_send_reuses_its_quote_and_idempotency_key() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let pending = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":2,"to_address":null,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":490,"txid":"max-txid","block_hash":null,"status":"broadcast","last_error":null}"#;
+    let (url, requests) = serve(vec![
+        (
+            "200 OK",
+            r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#,
+        ),
+        ("200 OK", pending),
+    ]);
+    let mut out = Vec::new();
+
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_millis(500),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+    let first: Vec<_> = requests.try_iter().collect();
+    assert_eq!(first.len(), 2);
+    let original_key = sent_key(&first[1]);
+
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":2,"to_address":null,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":490,"txid":"max-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let (url, requests) = serve(vec![("200 OK", confirmed)]);
+    out.clear();
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap();
+
+    let retried: Vec<_> = requests.try_iter().collect();
+    assert_eq!(retried.len(), 1, "a retry must not request a new quote");
+    assert!(retried[0].0.starts_with("POST /api/v1/send "));
+    assert_eq!(sent_key(&retried[0]), original_key);
+    let body: serde_json::Value = serde_json::from_str(&retried[0].1).unwrap();
+    assert_eq!(body["amount_zatoshi"], 490);
+}
+
+#[test]
+fn zero_max_does_not_submit_a_payment() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![(
+        "200 OK",
+        r#"{"available_zatoshi":10,"fee_zatoshi":10,"max_zatoshi":0}"#,
+    )]);
+    let mut out = Vec::new();
+
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "account 1 has no spendable ironwood funds remaining after the network fee"
+    );
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].0.starts_with("POST /api/v1/send/quote "));
+    assert!(out.is_empty());
+}
+
+#[test]
+fn max_quote_errors_are_reported_without_submitting() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![("503 Service Unavailable", "wallet is syncing")]);
+    let mut out = Vec::new();
+
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains(
+            "asking environment alpha for the maximum transfer amount: rejected (503 Service Unavailable): wallet is syncing"
+        ),
+        "{error:#}"
+    );
+    assert_eq!(requests.try_iter().count(), 1);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn delayed_max_quote_respects_the_payment_deadline_without_saving_an_intent() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![
+        (
+            "delay",
+            r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#.to_owned(),
+        ),
+        ("200 OK", activity_json("confirmed", "txid", None)),
+    ]);
+    let mut out = Vec::new();
+
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_millis(50),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+
+    let error = format!("{error:#}");
+    assert!(error.contains("maximum transfer amount"), "{error}");
+    assert!(error.contains("timed out"), "{error}");
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].0.starts_with("POST /api/v1/send/quote "));
+    let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+    assert!(journal.read().unwrap().is_empty());
+    assert!(out.is_empty());
+}
+
+#[test]
+fn expired_max_deadline_does_not_quote_submit_or_save_an_intent() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![(
+        "200 OK",
+        r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#,
+    )]);
+    let mut out = Vec::new();
+
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() - Duration::from_millis(1),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+
+    let error = format!("{error:#}");
+    assert!(error.contains("maximum transfer amount"), "{error}");
+    assert!(error.contains("quote timed out"), "{error}");
+    assert!(requests.try_recv().is_err());
+    let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+    assert!(journal.read().unwrap().is_empty());
+    assert!(out.is_empty());
+}
+
+#[test]
+fn uri_max_uses_the_parsed_destination_pool_for_the_quote() {
+    const PARSED: &str = r#"{"address":"uregtest1external","destination_pool":"ironwood","amount_zatoshi":null,"memo":"hi"}"#;
+    const CONFIRMED: &str = r#"{"id":"uri-max","kind":"send","from_account":1,"to_account":null,"to_address":"uregtest1external","source_pool":"transparent","destination_pool":"ironwood","amount_zatoshi":123,"txid":"uri-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![
+        ("200 OK", PARSED),
+        (
+            "200 OK",
+            r#"{"available_zatoshi":133,"fee_zatoshi":10,"max_zatoshi":123}"#,
+        ),
+        ("200 OK", CONFIRMED),
+    ]);
+
+    runtime
+        .wallet_send_uri_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            1,
+            "transparent",
+            "zcash:uregtest1external",
+            Some(TransferAmount::Max),
+            true,
+        )
+        .unwrap();
+
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].0.starts_with("POST /api/v1/send/quote "));
+    let quote: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+    assert_eq!(quote["source_pool"], "transparent");
+    assert_eq!(quote["destination_pool"], "ironwood");
+    let submitted: serde_json::Value = serde_json::from_str(&requests[2].1).unwrap();
+    assert_eq!(submitted["amount_zatoshi"], 123);
+}
+
+#[test]
+fn uri_amount_rejects_max_before_quoting_or_submitting() {
+    const PARSED: &str = r#"{"address":"uregtest1external","destination_pool":"ironwood","amount_zatoshi":123,"memo":null}"#;
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![("200 OK", PARSED)]);
+
+    let error = runtime
+        .wallet_send_uri_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            1,
+            "ironwood",
+            "zcash:uregtest1external?amount=0.00000123",
+            Some(TransferAmount::Max),
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "the payment URI already sets an amount; omit --max"
+    );
+    assert_eq!(requests.try_iter().count(), 1);
 }
 
 fn json_stdout(out: &[u8]) -> serde_json::Value {

@@ -7,14 +7,14 @@ block from the node to the wallet and browser.
 **Mining** asks Zakura to generate Regtest blocks on demand. A transaction is
 **confirmed** when the node reports it in a block on its current chain with
 a block hash. That does not instantly make every wallet view current:
-lightwalletd still has
-to index the block, and the wallet still has to scan and reconcile it.
+lightwalletd still has to index the block, and the wallet still has to scan
+and reconcile it.
 
 ![The dashboard starts a keyed mining job and receives its accepted status; the CLI waits for that server-owned job. Mining advances acknowledged progress, then wallet synchronization completes or fails. Client disconnection does not cancel admitted work, and an uncertain RPC may have generated extra blocks.](images/mining-flow.svg)
 
-1. `ths mine N` calls `POST /api/v1/mine` with `{"blocks":N}`. The dashboard
-   Mine dialog calls `POST /api/v1/mining/jobs` with a block count and
-   idempotency key; it receives HTTP **202** and a job before mining finishes.
+1. `ths mine N` and the dashboard Mine dialog call
+   `POST /api/v1/mining/jobs` with a block count and
+   idempotency key; each receives HTTP **202** and a job before mining finishes.
    The server accepts **1–10,000** blocks.
 2. Zakura generates blocks and returns their hashes. The server asks Zakura
    for the last returned block's height.
@@ -32,14 +32,13 @@ In the second terminal from Chapter 1, mine two blocks:
 
 ```console
 $ ths mine 2
-Mined 2 blocks on default.
-New tip: 9ef8f0064e3f088f2012fe04d5d70b42f00ae1e9676cdc3d5384ad31d384b8c4
+2 of 2 blocks confirmed on default. Mining completed. Wallet synchronized. New tip: 9ef8f0064e3f088f2012fe04d5d70b42f00ae1e9676cdc3d5384ad31d384b8c4
 ```
 
 The tip hash differs on every run. Regtest has no proof-of-work delay;
 completion also waits for indexing and wallet scanning. The dashboard's
-**Mine** dialog starts a job and shows its progress.
-Do not run both if you intend to add only two blocks.
+**Mine** dialog starts a job and shows its progress. Do not run both if you
+intend to add only two blocks.
 
 ![The Mine blocks dialog over the Wallet page, labelled CHAIN CONTROL, explaining that Regtest mines on demand with no proof-of-work delay, with a Number of blocks field accepting 1 to 10,000 and a Mine blocks button.](images/mine.png)
 
@@ -56,8 +55,16 @@ manual job can be active, including its synchronization phase.
 
 The dashboard reads `GET /api/v1/mining/jobs` for the latest job, or
 `GET /api/v1/mining/jobs/{id}` for a specific job. Reusing an accepted key with
-the same block count returns the same job within that server lifetime; a
-fresh CLI invocation requests new mining.
+the same block count returns the same job within that server lifetime.
+
+`ths mine` saves its key in the instance directory before submission and polls
+for progress. A lost or undecodable response, interruption, or 300-second
+polling timeout leaves the key in place. Rerun the command with the same block
+count to resume that job. Once the job finishes, the CLI clears its key, so
+repeating the command starts new mining. Each poll is capped at two seconds.
+On completion, the CLI reports the confirmed count and mined tip hash; errors
+include the job ID. `--json` includes the legacy `blocks` and `hashes` fields
+alongside the job's ID, state, and progress.
 
 Read the node and wallet view through the running instance's API:
 
@@ -93,9 +100,9 @@ A block height is a position; a **block hash** identifies the block at that
 position. A **reorganization** replaces one branch of recent blocks with
 another. A local chain can reorganize and replace a block with another at
 the same height: height `H` may have hash `A`, then hash `B`. The server
-compares hashes, finds a common checkpoint,
-rewinds its wallet scan when necessary, and scans the canonical chain again.
-It publishes balances only after reconciliation succeeds.
+compares hashes, finds a common checkpoint, rewinds its wallet scan when
+necessary, and scans the canonical chain again. It publishes balances only
+after reconciliation succeeds.
 
 ![About every two seconds the server asks Zakura for its height and hash and compares them with the wallet's scanned checkpoint. When they match it stays ready; when either moved it waits for the index, rewinds if the stored hashes disagree, rescans and publishes. On error the last good snapshot stays visible.](images/wallet-sync.svg)
 
@@ -113,6 +120,10 @@ show different stages of one event. They are observations of different
 owners, not four copies of one database. Revisit [the state ownership
 diagram](architecture/overview.md#the-five-owners-of-information) if that
 distinction is unclear.
+
+The local chain uses NU7 rules from height 1, including a 25-second target,
+shielded action limits, and fee recycling into the network sustainability
+mechanism (NSM). Regtest blocks are still generated on demand with `ths mine`.
 
 **Next:** [learn what to do when a payment or mining response is
 uncertain](architecture/operations.md).

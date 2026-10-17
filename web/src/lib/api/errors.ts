@@ -38,6 +38,7 @@ function humanise(status: number, message: string): string {
     for (const [pattern, replacement] of TRANSLATIONS) {
       if (pattern.test(message)) return replacement;
     }
+    if (status === 503 && message.trim()) return message;
     return 'The environment hit an unexpected error. Check the service logs for details.';
   }
   return message;

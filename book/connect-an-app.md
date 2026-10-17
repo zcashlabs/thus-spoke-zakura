@@ -25,7 +25,8 @@ Keep `ths` running in one terminal. In another:
 ths endpoints --json
 ```
 
-For a named instance, use `ths --name alice endpoints --json`:
+For a named instance, use `ths --name alice endpoints --json` instead. The
+default instance reports:
 
 ```json
 {
@@ -38,12 +39,12 @@ For a named instance, use `ths --name alice endpoints --json`:
 }
 ```
 
-The dashboard Network page shows the same addresses, while
-`GET /api/v1/status` calls the RPC field `zakura_rpc`. That naming
-difference is a property of the two current responses, not two different
-nodes.
+The dashboard Network page shows the same fields for the selected instance.
+Use the URLs reported for your running instance.
+`GET /api/v1/status` calls the RPC field `zakura_rpc`. That naming difference
+is a property of the two current responses, not two different nodes.
 
-![The Network page: Height, Accounts, Verification and Chain tiles above a Node details panel listing the instance, network Regtest, height, and best block hash, and a Runtime endpoints panel listing the dashboard, Zakura RPC, lightwalletd, and P2P addresses with copy buttons. The Chain tile reads test, the raw value Zakura reports.](images/network.png)
+![The Network page: Height, Accounts, Verification and Chain tiles above a Node details panel listing the instance, network Regtest, height, and best block hash, and a Runtime endpoints panel listing the dashboard, Zakura RPC, lightwalletd, and P2P addresses with copy buttons. The Chain tile reads Regtest.](images/network.png)
 
 | Endpoint field | Example use |
 | --- | --- |
@@ -141,8 +142,8 @@ curl -N "$DASHBOARD_URL/api/v1/events"
 Leave it running, perform a faucet or mine in another terminal, and watch
 for `update` events. Press Ctrl+C to stop the stream. Your client should
 read the relevant HTTP endpoint after an event; it should also fetch
-initial state when it connects, since a stream starts with no full
-snapshot. A `mining` event prompts a job-status refresh. A `resync` event means
+fresh state on each connection, cancelling pending older reads first.
+The stream has no replay. A `mining` event prompts a job-status refresh. A `resync` event means
 updates were missed; refetch the state your client uses.
 
 ## Read chain state directly
@@ -187,17 +188,19 @@ These are every route the server serves today, from
 
 | Route | Notes |
 | --- | --- |
-| `GET /api/v1/health` | 200 after startup finishes, Zakura answers, and the wallet has published at least one snapshot; 503 otherwise. The natural readiness probe. |
+| `GET /api/v1/health` | 200 after startup finishes, Zakura and lightwalletd answer, and the wallet has published at least one snapshot; 503 otherwise. The natural readiness probe. |
 | `GET /api/v1/status` | Node tip, account count, network, endpoints, `wallet_sync`, and settlement status. |
 | `GET /api/v1/accounts` | Accounts 1–5 with balances, addresses, and viewing keys. |
 | `GET /api/v1/activity` | Recorded development payments; see [Chapter 6](architecture/operations.md#call-the-api-with-a-deliberate-key) for the object's thirteen fields. |
 | `GET /api/v1/activity?idempotency_key=<key>` | Read one payment's stored activity as a one-item array, or `[]`; the read does not resume it. |
-| `POST /api/v1/send/quote` | Dry run: `available_zatoshi`, `fee_zatoshi`, `max_zatoshi` for one account and pool pair. Builds and broadcasts nothing. Check an intended amount against `max_zatoshi` before calling `send`. |
+| `POST /api/v1/send/quote` | Dry run: `available_zatoshi`, `fee_zatoshi`, `max_zatoshi` for one account and pool pair. Builds and broadcasts nothing. Check an intended amount against `max_zatoshi` before calling `send`. Returns 503 while the environment is still starting, like `send` and `faucet`. |
 | `POST /api/v1/send` | Payment to a user account or supported Regtest address. Needs an idempotency key. |
 | `POST /api/v1/faucet` | Treasury payment to an account. Needs an idempotency key. |
 | `POST /api/v1/faucet/address` | Treasury payment to a supported Regtest address. Needs an idempotency key; external recipients have a separate stored faucet record. |
 | `GET /api/v1/faucet/address?idempotency_key=<key>` | Read an internal or external address-faucet result, or 404 if none is stored. |
 | `POST /api/v1/mine` | Generate 1–10,000 blocks and wait for wallet synchronization. Each call uses a fresh internal key. |
+| `POST /api/v1/reorg` | `{depth, keep_txs?}` removes recent blocks and mines replacements. Returns old/new tips, block hashes, and best-effort transaction-retention results. |
+| `POST /api/v1/rollback` | `{depth}` removes recent blocks without replacements and reconciles the wallet. Neither chain-changing POST is automatically retried. |
 | `POST /api/v1/mining/jobs` | Start a keyed mining job with `{blocks,idempotency_key}`; returns HTTP 202 and the job. |
 | `GET /api/v1/mining/jobs`, `/mining/jobs/{id}` | Read the latest job or a specific job; see [Chapter 5](mining-and-sync.md). |
 | `POST /api/v1/zip321/parse` | Parse one Regtest payment URI into its address, pool, optional amount, and memo; moves no funds. |

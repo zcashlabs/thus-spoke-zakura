@@ -389,12 +389,15 @@ impl RealWallet {
                     fee_zatoshi: u64::from(required).saturating_sub(1),
                     max_zatoshi: 0,
                 }),
+                Err(WalletError::ScanRequired) => {
+                    Err(anyhow::Error::new(PaymentError::ScanRequired))
+                }
                 Err(error) => Err(anyhow::anyhow!("proposing max spend: {error}")),
             }
         } else if source_pool == "transparent" {
             let (target_height, _) = db
                 .get_target_and_anchor_heights(ConfirmationsPolicy::MIN.trusted())?
-                .context("wallet has not scanned any blocks yet")?;
+                .ok_or_else(|| anyhow::Error::new(PaymentError::ScanRequired))?;
             let spendable = db
                 .select_spendable_transparent_outputs(
                     account_id,

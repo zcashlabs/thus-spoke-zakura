@@ -64,10 +64,14 @@ use `cargo run -p thus-spoke-zakura -- --name alice wait --timeout 180`.
 
 | Need | Start reading |
 | --- | --- |
-| Launcher commands, Docker ports, instance cleanup | `crates/ths-cli/src/main.rs` and `runtime.rs` |
-| Server routes, payment and mine handlers, wallet snapshot | `crates/ths-server/src/api.rs` |
-| User accounts, treasury boundary, activity and keys | `crates/ths-server/src/db.rs` |
-| Wallet scan, transaction construction, spendability | `crates/ths-server/src/wallet.rs` |
+| Launcher commands and flags | `crates/ths-cli/src/args.rs` and `commands.rs` |
+| Docker ports, instance startup and cleanup | `crates/ths-cli/src/runtime/`, starting with `instance.rs`, `startup.rs`, and `cleanup.rs` |
+| Server routes | `crates/ths-server/src/api.rs` |
+| Payment and mine handlers | `crates/ths-server/src/api/payments.rs` and `api/mining.rs` |
+| Payment progression, confirmation, and treasury replenishment | `crates/ths-server/src/payments/` |
+| Wallet snapshot and sync status | `crates/ths-server/src/state.rs` and `sync.rs` |
+| User accounts, treasury boundary, activity and keys | `crates/ths-server/src/db.rs` and `db/` |
+| Wallet scan, transaction construction, spendability | `crates/ths-server/src/wallet.rs` and `wallet/payments.rs` |
 | Canonical checkpoint and reorganization handling | `crates/ths-server/src/reconcile.rs` |
 | Dashboard requests, schemas, and query invalidation | `web/src/lib/api/` and `web/src/hooks/` |
 
@@ -112,11 +116,9 @@ npm test --prefix web
 npm run build --prefix web
 ```
 
-The normal `cargo test --workspace` run needs no Docker. The live
-`activity_recovery` regression is ignored there and has a separate
-Docker setup; read the [README's integration-test
-instructions](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/README.md#activity-recovery-integration-test)
-before running it.
+The normal `cargo test --workspace` run needs no Docker. Ignored live
+regressions use the [Docker lifecycle](#docker-lifecycle-regressions) and
+[activity-recovery](#activity-recovery-integration-test) setups below.
 
 For contribution and pull-request policy, see
 [`CONTRIBUTING.md`](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/CONTRIBUTING.md).
@@ -124,3 +126,53 @@ For release images and publication, see
 [`RELEASING.md`](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/RELEASING.md).
 For operational symptoms, turn to [Appendix C:
 Troubleshooting](troubleshooting.md).
+
+## Docker lifecycle regressions
+
+These ignored launcher tests need a disposable Docker daemon. The lost-create
+and lost-start cases also need prepared runtime images. List the cases, then
+run the one you need with `--ignored --exact`:
+
+```console
+cargo test -p thus-spoke-zakura runtime::docker_lifecycle_tests:: -- --ignored --list
+cargo test -p thus-spoke-zakura runtime::docker_lifecycle_tests::lost_start_reply_is_cleaned_up_and_can_be_retried -- --ignored --exact
+```
+
+The launcher allows 120 seconds per readiness phase, 30 seconds for ordinary
+Docker startup commands, 120 seconds for attached initialization, and a separate
+120 seconds for cleanup. A killed Docker client may leave a mutation running in
+the daemon. Cleanup checks resource identity and never adopts a same-name
+replacement or removes another instance's resources. Only one `start` or `run`
+owns a name at a time; `stop` and `reset --force` ask that launcher to shut down
+and wait for verified cleanup. Shutdown requests are tied to its session, so an
+old request cannot stop a later launch.
+
+## Activity-recovery integration test
+
+Run from the repository root with Rust 1.98.0, Docker, network access, and
+enough resources for the pinned images and real Ironwood proofs. The first two
+Cargo commands compile the test and run its Docker-free helpers. List the
+ignored cases, then run one at a time:
+
+```console
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery --no-run
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
+docker pull zakuracore/zakura:1.6.0
+docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --list
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact reorg_and_rollback_preserve_canonical_wallet_and_payment_state
+```
+
+Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart
+recovery, and queued-response cases on every push and PR. The other cases in
+`tests/activity_recovery.rs` cover startup funding, pool transfers, and
+external faucets. The fixture owns and cleans up only its own Docker resources;
+it fails on a timeout or incomplete cleanup.
+
+The reorg/rollback regression observes the server's `SendTransaction` calls
+through the existing gRPC proxy to check that rollback, idempotent replay, and
+restart do not rebroadcast orphaned payments. Mempool absence is not that proof:
+Zakura's own RPC retry queue can re-admit an earlier submission even while the
+server is stopped. Canonical inclusion, balances, signed bytes, payment identity,
+and the reconciled wallet checkpoint are checked separately.

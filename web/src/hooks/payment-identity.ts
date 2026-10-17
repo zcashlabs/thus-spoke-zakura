@@ -13,14 +13,13 @@ export interface SendVariables {
   memo?: string;
 }
 
-export interface FaucetVariables {
-  account_id: number;
-  pool: z.infer<typeof poolSchema>;
-  amount_zatoshi: bigint;
-}
+export type FaucetVariables =
+  | { account_id: number; pool: z.infer<typeof poolSchema>; amount_zatoshi: bigint }
+  | { address: string; amount_zatoshi: bigint };
 
 export function paymentRecipient(variables: SendVariables | FaucetVariables) {
   if ('account_id' in variables) return `Account ${variables.account_id}`;
+  if ('address' in variables) return shortHash(variables.address, 14, 6);
   return variables.to_account === undefined
     ? shortHash(variables.to_address ?? '', 14, 6)
     : `Account ${variables.to_account}`;
@@ -44,7 +43,9 @@ export function paymentName(kind: PaymentKind, variables: SendVariables | Faucet
           variables.amount_zatoshi.toString(),
           variables.memo ?? null,
         ])
-      : `${variables.account_id}:${variables.pool}:${variables.amount_zatoshi}`;
+      : 'address' in variables
+        ? `address:${variables.address}:${variables.amount_zatoshi}`
+        : `${variables.account_id}:${variables.pool}:${variables.amount_zatoshi}`;
   return `ths:${kind}:${fingerprint}`;
 }
 
@@ -125,8 +126,14 @@ export function retainedPaymentKey(name: string, owned: Map<string, string>) {
   );
 }
 
-export async function clearPayment(identity: PaymentIdentity, owned: Map<string, string>) {
-  await withPaymentLock(identity.name, () => {
+export async function clearPayment(
+  identity: PaymentIdentity,
+  owned: Map<string, string>,
+  canClear?: () => boolean,
+  onCleared?: () => void,
+) {
+  return withPaymentLock(identity.name, () => {
+    if (canClear && !canClear()) return false;
     const { kind, name, key } = identity;
     if (localStorage.getItem(name) === key) localStorage.removeItem(name);
     if (sessionStorage.getItem(name) === key) sessionStorage.removeItem(name);
@@ -136,6 +143,9 @@ export async function clearPayment(identity: PaymentIdentity, owned: Map<string,
     }
     if (owned.get(name) === key) owned.delete(name);
     window.dispatchEvent(new Event(changed));
+    // A later Resume may restore this row, so Forget must remove it before releasing the lock.
+    onCleared?.();
+    return true;
   });
 }
 
@@ -153,6 +163,7 @@ const sendFingerprint = z.tuple([
   z.string().nullable(),
 ]);
 const faucetFingerprint = z.tuple([account, poolSchema, amount]);
+const addressFaucetFingerprint = z.tuple([z.literal('address'), z.string().min(1), amount]);
 
 function decodeIdentity(kind: PaymentKind, name: string, key: string): PaymentIdentity {
   const fingerprint = name.slice(`ths:${kind}:`.length);
@@ -174,6 +185,10 @@ function decodeIdentity(kind: PaymentKind, name: string, key: string): PaymentId
         ...(memo === null ? {} : { memo }),
       },
     };
+  }
+  if (fingerprint.startsWith('address:')) {
+    const [, address, amount_zatoshi] = addressFaucetFingerprint.parse(fingerprint.split(':'));
+    return { kind, name, key, variables: { address, amount_zatoshi } };
   }
   const [account_id, pool, amount_zatoshi] = faucetFingerprint.parse(fingerprint.split(':'));
   return { kind, name, key, variables: { account_id, pool, amount_zatoshi } };
@@ -277,5 +292,12 @@ export function useRetainedPayments(kind: PaymentKind) {
       ),
     }));
   }, []);
-  return { ...snapshot, show, dismissKey };
+  const forgetKey = useCallback((key: string) => {
+    setSnapshot((previous) => ({
+      ...previous,
+      retained: previous.retained.filter((item) => item.key !== key),
+      displayed: previous.displayed.filter((item) => item.key !== key),
+    }));
+  }, []);
+  return { ...snapshot, show, dismissKey, forgetKey };
 }

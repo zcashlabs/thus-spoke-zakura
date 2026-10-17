@@ -52,7 +52,7 @@ export function App() {
             <ThemeToggle />
           </div>
           <PaymentUpdates />
-          <Button variant="ghost" onClick={openMine} className="max-sm:hidden">
+          <Button variant="ghost" onClick={openMine}>
             <Pickaxe />
             Mine
           </Button>
@@ -76,7 +76,7 @@ export function App() {
             <span className="text-ink-muted">
               The last known balances remain available. Synchronization will retry automatically
               {status.wallet_sync.last_success_at
-                ? `; last successful update was ${new Date(status.wallet_sync.last_success_at * 1000).toLocaleTimeString()}`
+                ? `; last successful update was ${new Date(status.wallet_sync.last_success_at * 1000).toLocaleString()}`
                 : ''}
               .
             </span>

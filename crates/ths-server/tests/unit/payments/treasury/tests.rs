@@ -7,6 +7,52 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+#[tokio::test]
+async fn deliberately_orphaned_startup_funding_is_not_reexecuted_or_required_again() {
+    let (state, _dir) = crate::state::tests::state_with_local_wallet();
+    let funding = state
+        .0
+        .store
+        .claim_faucet(1, "ironwood", 5 * ZATOSHIS_PER_ZEC, INITIAL_FUNDING_KEY)
+        .unwrap();
+    state
+        .0
+        .store
+        .record_prepared(&funding.id, "startup-tx", b"startup bytes", 140)
+        .unwrap();
+    state
+        .0
+        .store
+        .confirm(&funding.id, "startup-tx", "removed")
+        .unwrap();
+    state.0.store.unconfirm_blocks(&["removed".into()]).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        provision_initial_balance_with_history(&state, false),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let current = state
+        .0
+        .store
+        .activity_for_key(INITIAL_FUNDING_KEY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.id, funding.id);
+    assert_eq!(current.txid, "startup-tx");
+    assert_eq!(current.status, "unconfirmed");
+    assert_eq!(
+        state
+            .0
+            .store
+            .prepared_transaction(&funding.id)
+            .unwrap()
+            .raw_transaction,
+        b"startup bytes"
+    );
+}
 struct RecordingFaucetRuntime {
     events: Mutex<Vec<String>>,
     funds_available: AtomicBool,

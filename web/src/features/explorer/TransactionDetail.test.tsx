@@ -172,7 +172,10 @@ describe('TransactionDetail', () => {
       orchard: { actions: [{}, {}], valueBalanceZat: 10_000 },
     });
 
-    expect(await screen.findByText('Only the fee is public')).toBeInTheDocument();
+    expect(await screen.findByText('Pool value balances are public')).toBeInTheDocument();
+    expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent(
+      '0.0001 ZEC (10,000 zatoshi)',
+    );
     expect(screen.queryByText(/Fully transparent/i)).not.toBeInTheDocument();
   });
 
@@ -190,7 +193,7 @@ describe('TransactionDetail', () => {
       ironwood: { actions: [{}, {}], valueBalanceZat: 10_000 },
     });
 
-    expect(await screen.findByText('Only the fee is public')).toBeInTheDocument();
+    expect(await screen.findByText('Pool value balances are public')).toBeInTheDocument();
     expect(screen.getByText(/stay inside 2 Ironwood actions/)).toBeInTheDocument();
     expect(screen.queryByText(/Fully transparent/i)).not.toBeInTheDocument();
     // Pools the transaction doesn't use aren't listed.
@@ -213,5 +216,44 @@ describe('TransactionDetail', () => {
     expect(await screen.findByText('Orchard actions')).toBeInTheDocument();
     expect(screen.getByText('Sapling spends')).toBeInTheDocument();
     expect(screen.getByText('Sapling outputs')).toBeInTheDocument();
+  });
+
+  it('shows both public pool values when an equal cross-pool transfer nets to zero', async () => {
+    renderTx({
+      txid: TXID,
+      vin: [],
+      vout: [],
+      ironwood: { actions: [{}], valueBalanceZat: 50_000_000 },
+      orchard: { actions: [{}], valueBalanceZat: -50_000_000 },
+    });
+
+    expect(await screen.findByText('Pool value balances are public')).toBeInTheDocument();
+    expect(screen.queryByText('Fully shielded')).not.toBeInTheDocument();
+    expect(screen.queryByText('Nothing is public')).not.toBeInTheDocument();
+    expect(screen.getByText('Ironwood public value balance').nextElementSibling).toHaveTextContent(
+      '0.5 ZEC',
+    );
+    expect(screen.getByText('Orchard public value balance').nextElementSibling).toHaveTextContent(
+      '-0.5 ZEC',
+    );
+  });
+
+  it('explains an unknown fee when a transparent prevout is missing', async () => {
+    renderTx({
+      txid: TXID,
+      vin: [{ txid: PREV_TXID, vout: 0 }],
+      vout: [{ n: 0, valueZat: 9_000 }],
+    });
+    expect(await screen.findByText('Fee')).toBeInTheDocument();
+    expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent('Unknown');
+    expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent(
+      'transparent input value is unavailable',
+    );
+  });
+
+  it('says coinbase has no fee', async () => {
+    renderTx({ txid: TXID, vin: [{ coinbase: '03' }], vout: [{ n: 0, valueZat: 100_000_000 }] });
+    expect(await screen.findByText('Fee')).toBeInTheDocument();
+    expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent('No fee (coinbase)');
   });
 });

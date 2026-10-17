@@ -159,6 +159,7 @@ async fn mining_routes_validate_admit_replay_and_preserve_capacity_history() {
     assert_eq!(first["state"], "mining");
     assert_eq!(first["error"], Value::Null);
     assert_eq!(first["progress_uncertain"], false);
+    assert_eq!(first["hashes"], Value::Null);
     let id = first["id"].as_str().unwrap();
     assert_eq!(
         mining_request(
@@ -192,6 +193,7 @@ async fn mining_routes_validate_admit_replay_and_preserve_capacity_history() {
     runtime.release(3);
     let completed = completed_mining(&app).await;
     assert_eq!(completed["completed_blocks"], 3);
+    assert_eq!(completed["hashes"].as_array().unwrap().len(), 3);
     assert_eq!(
         mining_request(&app, "POST", "/api/v1/mining/jobs", body).await,
         (StatusCode::ACCEPTED, completed.clone())

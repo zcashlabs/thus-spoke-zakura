@@ -1,5 +1,8 @@
 mod support;
 
+#[path = "scenarios/activity_recovery/chain.rs"]
+mod chain;
+
 #[path = "scenarios/activity_recovery/assertions.rs"]
 mod assertions;
 #[path = "scenarios/activity_recovery/faucet.rs"]
@@ -41,6 +44,12 @@ use support::{
     RecoveryPhase, RegtestStack, TerminationSignals, lose_payment_response, request_json, rpc,
     rpc_with_timeout,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_state() -> Result<()> {
+    chain::reorg_and_rollback_preserve_canonical_wallet_and_payment_state().await
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker and prepared regtest images"]

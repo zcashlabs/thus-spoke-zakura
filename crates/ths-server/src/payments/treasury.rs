@@ -791,6 +791,14 @@ pub(crate) async fn provision_initial_balance_with_history(
     already_provisioned: bool,
 ) -> anyhow::Result<()> {
     let existing = state.0.store.activity_for_key(INITIAL_FUNDING_KEY)?;
+    // A deliberate rollback of completed provisioning must not fund Account 1
+    // again or prevent the restarted environment from becoming ready.
+    if existing
+        .as_ref()
+        .is_some_and(|activity| activity.status == "unconfirmed")
+    {
+        return Ok(());
+    }
     state
         .0
         .store

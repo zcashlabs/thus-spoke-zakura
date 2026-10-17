@@ -29,6 +29,7 @@ export function WalletActionsProvider({ children }: { children: ReactNode }) {
   const [viewedPayment, setViewedPayment] = useState<{ key: string | null } | null>(null);
   const viewPayment = (key?: string) => setViewedPayment({ key: key ?? null });
   const [dialog, setDialog] = useState<OpenDialog>(null);
+  const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
   const [formVersion, setFormVersion] = useState(0);
   const [faucetAccount, setFaucetAccount] = useState<number | undefined>(undefined);
   const [sendAccount, setSendAccount] = useState<number | undefined>(undefined);
@@ -41,9 +42,6 @@ export function WalletActionsProvider({ children }: { children: ReactNode }) {
     onRetained: (identity: PaymentIdentity) => {
       liveKeys.current.add(identity.key);
       (identity.kind === 'send' ? savedSend : savedFaucet).show(identity);
-    },
-    onRejected: (identity: PaymentIdentity) => {
-      (identity.kind === 'send' ? savedSend : savedFaucet).dismissKey(identity.key);
     },
     onError: (error: Error, variables: PaymentIdentity['variables'], key: string | undefined) => {
       toast.error(
@@ -58,6 +56,7 @@ export function WalletActionsProvider({ children }: { children: ReactNode }) {
   const { data: accounts = [] } = useAccounts();
   const { data: mining } = useMiningJob();
   const job = mining?.job;
+  const showJobCard = job && job.state !== 'completed' && job.id !== dismissedJobId;
 
   const api = useMemo<WalletActionsApi>(
     () => ({
@@ -98,15 +97,21 @@ export function WalletActionsProvider({ children }: { children: ReactNode }) {
         }}
       >
         {children}
-        {job && job.state !== 'completed' && (
+        {showJobCard && <div aria-hidden className="h-64 md:hidden" />}
+        {showJobCard && (
           <section
             aria-label="Mining job"
-            className="xp-raised bg-panel fixed right-4 bottom-20 z-20 w-[min(380px,calc(100vw-32px))] space-y-3 rounded-xs p-4 shadow-(--shadow-float) md:right-6 md:bottom-6"
+            className="xp-raised bg-panel fixed right-4 bottom-20 z-20 max-h-44 w-[min(380px,calc(100vw-32px))] space-y-3 overflow-y-auto rounded-xs p-4 shadow-(--shadow-float) md:right-6 md:bottom-6 md:max-h-[calc(100dvh-3rem)]"
           >
             <MiningStatus job={job} />
             <Button size="sm" onClick={() => setDialog('mine')}>
               View mining
             </Button>
+            {job.state === 'failed' && (
+              <Button size="sm" variant="ghost" onClick={() => setDismissedJobId(job.id)}>
+                Dismiss mining job
+              </Button>
+            )}
           </section>
         )}
         {/* An explicit open replaces the form even for the same account/draft. */}

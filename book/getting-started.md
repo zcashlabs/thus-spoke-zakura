@@ -9,6 +9,7 @@ network, volumes, and host ports. The default name is `default`. Starting it
 again creates a **fresh** chain and wallet after cleanup succeeds; stopping
 it requests deletion of its data. Check the command result before assuming
 cleanup completed.
+
 An **image** is the built template from which Docker starts a container;
 changing source files does not alter an image that already exists.
 
@@ -186,8 +187,9 @@ ths --name alice status
 ths --name alice endpoints --json
 ```
 
-Each name gets its own chain, wallet, volumes, and cleanup. The offset belongs to the `start` that created the
-instance; later commands find its ports from the instance record.
+Each name gets its own chain, wallet, volumes, and cleanup. The offset belongs
+to the `start` that created the instance; later commands find its ports from
+the instance record.
 
 ## Stop deliberately
 

@@ -11,6 +11,7 @@ impl Runtime {
         host_ports(port_offset)?;
         let shutdown = Shutdown::install()?;
         let context = LifecycleContext::new_for_start(LifecyclePolicy::default(), json);
+        let ownership = self.own_start(name, &shutdown, &context)?;
         let prepared = {
             let requested = || shutdown.try_interrupted();
             let docker = LifecycleDocker::production(
@@ -28,6 +29,7 @@ impl Runtime {
             })()
         };
         if let Err(error) = prepared {
+            let error = ownership.session().explain(name, error);
             let failures = context.finish_helpers(Deadline::after(context.policy.startup_docker));
             if !failures.is_empty() {
                 return Err(anyhow!(
@@ -41,7 +43,7 @@ impl Runtime {
             }
             return Err(error);
         }
-        self.start_with_policy(
+        self.start_owned(
             name,
             no_open,
             json,
@@ -49,10 +51,35 @@ impl Runtime {
             &DockerHost,
             &shutdown,
             &context,
+            ownership,
         )
     }
     pub fn open(&self, name: &InstanceName) -> Result<()> {
         open_url(&self.read_instance(name)?.endpoints.dashboard)
+    }
+}
+
+pub(super) struct StartOwnership {
+    session: Option<StartSession>,
+    lifecycle: Option<InstanceLock>,
+    owner: Option<InstanceLock>,
+}
+impl StartOwnership {
+    pub(super) fn session(&self) -> &StartSession {
+        self.session
+            .as_ref()
+            .expect("the session is held until ownership is dropped")
+    }
+
+    pub(super) fn release_lifecycle(&mut self) {
+        drop(self.lifecycle.take());
+    }
+}
+impl Drop for StartOwnership {
+    fn drop(&mut self) {
+        drop(self.session.take());
+        drop(self.lifecycle.take());
+        drop(self.owner.take());
     }
 }
 
@@ -634,6 +661,7 @@ impl Runtime {
         self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
     }
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn start_with_policy(
         &self,
         name: &InstanceName,
@@ -645,7 +673,47 @@ impl Runtime {
         context: &LifecycleContext,
     ) -> Result<()> {
         host_ports(port_offset)?;
-        let mut lifecycle = Some(self.lock_instance(name)?);
+        let ownership = self.own_start(name, shutdown, context)?;
+        self.start_owned(
+            name,
+            no_open,
+            json,
+            port_offset,
+            host,
+            shutdown,
+            context,
+            ownership,
+        )
+    }
+
+    pub(super) fn own_start(
+        &self,
+        name: &InstanceName,
+        shutdown: &Shutdown,
+        context: &LifecycleContext,
+    ) -> Result<StartOwnership> {
+        let owner = self.claim_start(name)?;
+        let lifecycle = Some(self.lock_instance(name)?);
+        let session = self.publish_session(name, shutdown, context.policy.poll)?;
+        Ok(StartOwnership {
+            session: Some(session),
+            lifecycle,
+            owner: Some(owner),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_owned(
+        &self,
+        name: &InstanceName,
+        no_open: bool,
+        json: bool,
+        port_offset: u16,
+        host: &dyn StartHost,
+        shutdown: &Shutdown,
+        context: &LifecycleContext,
+        mut ownership: StartOwnership,
+    ) -> Result<()> {
         let mut cleanup = CleanupOnDrop {
             runtime: self,
             name,
@@ -684,16 +752,27 @@ impl Runtime {
                     endpoint_lines(&allocated.endpoints)
                 );
             }
-            if !no_open {
-                host.open_url(&allocated.endpoints.dashboard, shutdown, context)?;
+            ownership.release_lifecycle();
+            if !no_open
+                && let Err(error) = host.open_url(&allocated.endpoints.dashboard, shutdown, context)
+                && !shutdown.try_interrupted()
+            {
+                eprintln!("Warning: could not open the dashboard automatically: {error:#}");
+                eprintln!(
+                    "The {name} environment is still running at {}. Run `ths --name {name} open` to open it later.",
+                    allocated.endpoints.dashboard,
+                );
             }
             if !json {
                 println!("\nPress Ctrl+C to stop and delete this development environment.");
             }
-            drop(lifecycle.take());
-            host.wait_for_shutdown(&allocated.app_container, shutdown)
+            let ready = self.mark_ready(name, ownership.session())?;
+            let ended = host.wait_for_shutdown(&allocated.app_container, shutdown);
+            drop(ready);
+            ended
         })();
         cleanup.state = CleanupGuard::Explicit;
+        let primary = primary.map_err(|error| ownership.session().explain(name, error));
         if matches!(primary, Ok(Ended::DeletedElsewhere)) {
             print_progress(
                 json,
@@ -701,6 +780,13 @@ impl Runtime {
             );
             return Ok(());
         }
+        let _stopping = match self.mark_stopping(name) {
+            Ok(marker) => Some(marker),
+            Err(error) => {
+                eprintln!("could not mark {name} as stopping: {error:#}");
+                None
+            }
+        };
         if primary.is_ok() {
             print_progress(json, format_args!("\nStopping and deleting {name}…"));
         }

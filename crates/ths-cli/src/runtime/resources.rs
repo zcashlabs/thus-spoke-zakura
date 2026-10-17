@@ -263,6 +263,8 @@ pub(super) fn ensure_zakura(
             &format!("{prefix}-config:/config:ro"),
             "-e",
             "CONFIG_FILE_PATH=/config/zakurad.toml",
+            "-e",
+            "ZAKURA_STATE__CACHE_DIR=/data",
             ZAKURA_IMAGE,
             "zakurad",
             "start",
@@ -342,6 +344,7 @@ pub(super) fn ensure_app(
     let public_rpc = format!("http://127.0.0.1:{}", ports.rpc);
     let public_lightwalletd = format!("http://127.0.0.1:{}", ports.lightwalletd);
     let public_p2p = format!("127.0.0.1:{}", ports.p2p);
+    let public_dashboard = format!("http://127.0.0.1:{}", ports.dashboard);
     let dashboard_bind = loopback_publish(ports.dashboard, 8080);
     let image = app_image();
     let target = format!("{prefix}-app");
@@ -349,6 +352,7 @@ pub(super) fn ensure_app(
     let public_rpc_env = format!("THS_PUBLIC_ZAKURA_RPC={public_rpc}");
     let public_lightwalletd_env = format!("THS_PUBLIC_LIGHTWALLETD={public_lightwalletd}");
     let public_p2p_env = format!("THS_PUBLIC_P2P={public_p2p}");
+    let public_dashboard_env = format!("THS_PUBLIC_DASHBOARD={public_dashboard}");
     let id = create_container(
         &target,
         name,
@@ -380,6 +384,8 @@ pub(super) fn ensure_app(
             &public_lightwalletd_env,
             "-e",
             &public_p2p_env,
+            "-e",
+            &public_dashboard_env,
             "-v",
             &format!("{prefix}-wallet:/data"),
             &image,

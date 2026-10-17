@@ -147,6 +147,17 @@ fn uncertain_service_creates_record_every_mounted_dependency() {
     impl DockerResourceCommands for LostCreateReply<'_> {
         fn output(&self, args: &[&str]) -> Result<String> {
             if args.first().copied() == Some("create") {
+                if args.contains(&ZAKURA_IMAGE) {
+                    for pair in [
+                        ["-v", "ths-alpha-chain:/data"],
+                        ["-e", "ZAKURA_STATE__CACHE_DIR=/data"],
+                    ] {
+                        assert!(
+                            args.windows(2).any(|arguments| arguments == pair),
+                            "{args:?}"
+                        );
+                    }
+                }
                 anyhow::bail!("timed out waiting for Docker create reply");
             }
             self.0.output(args)

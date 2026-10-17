@@ -605,6 +605,9 @@ pub(crate) async fn execute_address_payment(
         attempt.check_can_start()?;
         match payment.status.as_str() {
             "confirmed" | "failed" => return Ok(payment),
+            "unconfirmed" => {
+                return confirm_address_after_mining_with_attempt(attempt, payment).await;
+            }
             "prepared" | "broadcast" => {
                 match submit_address_prepared(&state.0.store, attempt, &payment).await? {
                     AddressSubmission::Broadcast(updated) => {

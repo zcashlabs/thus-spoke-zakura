@@ -5,6 +5,7 @@ import { cn } from '@/lib/cn';
 import { SakuraMark } from '@/components/ui/SakuraMark';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { useStatus } from '@/hooks/queries';
+import { environmentReadiness } from '@/lib/status';
 
 const NAV = [
   { to: '/wallet', label: 'Wallet', icon: WalletCards },
@@ -14,6 +15,7 @@ const NAV = [
 
 export function Shell({ children }: { children: ReactNode }) {
   const { data: status } = useStatus();
+  const readiness = status ? environmentReadiness(status) : null;
 
   return (
     <div className="min-h-screen md:grid md:grid-cols-[220px_minmax(0,1fr)]">
@@ -56,10 +58,12 @@ export function Shell({ children }: { children: ReactNode }) {
 
         <div className="xp-sunken bg-sunken mt-2 hidden items-center gap-2.5 rounded-xs p-2.5 md:flex">
           <span
-            className={cn('size-2 rounded-xs', status?.node ? 'bg-positive' : 'bg-ink-subtle')}
+            className={cn('size-2 rounded-xs', readiness?.ready ? 'bg-positive' : 'bg-ink-subtle')}
+            aria-hidden
           />
           <div className="text-[12px]">
             <b className="block">{status?.network ?? 'Connecting'}</b>
+            <span className="text-ink-muted block">{readiness?.label ?? 'Connecting'}</span>
             <span className="text-ink-muted block">Height {status?.node?.blocks ?? '—'}</span>
           </div>
         </div>

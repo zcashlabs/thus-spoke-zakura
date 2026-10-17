@@ -83,6 +83,11 @@ afterEach(() => {
 });
 
 describe('NetworkPage', () => {
+  it('shows the user-facing Regtest name in the chain summary', async () => {
+    renderNetwork(BASE);
+    expect(await screen.findByText('Chain')).toBeInTheDocument();
+    expect(screen.getByText('Chain').parentElement).toHaveTextContent('Regtest');
+  });
   it('lists every runtime endpoint the server publishes', async () => {
     renderNetwork({ ...BASE, endpoints: ENDPOINTS });
 
@@ -125,6 +130,35 @@ describe('NetworkPage', () => {
     expect(screen.getByText('Online')).toBeInTheDocument();
     expect(screen.getByText('Wallet ready')).toBeInTheDocument();
   });
+
+  it.each([
+    ['node_unavailable', 'Waiting for Zakura'],
+    ['wallet_behind', 'Wallet is catching up'],
+    ['wallet_error', 'Wallet synchronization failed'],
+    ['wallet_syncing', 'Wallet is syncing'],
+    ['lightwalletd_unavailable', 'Waiting for lightwalletd'],
+    ['height_mismatch', 'Services are catching up'],
+    ['chain_mismatch', 'Services disagree on the chain'],
+  ])(
+    'names the %s settlement blocker even when the wallet reports ready',
+    async (blocker, label) => {
+      renderNetwork({
+        ...BASE,
+        settled: false,
+        settlement_blocker: blocker,
+        wallet_sync: {
+          state: 'ready',
+          fully_scanned_height: 104,
+          observed_height: 104,
+          last_success_at: 1700000000,
+          error: null,
+        },
+      });
+
+      expect(await screen.findByText(label)).toBeInTheDocument();
+      expect(screen.queryByText('All systems operational')).not.toBeInTheDocument();
+    },
+  );
 
   it('does not claim all systems operational when a reachable node has a syncing wallet', async () => {
     renderNetwork({

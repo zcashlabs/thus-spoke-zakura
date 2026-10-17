@@ -71,6 +71,8 @@ The node mines to the treasury's transparent address. Normal transparent-output 
 The instance also has separate `chain`, `lightwalletd`, and `config`
 volumes. `ths` attempts instance-scoped cleanup on shutdown, interruption,
 or startup failure. It reports success only after verifying cleanup.
+Zakura runs with `ZAKURA_STATE__CACHE_DIR=/data`, so its state uses the `chain`
+volume mounted at `/data` instead of the image's default cache directory.
 
 Recovery records allocation identities as well as resource names. A known
 original container ID can be checked and removed without adopting a same-name
@@ -80,9 +82,9 @@ For the exact container and endpoint lifecycle, revisit [Chapter
 1](../getting-started.md). For the meaning of an account
 balance, continue to [Chapter 3](../accounts-and-balances.md).
 
-**Source map:** [launcher runtime](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-cli/src/runtime.rs),
-[server startup](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/main.rs),
-[API snapshot](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/api.rs),
+**Source map:** [launcher runtime](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/crates/ths-cli/src/runtime),
+[server startup](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/bootstrap.rs),
+[wallet snapshot](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/sync.rs),
 [reconciliation](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/reconcile.rs),
 and [dashboard queries](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/web/src/hooks/queries.ts).
 

@@ -89,6 +89,41 @@ fn reports_the_conflicting_loopback_port() {
 }
 
 #[test]
+fn endpoint_exports_match_the_variables_run_passes_to_its_child() {
+    let endpoints = endpoints_for(&host_ports(0).unwrap());
+    assert_eq!(
+        endpoint_exports(&name("alpha"), &endpoints),
+        "\
+export THS_INSTANCE=alpha
+export THS_NETWORK=regtest
+export THS_API_URL=http://127.0.0.1:32805
+export THS_ZAKURA_RPC_URL=http://127.0.0.1:18232
+export THS_LIGHTWALLETD_URL=http://127.0.0.1:9067
+export THS_LIGHTWALLETD_TLS=false
+export THS_P2P_ADDR=127.0.0.1:18233"
+    );
+
+    let mut shifted = endpoints_for(&host_ports(10).unwrap());
+    shifted.network = "other".to_owned();
+    shifted.tls = true;
+    let exports = endpoint_exports(&name("beta"), &shifted);
+    for expected in [
+        "export THS_INSTANCE=beta",
+        "export THS_NETWORK=regtest",
+        "export THS_API_URL=http://127.0.0.1:32815",
+        "export THS_ZAKURA_RPC_URL=http://127.0.0.1:18242",
+        "export THS_LIGHTWALLETD_URL=http://127.0.0.1:9077",
+        "export THS_LIGHTWALLETD_TLS=false",
+        "export THS_P2P_ADDR=127.0.0.1:18243",
+    ] {
+        assert!(
+            exports.lines().any(|line| line == expected),
+            "missing {expected}"
+        );
+    }
+}
+
+#[test]
 fn endpoints_json_includes_regtest_and_plaintext_lightwalletd() {
     let json = serde_json::to_value(endpoints_for(&host_ports(0).unwrap())).unwrap();
     assert_eq!(json["dashboard"], "http://127.0.0.1:32805");
@@ -131,6 +166,7 @@ fn environment(name: &str, states: [&str; 4]) -> EnvironmentStatus {
                 p2p: 18233,
             }),
             created_at: Some(1_000),
+            session: None,
         },
         state: environment_state(&containers),
         containers,
@@ -369,4 +405,137 @@ fn docker_timestamps_parse_to_unix_seconds() {
     // docker's zero time for a container that never started.
     assert_eq!(parse_docker_time("0001-01-01T00:00:00Z"), None);
     assert_eq!(parse_docker_time("not a time"), None);
+}
+
+#[test]
+fn start_refusal_names_what_holds_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let alpha = name("alpha");
+    let _held = runtime.claim_start(&alpha).unwrap();
+    let refusal = || match runtime.claim_start(&alpha) {
+        Ok(_) => panic!("a held start lock was claimed twice"),
+        Err(error) => error.to_string(),
+    };
+    let session = dir.path().join(".locks/alpha.session");
+    let stopping = dir.path().join(".locks/alpha.stopping");
+
+    assert_eq!(
+        refusal(),
+        "environment alpha is already in use by another command"
+    );
+    fs::write(&session, "session").unwrap();
+    assert!(refusal().contains("already running in another `ths start` or `ths run`"));
+    let request = dir.path().join(".locks/alpha.session.stop");
+    fs::write(&request, "").unwrap();
+    assert!(refusal().contains("is being stopped"));
+    fs::remove_file(&request).unwrap();
+    fs::remove_file(&session).unwrap();
+    fs::write(&stopping, "").unwrap();
+    assert!(refusal().contains("is being stopped"));
+}
+
+#[test]
+fn an_exiting_session_keeps_a_newer_session_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let alpha = name("alpha");
+    let (_sender, shutdown) = Shutdown::channel();
+    let session_file = dir.path().join(".locks/alpha.session");
+    fs::create_dir_all(dir.path().join(".locks")).unwrap();
+
+    let old = runtime
+        .publish_session(&alpha, &shutdown, Duration::from_millis(5))
+        .unwrap();
+    fs::write(&session_file, "newer-session").unwrap();
+    drop(old);
+    assert_eq!(fs::read_to_string(&session_file).unwrap(), "newer-session");
+
+    fs::remove_file(&session_file).unwrap();
+    let only = runtime
+        .publish_session(&alpha, &shutdown, Duration::from_millis(5))
+        .unwrap();
+    assert!(session_file.exists());
+    drop(only);
+    assert!(!session_file.exists());
+}
+
+#[test]
+fn owner_probes_never_refuse_a_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let alpha = name("alpha");
+    assert!(!runtime.owner_active(&alpha).unwrap());
+    let held = runtime.claim_start(&alpha).unwrap();
+    assert!(runtime.owner_active(&alpha).unwrap());
+    drop(held);
+
+    let probing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let prober = {
+        let runtime = Runtime {
+            root: dir.path().to_path_buf(),
+        };
+        let probing = probing.clone();
+        std::thread::spawn(move || {
+            let alpha = name("alpha");
+            while probing.load(std::sync::atomic::Ordering::SeqCst) {
+                runtime.owner_active(&alpha).unwrap();
+            }
+        })
+    };
+    for _ in 0..200 {
+        drop(runtime.claim_start(&alpha).unwrap());
+        drop(runtime.lock_instance(&alpha).unwrap());
+    }
+    probing.store(false, std::sync::atomic::Ordering::SeqCst);
+    prober.join().unwrap();
+}
+
+#[test]
+fn listed_environments_do_not_expose_the_launcher_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let alpha = name("alpha");
+    fs::create_dir_all(dir.path().join(".locks")).unwrap();
+    fs::write(dir.path().join(".locks/alpha.session"), "secret-session").unwrap();
+    fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
+    runtime
+        .write_instance(&alpha, &endpoints_for(&host_ports(0).unwrap()))
+        .unwrap();
+    assert_eq!(
+        runtime.read_instance(&alpha).unwrap().session.as_deref(),
+        Some("secret-session")
+    );
+
+    let environments = runtime
+        .environments(&docker_holding(&[("app", Some("alpha"), "running")]))
+        .unwrap();
+    let listed = serde_json::to_string(&environments).unwrap();
+    assert!(!listed.contains("session"), "{listed}");
+}
+
+#[test]
+fn a_damaged_generation_file_does_not_lock_the_name_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let alpha = name("alpha");
+    fs::create_dir_all(dir.path().join(".locks")).unwrap();
+    fs::write(dir.path().join(".locks/alpha.generation"), "").unwrap();
+
+    drop(runtime.claim_start(&alpha).unwrap());
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".locks/alpha.generation")).unwrap(),
+        "1"
+    );
 }

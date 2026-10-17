@@ -6,6 +6,8 @@ import type { MiningJob } from '@/lib/api';
 import { MineDialog } from './MineDialog';
 import { WalletActionsProvider } from './WalletActions';
 import { useWalletActions } from './wallet-actions-context';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '@/hooks/queries';
 
 const running: MiningJob = {
   id: '00000000-0000-4000-8000-000000000001',
@@ -36,7 +38,36 @@ function OpenMine() {
   return <button onClick={actions.openMine}>Open mine</button>;
 }
 
+function ReplaceJob() {
+  const client = useQueryClient();
+  return (
+    <button
+      onClick={() =>
+        client.setQueryData(queryKeys.mining, {
+          job: { ...running, id: '00000000-0000-4000-8000-000000000002' },
+        })
+      }
+    >
+      Start another job
+    </button>
+  );
+}
+
 describe('MineDialog', () => {
+  it('dismisses a failed job card until another job starts', async () => {
+    mockJob({ ...running, state: 'failed', error: 'Mining failed' });
+    renderWithProviders(
+      <WalletActionsProvider>
+        <ReplaceJob />
+      </WalletActionsProvider>,
+    );
+    const card = await screen.findByRole('region', { name: 'Mining job' });
+    await userEvent.click(within(card).getByRole('button', { name: 'Dismiss mining job' }));
+    expect(screen.queryByRole('region', { name: 'Mining job' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Start another job' }));
+    expect(await screen.findByRole('region', { name: 'Mining job' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dismiss mining job' })).not.toBeInTheDocument();
+  });
   it('restores a running job on a fresh mount without starting mining and polls completion', async () => {
     let job = running;
     const fetchSpy = vi

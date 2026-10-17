@@ -73,6 +73,13 @@ impl PaymentAttempt<'_> {
 
     pub(crate) async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<Vec<String>> {
         self.check_can_start()?;
+        let _chain = self
+            .network(
+                Duration::from_secs(120),
+                "waiting for chain operation",
+                async { Ok::<_, anyhow::Error>(self.state.0.mining.chain_operations.read().await) },
+            )
+            .await?;
         let hashes = if self.dispatch_deadline.is_none() {
             self.state
                 .0

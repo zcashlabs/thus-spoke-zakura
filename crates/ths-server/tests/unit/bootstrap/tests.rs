@@ -218,23 +218,25 @@ async fn complete_malformed_rpc_json_stops_http_during_startup() {
 
 #[tokio::test(start_paused = true)]
 async fn startup_retries_past_two_minutes_with_a_delay_then_recovers() {
-    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls = attempts.clone();
-    let started = tokio::time::Instant::now();
-    retry_startup(|| {
-        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        async {
-            if started.elapsed() < Duration::from_secs(125) {
-                Err(tonic::Status::unavailable("dependency unavailable").into())
-            } else {
-                Ok(())
+    for code in [tonic::Code::Unavailable, tonic::Code::Aborted] {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = attempts.clone();
+        let started = tokio::time::Instant::now();
+        retry_startup(|| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                if started.elapsed() < Duration::from_secs(125) {
+                    Err(tonic::Status::new(code, "dependency repairing its chain view").into())
+                } else {
+                    Ok(())
+                }
             }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(started.elapsed() >= Duration::from_secs(125));
-    assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) < 180);
+        })
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(125));
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) < 180);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -281,6 +283,7 @@ fn startup_retries_only_typed_transient_failures() {
         tonic::Code::Unavailable,
         tonic::Code::DeadlineExceeded,
         tonic::Code::ResourceExhausted,
+        tonic::Code::Aborted,
         tonic::Code::InvalidArgument,
         tonic::Code::DataLoss,
         tonic::Code::Internal,
@@ -294,6 +297,7 @@ fn startup_retries_only_typed_transient_failures() {
                 tonic::Code::Unavailable
                     | tonic::Code::DeadlineExceeded
                     | tonic::Code::ResourceExhausted
+                    | tonic::Code::Aborted
             )
         );
     }

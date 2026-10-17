@@ -49,9 +49,9 @@ export function PaymentUpdates() {
   const activeFilter = useRef<HTMLButtonElement>(null);
   // Observe the same Query snapshots for counts, without starting extra reads.
   const statuses = useQueries({
-    queries: identities.map(({ key }) => ({
+    queries: identities.map(({ key, variables }) => ({
       queryKey: queryKeys.payment(key),
-      queryFn: () => api.payment(key),
+      queryFn: () => ('address' in variables ? api.faucetAddressStatus(key) : api.payment(key)),
       enabled: false,
     })),
   });
@@ -106,6 +106,12 @@ export function PaymentUpdates() {
     (identity.kind === 'send' ? savedSend : savedFaucet).dismissKey(identity.key);
     requestAnimationFrame(() => focusNext(identity));
   };
+  const forget = async (identity: PaymentIdentity) => {
+    const operation = identity.kind === 'send' ? send : faucet;
+    const saved = identity.kind === 'send' ? savedSend : savedFaucet;
+    if (!(await operation.forget(identity, () => saved.forgetKey(identity.key)))) return;
+    requestAnimationFrame(() => focusNext(identity));
+  };
   const startNew = (identity: PaymentIdentity) => {
     closePayments();
     // Use a connected opener so closing the next form returns focus to the
@@ -113,7 +119,11 @@ export function PaymentUpdates() {
     requestAnimationFrame(() => {
       trigger.current?.focus();
       if (identity.kind === 'send') openSend(identity.variables.from_account, identity);
-      else openFaucet(identity.variables.account_id, identity);
+      else
+        openFaucet(
+          'account_id' in identity.variables ? identity.variables.account_id : undefined,
+          identity,
+        );
     });
   };
   if (!identities.length && !errors.length && !open) return null;
@@ -281,13 +291,15 @@ export function PaymentUpdates() {
             onHiddenFocus={() => focusNext(identity)}
             focusRequest={viewedPayment?.key === identity.key ? viewedPayment : null}
             onView={() => viewPayment(identity.key)}
+            onFollowTransaction={closePayments}
             identity={identity}
             restored={isRestored(identity.key)}
-            pendingKey={operation.pendingKey}
+            inFlight={operation.isSubmitting(identity)}
             busy={send.isPending || faucet.isPending}
             claimAnnouncement={operation.claimAnnouncement}
             onTerminal={operation.clear}
             onResume={(item) => operation.resume(item)}
+            onForget={() => forget(identity)}
             onDismiss={() => dismiss(identity)}
             onNew={() => startNew(identity)}
           />

@@ -221,6 +221,7 @@ where
         runtime.check_can_start()?;
         match pending.status.as_str() {
             "confirmed" | "failed" => return Ok(pending),
+            "unconfirmed" => return runtime.confirm_after_mining(pending).await,
             "prepared" | "broadcast" => match runtime.submit_prepared(&pending).await? {
                 PreparedSubmission::Broadcast(activity) => {
                     return runtime.confirm_after_mining(activity).await;

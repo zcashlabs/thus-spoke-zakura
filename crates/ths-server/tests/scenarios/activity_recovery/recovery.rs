@@ -459,7 +459,16 @@ pub(super) async fn exercise_recovery(
         "broadcast did not add exactly one activity row"
     );
     let persisted_broadcast = one_matching_activity(&persisted_activities, &sent)?;
-    assert_persisted_send_response(&sent, &persisted_broadcast)?;
+    // Background reconciliation may clear the transient mining error while the
+    // transaction remains broadcast. All other activity fields must stay fixed.
+    anyhow::ensure!(
+        persisted_broadcast.last_error == sent.last_error
+            || persisted_broadcast.last_error.is_none(),
+        "broadcast activity acquired an unexpected error"
+    );
+    let mut expected_broadcast = sent.clone();
+    expected_broadcast.last_error = persisted_broadcast.last_error.clone();
+    assert_persisted_send_response(&expected_broadcast, &persisted_broadcast)?;
 
     reporter.phase(RecoveryPhase::DirectMine);
     let _: Vec<String> = rpc(&client, fixture.node_url(), "generate", json!([1])).await?;

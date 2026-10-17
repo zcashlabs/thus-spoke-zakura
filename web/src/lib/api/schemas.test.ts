@@ -29,6 +29,17 @@ describe('statusSchema', () => {
   it('remains compatible with servers that predate wallet status', () => {
     expect(statusSchema.parse(baseStatus).wallet_sync).toBeUndefined();
   });
+
+  it('retains settlement status and blocker from the server', () => {
+    const status = statusSchema.parse({
+      ...baseStatus,
+      settled: false,
+      settlement_blocker: 'wallet_behind',
+    });
+
+    expect(status.settled).toBe(false);
+    expect(status.settlement_blocker).toBe('wallet_behind');
+  });
 });
 
 describe('accountSchema', () => {

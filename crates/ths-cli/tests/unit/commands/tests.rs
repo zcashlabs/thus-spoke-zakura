@@ -40,3 +40,15 @@ fn parses_wait_and_run_without_reusing_the_default_name() {
 
     assert_eq!(resolve_name(None, false).to_string(), "default");
 }
+
+#[test]
+fn endpoints_env_rejects_json() {
+    for args in [
+        ["ths", "--json", "endpoints", "--env"],
+        ["ths", "endpoints", "--env", "--json"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let error = run(cli).unwrap_err().to_string();
+        assert!(error.contains("endpoints --env"), "{error}");
+    }
+}

@@ -63,6 +63,13 @@ Do not delete and recreate a released tag. A correction gets a new patch
 version so the binary and its exact-version runtime images remain an auditable
 set.
 
+### Linux launcher compatibility
+
+Build Linux launchers natively on Ubuntu 22.04 to keep their glibc requirement
+compatible with Ubuntu 22.04 and Debian 12. Before upload, the release workflow
+smoke-runs each Linux architecture's launcher in both distro containers. Keep
+this compatibility check in place when updating the Linux build runners.
+
 Official launcher artifacts are compiled with the `release-distribution`
 feature. That feature authorizes self-replacement; ordinary Cargo builds expose
 non-mutating update checks but cannot overwrite themselves.

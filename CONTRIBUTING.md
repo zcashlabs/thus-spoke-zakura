@@ -63,6 +63,6 @@ roots and Cargo commands above still apply.
 
 ## Reporting bugs and requesting features
 
-Use the issue templates. For bugs, include `ths --version`, your platform, and relevant output from `ths status` and `ths logs`.
+Use the issue form. Describe one concrete problem, include an example or reproduction steps when possible, and explain your proposed solution or what you have tried. If you do not know the solution, say so.
 
 Report security vulnerabilities privately to the maintainers, not in a public issue.

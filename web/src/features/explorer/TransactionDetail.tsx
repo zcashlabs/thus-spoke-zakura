@@ -10,7 +10,7 @@ import { useTransaction } from '@/hooks/queries';
 import { errorMessage, type TxInput } from '@/lib/api';
 import { formatZecAmount } from '@/lib/money';
 import { chainTime, shortHash } from '@/lib/format';
-import { actionSummary, summariseShielding } from './shielding';
+import { actionSummary, summariseShielding, transactionFee } from './shielding';
 import { resolveTransparentInput } from './resolve-input';
 import { Stat } from '@/components/ui/Stat';
 import { BACK_LINK } from './back-link';
@@ -100,6 +100,7 @@ export function TransactionDetail() {
 
   const tx = transaction.data;
   const shielding = summariseShielding(tx);
+  const fee = transactionFee(tx);
   const confirmations = tx.confirmations ?? 0;
 
   return (
@@ -144,11 +145,11 @@ export function TransactionDetail() {
           <div className="border-accent-line bg-accent-soft flex items-start gap-3 border-b px-5 py-4">
             <SakuraMark className="text-accent mt-0.5 size-5 shrink-0" />
             <div>
-              <b className="text-accent-strong block text-[13px]">Nothing is public</b>
+              <b className="text-accent-strong block text-[13px]">No public transfer value</b>
               <p className="text-ink-muted mt-1 text-[12px] leading-relaxed">
-                No transparent inputs, no transparent outputs, and a zero value balance. The sender,
-                recipient and amount exist only inside {actionSummary(shielding)}. Your wallet can
-                display this transfer because it holds the viewing keys; nobody else can.
+                There are no transparent inputs or outputs, and each used shielded pool has a zero
+                public value balance. Sender, recipient and amount stay inside{' '}
+                {actionSummary(shielding)}. The transaction and its action counts remain public.
               </p>
             </div>
           </div>
@@ -158,11 +159,11 @@ export function TransactionDetail() {
           <div className="border-accent-line bg-accent-soft flex items-start gap-3 border-b px-5 py-4">
             <SakuraMark className="text-accent mt-0.5 size-5 shrink-0" />
             <div>
-              <b className="text-accent-strong block text-[13px]">Only the fee is public</b>
+              <b className="text-accent-strong block text-[13px]">Pool value balances are public</b>
               <p className="text-ink-muted mt-1 text-[12px] leading-relaxed">
-                Sender, recipient and amount stay inside {actionSummary(shielding)}. The pool value
-                balance of {formatZecAmount(BigInt(Math.abs(shielding.valueBalanceZat)))} is public
-                chain data, because the network has to see the fee to verify the transaction.
+                Sender and recipient stay inside {actionSummary(shielding)}. Each pool's signed
+                value balance is visible on chain, even when balances cancel across pools. The fee
+                is shown below only when all values needed to calculate it are available.
               </p>
             </div>
           </div>
@@ -172,10 +173,10 @@ export function TransactionDetail() {
           <div className="border-warning/30 bg-warning-soft flex items-start gap-3 border-b px-5 py-4">
             <EyeOff className="text-warning mt-0.5 size-5 shrink-0" aria-hidden />
             <div>
-              <b className="text-warning block text-[13px]">Value crosses the shielded boundary</b>
+              <b className="text-warning block text-[13px]">Transparent activity is public</b>
               <p className="text-ink-muted mt-1 text-[12px] leading-relaxed">
-                The transparent side below — its addresses and amounts — is public. The shielded
-                side is not.
+                The transparent inputs and outputs below are public. Each shielded pool's signed
+                value balance is public too; shielded addresses and individual notes are not.
               </p>
             </div>
           </div>
@@ -196,7 +197,28 @@ export function TransactionDetail() {
           )}
           <DataRow label="Transparent inputs">{shielding.transparentInputs}</DataRow>
           <DataRow label="Transparent outputs">{shielding.transparentOutputs}</DataRow>
+          {shielding.publicValues.map(({ pool, zatoshi }) => (
+            <DataRow key={pool} label={`${pool} public value balance`}>
+              {zatoshi !== null && Number.isSafeInteger(zatoshi)
+                ? formatZecAmount(BigInt(zatoshi))
+                : 'Unavailable'}
+            </DataRow>
+          ))}
+          <DataRow label="Fee">
+            {fee.kind === 'coinbase'
+              ? 'No fee (coinbase)'
+              : fee.kind === 'unknown'
+                ? `Unknown: ${fee.reason}`
+                : `${formatZecAmount(fee.zatoshi)} (${fee.zatoshi.toLocaleString()} zatoshi)`}
+          </DataRow>
         </dl>
+
+        {shielding.publicValues.length > 0 && (
+          <PanelNote>
+            A positive pool balance means value leaves that pool. A negative balance means value
+            enters it. These values do not identify individual shielded notes.
+          </PanelNote>
+        )}
 
         {!shielding.shieldedOnly && !shielding.mixed && (
           <PanelNote>
@@ -235,7 +257,7 @@ export function TransactionDetail() {
                     )}
                   </td>
                   <NumCell className="font-semibold">
-                    {formatZecAmount(BigInt(out.valueZat))}
+                    {out.valueZat === undefined ? '—' : formatZecAmount(BigInt(out.valueZat))}
                   </NumCell>
                 </Row>
               );

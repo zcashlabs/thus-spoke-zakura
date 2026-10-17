@@ -10,6 +10,7 @@ import { errorMessage } from '@/lib/api';
 import type { WalletSync } from '@/lib/api/schemas';
 import { cn } from '@/lib/cn';
 import { Stat } from '@/components/ui/Stat';
+import { environmentReadiness } from '@/lib/status';
 
 /** Ordered as you meet them: the page you are on, then the services behind it. */
 const ENDPOINT_ROWS = [
@@ -69,6 +70,7 @@ export function NetworkPage() {
   const node = status.data.node;
   const online = node !== null;
   const endpoints = status.data.endpoints;
+  const readiness = environmentReadiness(status.data);
   // Older servers omit wallet_sync entirely; render a neutral fallback
   // instead of inventing a readiness state the server never reported.
   const walletState = status.data.wallet_sync?.state;
@@ -78,15 +80,7 @@ export function NetworkPage() {
   // Node connectivity and wallet readiness are independent: a reachable node
   // can still have a syncing or failed wallet, so "operational" only holds
   // when both agree. A missing wallet_sync is treated as unknown, not ready.
-  const headline = !online
-    ? 'Waiting for Zakura'
-    : walletState === 'ready'
-      ? 'All systems operational'
-      : walletState === 'syncing'
-        ? 'Wallet is syncing'
-        : walletState === 'error'
-          ? 'Wallet synchronization failed'
-          : 'Node connected';
+  const headline = readiness.label;
 
   return (
     <div className="grid gap-4">
@@ -125,7 +119,7 @@ export function NetworkPage() {
           label="Verification"
           value={node ? `${Math.round(node.verificationprogress * 100)}%` : '—'}
         />
-        <Stat label="Chain" value={node?.chain ?? '—'} />
+        <Stat label="Chain" value={node ? status.data.network : '—'} />
       </section>
 
       <Panel eyebrow="CHAIN" title="Node details">

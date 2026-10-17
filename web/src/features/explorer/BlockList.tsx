@@ -70,7 +70,9 @@ export function BlockList() {
 
             <footer className="border-line bg-raised flex items-center justify-between border-t px-4 py-2">
               <span className="text-ink-muted font-mono text-[11px]">
-                {before === undefined ? 'Chain tip' : `Before #${before.toLocaleString()}`}
+                {before === undefined
+                  ? 'Chain tip'
+                  : `First block #${blocks.data.blocks[0]?.height.toLocaleString() ?? before.toLocaleString()}`}
               </span>
               <Button
                 variant="subtle"

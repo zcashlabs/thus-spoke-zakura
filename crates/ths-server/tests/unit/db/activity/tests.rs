@@ -1,6 +1,163 @@
 use super::*;
 use crate::db::address_faucet::AddressFaucetIntent;
 use std::sync::Barrier;
+
+#[test]
+fn unconfirming_blocks_preserves_internal_and_external_requests_and_signed_bytes() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let account = store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            12_000,
+            "orphaned-send",
+            Some("memo"),
+        )
+        .unwrap();
+    store
+        .record_prepared(&account.id, "send-tx", b"send bytes", 140)
+        .unwrap();
+    store.confirm(&account.id, "send-tx", "removed").unwrap();
+    let external = store
+        .claim_address_faucet("tm-external", 12_000, "orphaned-external")
+        .unwrap();
+    store
+        .record_address_prepared(&external.id, "external-tx", b"external bytes", 140)
+        .unwrap();
+    store
+        .confirm_address(&external.id, "external-tx", "removed")
+        .unwrap();
+    let retained = store
+        .claim_faucet(3, "ironwood", 12_000, "retained-faucet")
+        .unwrap();
+    store
+        .record_prepared(&retained.id, "retained-tx", b"retained bytes", 140)
+        .unwrap();
+    store
+        .confirm(&retained.id, "retained-tx", "canonical")
+        .unwrap();
+
+    store.unconfirm_blocks(&["removed".into()]).unwrap();
+    let orphan = store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            12_000,
+            "orphaned-send",
+            Some("memo"),
+        )
+        .unwrap();
+    let faucet = store
+        .address_faucet_for_key("orphaned-external")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            orphan.id.as_str(),
+            orphan.txid.as_str(),
+            orphan.status.as_str()
+        ),
+        (account.id.as_str(), "send-tx", "unconfirmed")
+    );
+    assert_eq!(
+        (
+            faucet.id.as_str(),
+            faucet.txid.as_str(),
+            faucet.status.as_str()
+        ),
+        (external.id.as_str(), "external-tx", "unconfirmed")
+    );
+    assert_eq!(orphan.block_hash, None);
+    assert_eq!(faucet.block_hash, None);
+    assert_eq!(
+        store
+            .prepared_transaction(&account.id)
+            .unwrap()
+            .raw_transaction,
+        b"send bytes"
+    );
+    assert_eq!(
+        store
+            .optional_prepared_transaction(&external.id)
+            .unwrap()
+            .unwrap()
+            .raw_transaction,
+        b"external bytes"
+    );
+    assert_eq!(
+        store.activity(&retained.id).unwrap().block_hash.as_deref(),
+        Some("canonical")
+    );
+    assert!(
+        store
+            .claim_transfer(
+                1,
+                Recipient::Account(2),
+                "ironwood",
+                "ironwood",
+                12_001,
+                "orphaned-send",
+                Some("memo")
+            )
+            .is_err()
+    );
+
+    assert!(store.confirm_reorged_transaction("send-tx", "").is_err());
+    store
+        .confirm_reorged_transaction("send-tx", "replacement")
+        .unwrap();
+    store
+        .confirm_reorged_transaction("external-tx", "replacement")
+        .unwrap();
+    assert_eq!(
+        store.activity(&account.id).unwrap().block_hash.as_deref(),
+        Some("replacement")
+    );
+    assert_eq!(
+        store
+            .address_faucet_for_key("orphaned-external")
+            .unwrap()
+            .unwrap()
+            .status,
+        "confirmed"
+    );
+}
+
+#[test]
+fn unconfirming_both_payment_collections_is_atomic() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let account = store
+        .claim_faucet(2, "ironwood", 12_000, "atomic-unconfirm")
+        .unwrap();
+    store
+        .record_prepared(&account.id, "tx", b"bytes", 140)
+        .unwrap();
+    store.confirm(&account.id, "tx", "removed").unwrap();
+    let external = store
+        .claim_address_faucet("tm-external", 12_000, "atomic-external")
+        .unwrap();
+    store
+        .record_address_prepared(&external.id, "external", b"bytes", 140)
+        .unwrap();
+    store
+        .confirm_address(&external.id, "external", "removed")
+        .unwrap();
+    store.0.lock().unwrap().execute_batch(
+        "CREATE TRIGGER reject_unconfirm BEFORE UPDATE ON address_faucets BEGIN SELECT RAISE(ABORT,'injected failure'); END;"
+    ).unwrap();
+    assert!(store.unconfirm_blocks(&["removed".into()]).is_err());
+    assert_eq!(store.activity(&account.id).unwrap().status, "confirmed");
+    assert_eq!(
+        store.activity(&account.id).unwrap().block_hash.as_deref(),
+        Some("removed")
+    );
+}
 #[test]
 fn records_real_transfer_without_mutating_balances() {
     let store = Store::open(":memory:").unwrap();

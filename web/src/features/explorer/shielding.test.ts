@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionSummary, summariseShielding } from './shielding';
+import { actionSummary, summariseShielding, transactionFee } from './shielding';
 import type { Transaction, TxOutput } from '@/lib/api';
 
 const output = (valueZat = 0): TxOutput => ({ n: 0, valueZat });
@@ -15,7 +15,10 @@ const base: Transaction = {
 describe('summariseShielding', () => {
   it('recognises a fully shielded Orchard transfer', () => {
     // Shape taken from a real /transactions response on a live regtest.
-    const summary = summariseShielding({ ...base, orchard: { actions: [{}, {}] } });
+    const summary = summariseShielding({
+      ...base,
+      orchard: { actions: [{}, {}], valueBalanceZat: 0 },
+    });
     expect(summary.orchardActions).toBe(2);
     expect(summary.transparentInputs).toBe(0);
     expect(summary.transparentOutputs).toBe(0);
@@ -55,7 +58,7 @@ describe('summariseShielding', () => {
 
     expect(summary.shieldedOnly).toBe(true);
     expect(summary.fullyShielded).toBe(false);
-    expect(summary.valueBalanceZat).toBe(10_000);
+    expect(summary.publicValues).toEqual([{ pool: 'Orchard', zatoshi: 10_000 }]);
   });
 
   it('claims full shielding only when the balance is zero too', () => {
@@ -85,18 +88,79 @@ describe('summariseShielding', () => {
     expect(summary.shieldedActions).toBe(2);
     expect(summary.shieldedOnly).toBe(true);
     expect(summary.fullyShielded).toBe(false);
-    expect(summary.valueBalanceZat).toBe(10_000);
+    expect(summary.publicValues).toEqual([{ pool: 'Ironwood', zatoshi: 10_000 }]);
   });
 
-  it('sums the Ironwood, Orchard and Sapling value balances', () => {
+  it('keeps equal and opposite pool balances separate', () => {
     const summary = summariseShielding({
       ...base,
       orchard: { actions: [{}], valueBalanceZat: -5_000 },
       ironwood: { actions: [{}], valueBalanceZat: 5_000 },
     });
 
-    expect(summary.valueBalanceZat).toBe(0);
-    expect(summary.fullyShielded).toBe(true);
+    expect(summary.publicValues).toEqual([
+      { pool: 'Ironwood', zatoshi: 5_000 },
+      { pool: 'Orchard', zatoshi: -5_000 },
+    ]);
+    expect(summary.fullyShielded).toBe(false);
+  });
+
+  it('does not claim full shielding when a used pool omits its balance', () => {
+    expect(summariseShielding({ ...base, orchard: { actions: [{}] } }).fullyShielded).toBe(false);
+  });
+});
+
+describe('transactionFee', () => {
+  it('calculates a shielded-only fee from complete pool balances', () => {
+    expect(
+      transactionFee({ ...base, ironwood: { actions: [{}], valueBalanceZat: 10_000 } }),
+    ).toEqual({ kind: 'known', zatoshi: 10_000n });
+  });
+
+  it('calculates a mixed-pool fee without discarding either public balance', () => {
+    expect(
+      transactionFee({
+        ...base,
+        vin: [{ valueZat: 100_000_000 }],
+        vout: [output(49_985_000)],
+        ironwood: { actions: [{}], valueBalanceZat: -50_000_000 },
+        orchard: { actions: [{}], valueBalanceZat: 5_000 },
+      }),
+    ).toEqual({ kind: 'known', zatoshi: 20_000n });
+  });
+
+  it('does not guess a fee with an unresolved transparent input or pool balance', () => {
+    expect(
+      transactionFee({ ...base, vin: [{ txid: 'a'.repeat(64), vout: 0 }], vout: [output(1)] }),
+    ).toEqual({ kind: 'unknown', reason: 'A transparent input value is unavailable.' });
+    expect(transactionFee({ ...base, vin: [{ valueZat: 100_000 }], vout: [{ n: 0 }] })).toEqual({
+      kind: 'unknown',
+      reason: 'A transparent output value is unavailable.',
+    });
+    expect(transactionFee({ ...base, orchard: { actions: [{}] } })).toEqual({
+      kind: 'unknown',
+      reason: 'A shielded pool value balance is unavailable.',
+    });
+  });
+
+  it('handles coinbase explicitly', () => {
+    expect(
+      transactionFee({ ...base, vin: [{ coinbase: '03' }], vout: [output(100_000_000)] }),
+    ).toEqual({ kind: 'coinbase' });
+  });
+
+  it('does not omit legacy JoinSplit values from a fee calculation', () => {
+    expect(
+      transactionFee({
+        ...base,
+        vjoinsplit: [{}],
+        vin: [{ valueZat: 100_000 }],
+        vout: [output(90_000)],
+      }),
+    ).toEqual({
+      kind: 'unknown',
+      reason: 'Legacy JoinSplit values are not available in this view.',
+    });
   });
 });
 

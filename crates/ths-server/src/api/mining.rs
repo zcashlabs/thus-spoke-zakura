@@ -1,16 +1,12 @@
 use super::error::require_started;
 use super::{
-    error::{ApiError, ApiResult},
+    error::{ApiError, ApiJson, ApiPath, ApiResult},
     payments::require_key,
 };
 use crate::mining::{MiningJob, MiningState};
 use crate::state::AppState;
 use anyhow::Context;
-use axum::{
-    Json,
-    extract::{Path, State},
-    http::StatusCode,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[derive(Deserialize)]
@@ -21,7 +17,7 @@ pub(crate) struct StartMiningRequest {
 
 pub(crate) async fn start_mining_job(
     State(state): State<AppState>,
-    Json(req): Json<StartMiningRequest>,
+    ApiJson(req): ApiJson<StartMiningRequest>,
 ) -> ApiResult<(StatusCode, Json<MiningJob>)> {
     require_started(&state)?;
     require_key(&req.idempotency_key)?;
@@ -35,7 +31,7 @@ pub(crate) async fn latest_mining_job(State(state): State<AppState>) -> Json<Val
 
 pub(crate) async fn mining_job(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<MiningJob>> {
     state
         .0
@@ -55,7 +51,7 @@ pub(crate) struct MineRequest {
 }
 pub(crate) async fn mine(
     State(state): State<AppState>,
-    Json(req): Json<MineRequest>,
+    ApiJson(req): ApiJson<MineRequest>,
 ) -> ApiResult<Json<Value>> {
     require_started(&state)?;
     if !(1..=10_000).contains(&req.blocks) {

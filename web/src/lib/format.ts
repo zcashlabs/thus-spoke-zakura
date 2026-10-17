@@ -40,7 +40,7 @@ export function timeAgo(value: string, now: Date = new Date()): string {
   if (Math.abs(delta) < 5) return 'just now';
 
   for (const [unit, span] of DIVISIONS) {
-    if (Math.abs(delta) < span) return RELATIVE.format(Math.round(delta), unit);
+    if (Math.round(Math.abs(delta)) < span) return RELATIVE.format(Math.round(delta), unit);
     delta /= span;
   }
   return '—';

@@ -47,10 +47,7 @@ listen_addr = "0.0.0.0:18233"
 [network.testnet_parameters]
 lockbox_disbursements = [{{ address = "{LOCKBOX_MARKER_ADDRESS}", amount = 0 }}]
 [network.testnet_parameters.activation_heights]
-"NU6" = 1
-"NU6.1" = 1
-"NU6.2" = 1
-"NU6.3" = 1
+"NU7" = 1
 
 [rpc]
 listen_addr = "0.0.0.0:18232"

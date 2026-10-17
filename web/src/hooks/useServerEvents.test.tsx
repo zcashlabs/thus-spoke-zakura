@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AddressDetail } from '@/features/explorer/AddressDetail';
 import { BlockDetail } from '@/features/explorer/BlockDetail';
 import { TransactionDetail } from '@/features/explorer/TransactionDetail';
+import { AppProviders } from '@/app/providers';
 import { renderWithProviders, requestUrl } from '@/test/utils';
+import { useAccounts } from './queries';
 import { useServerEvents } from './useServerEvents';
 
 const TXID = 'd9'.repeat(32);
@@ -16,6 +18,7 @@ type Listener = (event: MessageEvent<string>) => void;
 
 class FakeEventSource {
   static current: FakeEventSource | undefined;
+  onopen: ((event: Event) => void) | null = null;
   private listeners = new Set<Listener>();
 
   constructor() {
@@ -88,6 +91,47 @@ function requestsTo(path: string): number {
 }
 
 describe('useServerEvents', () => {
+  it('refreshes a pending initial balance after SSE opens', async () => {
+    const account = {
+      id: 1,
+      name: 'Account 1',
+      unified_address: 'uregtest1example',
+      transparent_address: ADDRESS,
+      transparent_zatoshi: 0,
+      ironwood_zatoshi: 100_000_000,
+    };
+    const oldResponse = await json([account]);
+    let releaseOldResponse!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>((resolve) => {
+      releaseOldResponse = resolve;
+    });
+    routes = { '/accounts': () => [{ ...account, ironwood_zatoshi: 200_000_000 }] };
+    vi.mocked(fetch).mockImplementationOnce(() => pendingResponse);
+
+    function Balance() {
+      const accounts = useAccounts();
+      return <p>Balance: {accounts.data?.[0]?.ironwood_zatoshi.toString()}</p>;
+    }
+    render(
+      <AppProviders>
+        <Live>
+          <Balance />
+        </Live>
+      </AppProviders>,
+    );
+    expect(requestsTo('/accounts')).toBe(1);
+
+    act(() => FakeEventSource.current?.onopen?.(new Event('open')));
+    // The held snapshot predates subscription and must not satisfy the fresh read.
+    await act(async () => {
+      releaseOldResponse(oldResponse);
+      await pendingResponse;
+    });
+
+    expect(await screen.findByText('Balance: 200000000')).toBeInTheDocument();
+    expect(requestsTo('/accounts')).toBe(2);
+  });
+
   it.each(['resync', 'unknown-topic'])('invalidates all mapped queries on %s', (topic) => {
     const client = new QueryClient();
     const invalidate = vi.spyOn(client, 'invalidateQueries');

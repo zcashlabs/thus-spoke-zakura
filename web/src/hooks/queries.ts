@@ -46,10 +46,10 @@ export function isTerminalPayment(activity: Activity | null | undefined): boolea
   return activity?.status === 'confirmed' || activity?.status === 'failed';
 }
 
-export function usePaymentStatus(key: string, enabled: boolean) {
+export function usePaymentStatus(key: string, enabled: boolean, addressFaucet = false) {
   return useQuery({
     queryKey: queryKeys.payment(key),
-    queryFn: () => api.payment(key),
+    queryFn: () => (addressFaucet ? api.faucetAddressStatus(key) : api.payment(key)),
     enabled,
     retry: false,
     staleTime: 0,

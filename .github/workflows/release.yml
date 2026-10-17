@@ -60,9 +60,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - runner: macos-15-intel
             target: x86_64-apple-darwin
@@ -74,6 +74,14 @@ jobs:
       - run: rustup toolchain install 1.98.0 --profile minimal --target "${{ matrix.target }}"
       - run: rustup default 1.98.0
       - run: cargo build --locked --release -p thus-spoke-zakura --features release-distribution --target "${{ matrix.target }}"
+      - name: Verify Linux launcher on Ubuntu 22.04 and Debian 12
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        shell: bash
+        run: |
+          launcher="$PWD/target/${{ matrix.target }}/release/ths"
+          for image in ubuntu:22.04 debian:12; do
+            docker run --rm --volume "$launcher:/tmp/ths:ro" "$image" /tmp/ths --version
+          done
       - name: Package launcher
         shell: bash
         run: |

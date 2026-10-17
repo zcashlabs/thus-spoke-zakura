@@ -1,4 +1,4 @@
-use super::error::{ApiError, ApiResult};
+use super::error::{ApiError, ApiJson, ApiQuery, ApiResult};
 use super::payments::require_key;
 use crate::state::AppState;
 use crate::{
@@ -9,23 +9,29 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode, header::HOST},
+    extract::State,
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 pub(crate) async fn health(State(state): State<AppState>) -> Response {
-    let node = state.0.rpc.chain_info().await.ok();
+    let (node, lightwalletd) =
+        tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_checkpoint());
+    let node = node.ok();
     let wallet = state.wallet_sync_status().await;
-    let status = if state.started() && node.is_some() && wallet.last_success_at.is_some() {
+    let ok = state.started()
+        && node.is_some()
+        && lightwalletd.is_ok()
+        && wallet.last_success_at.is_some();
+    let status = if ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
         status,
-        Json(json!({"ok": state.started() && node.is_some() && wallet.last_success_at.is_some(), "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
+        Json(json!({"ok": ok, "instance": state.0.instance, "node": node, "wallet_sync": wallet})),
     )
         .into_response()
 }
@@ -44,6 +50,7 @@ fn settlement_status(
     node: Option<&ChainCheckpoint>,
     lightwalletd: Option<&ChainCheckpoint>,
     wallet: &WalletSyncStatus,
+    started: bool,
 ) -> SettlementStatus {
     let settlement_blocker = if node.is_none() {
         Some("node_unavailable")
@@ -59,6 +66,8 @@ fn settlement_status(
         Some("chain_mismatch")
     } else if !node.is_some_and(|tip| wallet_matches_tip(wallet, tip)) {
         Some("wallet_behind")
+    } else if !started {
+        Some("starting")
     } else {
         None
     };
@@ -94,14 +103,11 @@ pub(crate) struct PublicEndpoints {
     p2p: String,
 }
 
-pub(crate) async fn status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Status>> {
-    let dashboard_host = headers
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("127.0.0.1:8080");
+fn public_dashboard_endpoint(configured: Option<&str>) -> String {
+    configured.unwrap_or("http://127.0.0.1:8080").to_owned()
+}
+
+pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<Json<Status>> {
     let (node, lightwalletd) =
         tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_checkpoint());
     let node = node.ok();
@@ -111,7 +117,16 @@ pub(crate) async fn status(
         height: chain.blocks,
         hash: chain.bestblockhash.clone(),
     });
-    let settlement = settlement_status(node_tip.as_ref(), lightwalletd.as_ref(), &wallet_sync);
+    let mut settlement = settlement_status(
+        node_tip.as_ref(),
+        lightwalletd.as_ref(),
+        &wallet_sync,
+        state.started(),
+    );
+    if settlement.settled && state.0.mining.chain_operations.try_read().is_err() {
+        settlement.settled = false;
+        settlement.settlement_blocker = Some("chain_operation");
+    }
     Ok(Json(Status {
         instance: state.0.instance.clone(),
         node,
@@ -119,7 +134,9 @@ pub(crate) async fn status(
         auto_mine: true,
         network: "Regtest",
         endpoints: PublicEndpoints {
-            dashboard: format!("http://{dashboard_host}"),
+            dashboard: public_dashboard_endpoint(
+                std::env::var("THS_PUBLIC_DASHBOARD").ok().as_deref(),
+            ),
             zakura_rpc: std::env::var("THS_PUBLIC_ZAKURA_RPC")
                 .unwrap_or_else(|_| "http://127.0.0.1:18232".into()),
             lightwalletd: std::env::var("THS_PUBLIC_LIGHTWALLETD")
@@ -142,7 +159,7 @@ pub(crate) struct SeedRequest {
 }
 pub(crate) async fn seed(
     State(state): State<AppState>,
-    Json(req): Json<SeedRequest>,
+    ApiJson(req): ApiJson<SeedRequest>,
 ) -> ApiResult<Json<Value>> {
     if req.confirmation != "I understand this seed is for regtest only" {
         return Err(ApiError::bad_request("exact confirmation phrase required"));
@@ -163,7 +180,7 @@ pub(crate) struct Page {
 }
 pub(crate) async fn activity(
     State(state): State<AppState>,
-    Query(page): Query<Page>,
+    ApiQuery(page): ApiQuery<Page>,
 ) -> ApiResult<Json<Vec<Activity>>> {
     if let Some(key) = page.idempotency_key {
         require_key(&key)?;

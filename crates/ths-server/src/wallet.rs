@@ -239,6 +239,12 @@ impl RealWallet {
         &self.lightwalletd
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_lightwalletd(mut self, endpoint: String) -> Self {
+        self.lightwalletd = endpoint;
+        self
+    }
+
     async fn with_db<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -467,17 +473,51 @@ impl RealWallet {
     }
 
     pub async fn apply_balances(&self, accounts: &mut [Account]) -> Result<()> {
-        let Some(summary) = self
-            .with_db(|db| Ok(db.get_wallet_summary(ConfirmationsPolicy::MIN)?))
+        let account_ids = self.account_ids.clone();
+        let Some(balances) = self
+            .with_db(move |db| {
+                db.transactionally_with_extension::<_, _, anyhow::Error>(|wallet, ext| {
+                    let Some(scanned) = wallet.block_fully_scanned()? else {
+                        return Ok(None);
+                    };
+                    // SDK totals retain unmined credits and input reservations after a rewind.
+                    // Publish canonical holdings without deleting those pending transactions.
+                    let balances = account_ids
+                        .iter()
+                        .map(|id| {
+                            ext.query_row(
+                                "SELECT
+                                    COALESCE(SUM(CASE WHEN r.pool = 0 THEN r.value ELSE 0 END), 0),
+                                    COALESCE(SUM(CASE WHEN r.pool = 4 THEN r.value ELSE 0 END), 0)
+                                 FROM v_received_outputs r
+                                 JOIN accounts a ON a.id = r.account_id
+                                 JOIN transactions received ON received.id_tx = r.transaction_id
+                                 WHERE a.uuid = ?1 AND received.mined_height <= ?2
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM v_received_output_spends s
+                                       JOIN transactions spent ON spent.id_tx = s.transaction_id
+                                       WHERE s.pool = r.pool
+                                         AND s.received_output_id = r.id_within_pool_table
+                                         AND spent.mined_height <= ?2
+                                   )",
+                                rusqlite::params![
+                                    id.expose_uuid(),
+                                    u32::from(scanned.block_height())
+                                ],
+                                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+                            )
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(Some(balances))
+                })
+            })
             .await?
         else {
             return Ok(());
         };
-        for (account, wallet_id) in accounts.iter_mut().zip(&self.account_ids) {
-            if let Some(balance) = summary.account_balances().get(wallet_id) {
-                account.transparent_zatoshi = u64::from(balance.unshielded_balance().total());
-                account.ironwood_zatoshi = u64::from(balance.ironwood_balance().total());
-            }
+        for (account, (transparent, ironwood)) in accounts.iter_mut().zip(balances) {
+            account.transparent_zatoshi = transparent;
+            account.ironwood_zatoshi = ironwood;
         }
         Ok(())
     }

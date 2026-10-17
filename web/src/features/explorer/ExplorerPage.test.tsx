@@ -45,6 +45,31 @@ describe('ExplorerPage', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('labels an older page with the first block shown', async () => {
+    vi.spyOn(api, 'blocks').mockImplementation((options) =>
+      Promise.resolve({
+        blocks: (options?.before === undefined ? [60, 59] : [39, 38]).map((height) => ({
+          hash: `${height}`.padStart(64, '0'),
+          height,
+          time: 1_760_000_000,
+          size: 1000,
+          nTx: 1,
+          confirmations: 1,
+          tx: [],
+          valuePools: [],
+        })),
+        next_before: options?.before === undefined ? 39 : null,
+      }),
+    );
+    renderAt('/explorer');
+
+    expect(await screen.findByRole('link', { name: '60' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Older blocks' }));
+
+    expect(await screen.findByText('First block #39')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '39' })).toBeInTheDocument();
+  });
+
   it('does not claim a hash is absent when the server fails', async () => {
     vi.spyOn(api, 'search').mockRejectedValue(new ApiError(500, 'Zakura unavailable'));
     renderAt('/explorer');

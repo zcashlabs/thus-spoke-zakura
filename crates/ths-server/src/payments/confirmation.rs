@@ -22,7 +22,10 @@ pub(crate) async fn confirm_address_after_mining_with_attempt(
     pending: AddressFaucet,
 ) -> anyhow::Result<AddressFaucet> {
     let pending = confirm_address_from_chain_with_attempt(attempt, pending).await?;
-    if matches!(pending.status.as_str(), "confirmed" | "failed") {
+    if matches!(
+        pending.status.as_str(),
+        "confirmed" | "failed" | "unconfirmed"
+    ) {
         return Ok(pending);
     }
     attempt
@@ -44,6 +47,7 @@ pub(crate) async fn confirm_address_from_chain_with_attempt(
         .lookup_transaction(&pending.txid)
         .await
         .context("looking up address faucet confirmation")?;
+    let transaction = confirmation_lookup(&pending.status, transaction);
     let updated = match original_presence_from_lookup(attempt, &pending.txid, transaction)
         .await
         .context("checking address faucet confirmation")?
@@ -76,6 +80,19 @@ pub(crate) fn confirmed_block_hash(tx: &Value) -> Option<&str> {
         .filter(|hash| !hash.is_empty())
 }
 
+fn confirmation_lookup(status: &str, transaction: Option<Value>) -> Option<Value> {
+    // Side-chain evidence is expected for an intentionally orphaned transaction;
+    // it is not permission to replace or rebroadcast that payment.
+    transaction.filter(|tx| {
+        status != "unconfirmed"
+            || (tx.get("in_active_chain").and_then(Value::as_bool) != Some(false)
+                && tx
+                    .get("confirmations")
+                    .and_then(Value::as_i64)
+                    .is_none_or(|count| count >= 0))
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn apply_confirmation(
     store: &Store,
@@ -100,6 +117,7 @@ pub(crate) async fn confirm_from_chain_with_attempt(
         .lookup_transaction(&pending.txid)
         .await
         .context("looking up payment confirmation")?;
+    let transaction = confirmation_lookup(&pending.status, transaction);
     let updated = match original_presence_from_lookup(attempt, &pending.txid, transaction)
         .await
         .context("checking payment confirmation")?
@@ -200,7 +218,10 @@ pub(crate) async fn confirm_after_mining_with_attempt(
     pending: Activity,
 ) -> anyhow::Result<Activity> {
     let pending = confirm_from_chain_with_attempt(attempt, pending).await?;
-    if matches!(pending.status.as_str(), "confirmed" | "failed") {
+    if matches!(
+        pending.status.as_str(),
+        "confirmed" | "failed" | "unconfirmed"
+    ) {
         return Ok(pending);
     }
     attempt

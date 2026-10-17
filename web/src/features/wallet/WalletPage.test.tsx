@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { QueryClient } from '@tanstack/react-query';
 import {
   renderWithProviders,
@@ -17,6 +17,7 @@ import { WalletPage } from './WalletPage';
 
 const TXID = 'ab'.repeat(32);
 const PAYMENT_URI = 'zcash:uregtest1account2?amount=1.23456789&memo=cmVudCBmb3IgT2N0b2Jlcg';
+const testLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')!;
 
 function json(body: unknown): Promise<Response> {
   return Promise.resolve(
@@ -116,6 +117,11 @@ function renderWallet(status = 'confirmed') {
   );
 }
 
+function CurrentPath() {
+  const { pathname } = useLocation();
+  return <output aria-label="Current path">{pathname}</output>;
+}
+
 function savedFaucet(
   key: string,
   account: number,
@@ -143,6 +149,58 @@ function savedFaucet(
       };
 }
 
+function savedName(kind: 'send' | 'faucet') {
+  return kind === 'send'
+    ? 'ths:send:[1,2,"ironwood","ironwood","100000000",null]'
+    : 'ths:faucet:1:ironwood:100000000';
+}
+
+function retainSaved(kind: 'send' | 'faucet', key: string, name = savedName(kind)) {
+  localStorage.setItem(name, key);
+  localStorage.setItem(`ths:${kind}:retained:${key}`, name);
+}
+
+function preparingPayment(kind: 'send' | 'faucet', key: string): Activity {
+  return {
+    id: key,
+    kind,
+    from_account: kind === 'send' ? 1 : null,
+    to_account: kind === 'send' ? 2 : 1,
+    to_address: null,
+    source_pool: 'ironwood',
+    destination_pool: 'ironwood',
+    amount_zatoshi: 100_000_000n,
+    txid: '',
+    block_hash: null,
+    status: 'preparing',
+    last_error: null,
+    created_at: '2026-10-14 00:00:00',
+  };
+}
+
+function deferPaymentLock() {
+  let release!: () => void;
+  let tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const request = vi.fn((name: string, callback: (lock: Lock) => unknown) => {
+    const result = tail.then(() => callback({ name, mode: 'exclusive' }));
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  });
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request } });
+  return {
+    request,
+    release: async () => {
+      release();
+      await tail;
+    },
+  };
+}
+
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -150,9 +208,57 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  Object.defineProperty(navigator, 'locks', testLocks);
 });
 
 describe('WalletPage', () => {
+  it('closes Payments when following a confirmed payment transaction link', async () => {
+    mockWalletApis();
+    savedFaucet('confirmed-faucet-key', 1, 'confirmed');
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/wallet']}>
+        <WalletActionsProvider>
+          <PaymentUpdates />
+          <CurrentPath />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+    const payments = await screen.findByRole('dialog', { name: 'Payments' });
+    await userEvent.click(within(payments).getByRole('link', { name: 'View transaction' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Current path')).toHaveTextContent(`/explorer/tx/${TXID}`),
+    );
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Payments' })).toBeNull());
+  });
+
+  it.each(['ctrlKey', 'metaKey', 'shiftKey'] as const)(
+    'keeps Payments open when opening a confirmed transaction in another context with %s',
+    async (modifier) => {
+      mockWalletApis();
+      savedFaucet('confirmed-faucet-key', 1, 'confirmed');
+      renderWithProviders(
+        <MemoryRouter initialEntries={['/wallet']}>
+          <WalletActionsProvider>
+            <PaymentUpdates />
+            <CurrentPath />
+          </WalletActionsProvider>
+        </MemoryRouter>,
+      );
+
+      await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+      const payments = await screen.findByRole('dialog', { name: 'Payments' });
+      fireEvent.click(within(payments).getByRole('link', { name: 'View transaction' }), {
+        [modifier]: true,
+      });
+
+      expect(screen.getByRole('dialog', { name: 'Payments' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Current path')).toHaveTextContent('/wallet');
+    },
+  );
+
   it.each(['confirmed', 'failed', 'broadcast'])(
     'restores %s outside the dialogs using GET only',
     async (status) => {
@@ -190,6 +296,9 @@ describe('WalletPage', () => {
         expect(within(updates).getByText('Waiting for confirmation')).toBeInTheDocument();
         expect(localStorage.getItem(name)).toBe(key);
         expect(within(updates).getByRole('button', { name: 'Resume' })).toBeInTheDocument();
+        expect(
+          within(updates).queryByRole('button', { name: 'Forget saved request' }),
+        ).not.toBeInTheDocument();
       } else {
         await waitFor(() => expect(localStorage.getItem(name)).toBeNull());
         expect(updates).toBeInTheDocument();
@@ -342,6 +451,9 @@ describe('WalletPage', () => {
       expect(await within(updates).findByText(/Couldn’t check status/)).toBeInTheDocument();
       expect(within(updates).getByText('Pending')).toBeInTheDocument();
       expect(within(updates).getByText('Last known: Waiting for confirmation')).toBeInTheDocument();
+      expect(
+        within(updates).queryByRole('button', { name: 'Forget saved request' }),
+      ).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Failed 0' })).toBeInTheDocument();
       expect(resume).toHaveFocus();
       expect(localStorage.getItem('ths:faucet:1:ironwood:500000000')).toBe('live-key');
@@ -387,6 +499,271 @@ describe('WalletPage', () => {
       expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
     },
   );
+
+  it.each([
+    ['send', 'resume-first'],
+    ['send', 'forget-first'],
+    ['faucet', 'resume-first'],
+    ['faucet', 'forget-first'],
+  ] as const)('preserves a queued %s request when %s races for its lock', async (kind, order) => {
+    mockWalletApis();
+    const fallback = vi.mocked(fetch).getMockImplementation()!;
+    const name = savedName(kind);
+    const key = 'queued-payment-key';
+    const record = `ths:${kind}:retained:${key}`;
+    retainSaved(kind, key);
+    let payment: Activity | null = null;
+    vi.spyOn(api, 'payment').mockImplementation(() => Promise.resolve(payment));
+    let finishPost!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      finishPost = resolve;
+    });
+    vi.mocked(fetch).mockImplementation((input, init) =>
+      init?.method === 'POST' && requestUrl(input).endsWith(`/${kind}`)
+        ? response
+        : fallback(input, init),
+    );
+    const posts = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(
+          ([input, init]) => init?.method === 'POST' && requestUrl(input).endsWith(`/${kind}`),
+        );
+    const bodies = () =>
+      posts().map(([, init]): unknown =>
+        JSON.parse(typeof init?.body === 'string' ? init.body : '{}'),
+      );
+
+    renderWithWalletActions(<WalletPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+    const forget = await screen.findByRole('button', { name: 'Forget saved request' });
+    const resume = screen.getByRole('button', { name: 'Resume' });
+    const row = forget.closest('article')!;
+    const lock = deferPaymentLock();
+    const removed = vi.spyOn(Storage.prototype, 'removeItem');
+
+    // Batch both clicks to exercise an already-rendered Forget control as well as its UI gate.
+    act(() => {
+      if (order === 'resume-first') {
+        resume.click();
+        forget.click();
+      } else {
+        forget.click();
+        resume.click();
+      }
+    });
+    await waitFor(() => expect(lock.request).toHaveBeenCalledTimes(2));
+    expect(lock.request.mock.calls.every(([lockedName]) => lockedName === name)).toBe(true);
+    expect(posts()).toHaveLength(0);
+    const forgetWhileQueued = screen.queryByRole('button', { name: 'Forget saved request' });
+    await act(lock.release);
+    await waitFor(() => expect(posts()).toHaveLength(1));
+
+    payment = preparingPayment(kind, key);
+    await act(async () => {
+      finishPost(
+        new Response(JSON.stringify({ ...payment, amount_zatoshi: 100_000_000 }), {
+          status: 202,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      await response;
+    });
+    expect(forgetWhileQueued).toBeNull();
+    expect(document.body).toContainElement(row);
+    expect(localStorage.getItem(name)).toBe(key);
+    expect(localStorage.getItem(record)).toBe(name);
+    expect(sessionStorage.getItem(`${name}:tab`)).toBe(key);
+    expect(removed).not.toHaveBeenCalledWith(record);
+    expect(bodies()[0]).toMatchObject({ idempotency_key: key });
+    await userEvent.click(await within(row).findByRole('button', { name: 'Resume' }));
+    await waitFor(() => expect(posts()).toHaveLength(2));
+    expect(bodies()[1]).toMatchObject({ idempotency_key: key });
+    expect(await within(row).findByText('Preparing payment')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+    expect(screen.getByRole('button', { name: /View payments/ })).toHaveAccessibleName(
+      /1 unresolved/,
+    );
+  });
+
+  it.each([
+    ['send', 'record'],
+    ['send', 'lookup-failure'],
+    ['faucet', 'record'],
+    ['faucet', 'lookup-failure'],
+  ] as const)('keeps a %s request if %s arrives while Forget waits', async (kind, outcome) => {
+    mockWalletApis();
+    const name = savedName(kind);
+    const key = 'lookup-race-key';
+    const record = `ths:${kind}:retained:${key}`;
+    retainSaved(kind, key);
+    const lookup = vi.spyOn(api, 'payment').mockResolvedValue(null);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderWithWalletActions(<WalletPage />, client);
+    await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+    const forget = await screen.findByRole('button', { name: 'Forget saved request' });
+    const row = forget.closest('article')!;
+    const lock = deferPaymentLock();
+    const removed = vi.spyOn(Storage.prototype, 'removeItem');
+    await userEvent.click(forget);
+    await waitFor(() => expect(lock.request).toHaveBeenCalledTimes(1));
+
+    if (outcome === 'record') lookup.mockResolvedValue(preparingPayment(kind, key));
+    else lookup.mockRejectedValue(new Error('status offline'));
+    await act(() => client.refetchQueries({ queryKey: queryKeys.payment(key) }));
+    await act(lock.release);
+
+    expect(document.body).toContainElement(row);
+    expect(localStorage.getItem(name)).toBe(key);
+    expect(localStorage.getItem(record)).toBe(name);
+    expect(removed).not.toHaveBeenCalledWith(record);
+    expect(screen.queryByRole('button', { name: 'Forget saved request' })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
+  it.each(['send', 'faucet'] as const)(
+    'handles a delayed %s startup failure across reload and same-origin restart',
+    async (kind) => {
+      mockWalletApis();
+      const fallback = vi.mocked(fetch).getMockImplementation()!;
+      let finishPost!: (response: Response) => void;
+      const postResponse = new Promise<Response>((resolve) => {
+        finishPost = resolve;
+      });
+      vi.mocked(fetch).mockImplementation((input, init) =>
+        init?.method === 'POST' && requestUrl(input).endsWith(`/${kind}`)
+          ? postResponse
+          : fallback(input, init),
+      );
+      const payment = vi.spyOn(api, 'payment').mockResolvedValue(null);
+
+      const first = renderWithWalletActions(<WalletPage />);
+      await userEvent.click(
+        await screen.findByRole('button', {
+          name: kind === 'send' ? 'Send ZEC' : 'Fund Account 1',
+        }),
+      );
+      await userEvent.click(
+        within(screen.getByRole('dialog')).getByRole('button', {
+          name: kind === 'send' ? 'Send ZEC' : 'Add funds',
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          vi
+            .mocked(fetch)
+            .mock.calls.filter(
+              ([input, init]) => init?.method === 'POST' && requestUrl(input).endsWith(`/${kind}`),
+            ),
+        ).toHaveLength(1),
+      );
+      const name = savedName(kind);
+      const key = localStorage.getItem(name)!;
+      expect(key).toBeTruthy();
+      await userEvent.keyboard('{Escape}');
+      await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+      expect(await screen.findByText('Submitting')).toBeInTheDocument();
+      expect(await screen.findByText('No record yet. The request is saved.')).toBeInTheDocument();
+      expect(payment).toHaveBeenCalledWith(key);
+      expect(
+        screen.queryByRole('button', { name: 'Forget saved request' }),
+      ).not.toBeInTheDocument();
+
+      finishPost(
+        new Response(
+          JSON.stringify({ error: { message: 'the environment is still starting', status: 503 } }),
+          { status: 503, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+      expect(
+        await screen.findByRole('button', { name: 'Forget saved request' }),
+      ).toBeInTheDocument();
+      expect(localStorage.getItem(`ths:${kind}:retained:${key}`)).toBe(name);
+
+      first.unmount();
+      const reloaded = renderWithWalletActions(<WalletPage />);
+      await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+      expect(await screen.findByText('No record yet. The request is saved.')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          'Forgetting removes it from this browser only; it does not cancel server work.',
+        ),
+      ).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Forget saved request' }));
+      await waitFor(() => expect(localStorage.getItem(name)).toBeNull());
+      expect(localStorage.getItem(`ths:${kind}:retained:${key}`)).toBeNull();
+
+      reloaded.unmount();
+      // Stop/start preserves the dashboard origin, so cleared browser state must stay cleared.
+      renderWithWalletActions(<WalletPage />);
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: /View payments/ })).not.toBeInTheDocument(),
+      );
+    },
+  );
+
+  it.each(['send', 'faucet'] as const)(
+    "forgets only this tab's absent %s request",
+    async (kind) => {
+      mockWalletApis();
+      const name = savedName(kind);
+      const ownKey = 'current-tab-key';
+      const otherKey = 'other-tab-key';
+      retainSaved(kind, ownKey, name);
+      retainSaved(kind, otherKey, name);
+      localStorage.setItem(name, otherKey);
+      sessionStorage.setItem(`${name}:tab`, ownKey);
+      vi.spyOn(api, 'payment').mockImplementation((key) =>
+        Promise.resolve(
+          key === ownKey
+            ? null
+            : {
+                id: otherKey,
+                kind,
+                from_account: kind === 'send' ? 1 : null,
+                to_account: kind === 'send' ? 2 : 1,
+                to_address: null,
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 100_000_000n,
+                txid: '',
+                block_hash: null,
+                status: 'preparing',
+                last_error: null,
+                created_at: '2026-10-13 00:00:00',
+              },
+        ),
+      );
+
+      renderWithWalletActions(<WalletPage />);
+      await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+      const own = document.querySelector<HTMLElement>(`article[data-payment-key="${ownKey}"]`)!;
+      await userEvent.click(
+        await within(own).findByRole('button', { name: 'Forget saved request' }),
+      );
+      await waitFor(() => expect(document.body).not.toContainElement(own));
+      expect(sessionStorage.getItem(`${name}:tab`)).toBeNull();
+      expect(localStorage.getItem(`ths:${kind}:retained:${ownKey}`)).toBeNull();
+      expect(localStorage.getItem(name)).toBe(otherKey);
+      expect(localStorage.getItem(`ths:${kind}:retained:${otherKey}`)).toBe(name);
+    },
+  );
+
+  it('keeps a Faucet treasury failure pending and retained', async () => {
+    mockWalletApis();
+    const payment = savedFaucet('treasury-key', 1, 'preparing')!;
+    payment.last_error = 'Treasury shielding failed';
+    vi.spyOn(api, 'payment').mockResolvedValue(payment);
+
+    renderWithWalletActions(<WalletPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+    expect(
+      await screen.findByText('Latest execution error: Treasury shielding failed'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Recovery may still be running.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Forget saved request' })).not.toBeInTheDocument();
+    expect(localStorage.getItem('ths:faucet:1:ironwood:500000000')).toBe('treasury-key');
+  });
 
   it('tracks a late POST after closing its dialog and preserves a newly opened draft', async () => {
     vi.spyOn(api, 'accounts').mockResolvedValue(testAccounts);

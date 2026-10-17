@@ -34,6 +34,11 @@ describe('timeAgo', () => {
   it('falls back safely', () => {
     expect(timeAgo('nonsense', now)).toBe('—');
   });
+
+  it('switches units before displaying 60 seconds or 60 minutes', () => {
+    expect(timeAgo('2026-09-17T11:59:00.400Z', now)).toBe('1 minute ago');
+    expect(timeAgo('2026-09-17 11:00:20', now)).toBe('1 hour ago');
+  });
 });
 
 describe('shortHash', () => {

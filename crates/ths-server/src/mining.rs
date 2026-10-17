@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use serde::Serialize;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +24,9 @@ pub struct MiningJob {
     pub state: MiningState,
     pub error: Option<String>,
     pub progress_uncertain: bool,
+    /// Only set once the job reaches `Completed`: both mining and wallet
+    /// synchronization succeeded, so the mined hashes are final.
+    pub hashes: Option<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -41,6 +44,7 @@ pub struct MiningUpdate {
 
 pub struct MiningCoordinator {
     state: Mutex<CoordinatorState>,
+    pub(crate) chain_operations: Arc<RwLock<()>>,
     capacity: usize,
 }
 
@@ -67,6 +71,8 @@ pub enum MiningAdmissionError {
     KeyConflict,
     #[error("A manual mining job is already active")]
     Busy,
+    #[error("A chain operation is already active")]
+    ChainBusy,
     #[error(
         "Mining job capacity reached (1024 jobs per server lifetime); existing jobs remain available"
     )]
@@ -86,6 +92,7 @@ pub(crate) fn validate_idempotency_key(key: &str) -> Result<(), &'static str> {
 impl MiningCoordinator {
     pub fn new() -> Self {
         Self {
+            chain_operations: Arc::new(RwLock::new(())),
             state: Mutex::new(CoordinatorState {
                 jobs: HashMap::new(),
                 keys: HashMap::new(),
@@ -145,6 +152,11 @@ impl MiningCoordinator {
         if state.active_id.is_some() {
             return Err(MiningAdmissionError::Busy);
         }
+        let chain = self
+            .chain_operations
+            .clone()
+            .try_read_owned()
+            .map_err(|_| MiningAdmissionError::ChainBusy)?;
         if state.jobs.len() >= self.capacity {
             return Err(MiningAdmissionError::Capacity);
         }
@@ -155,6 +167,7 @@ impl MiningCoordinator {
             state: MiningState::Mining,
             error: None,
             progress_uncertain: false,
+            hashes: None,
         };
         let (sender, updates) = watch::channel(MiningUpdate {
             job: job.clone(),
@@ -171,6 +184,7 @@ impl MiningCoordinator {
         let worker_runtime = Arc::clone(&runtime);
         let worker_job = job.clone();
         let worker = tokio::spawn(async move {
+            let _chain = chain;
             worker_jobs.run(worker_runtime, worker_job).await;
         });
         let supervisor_jobs = Arc::clone(self);
@@ -274,6 +288,7 @@ impl MiningCoordinator {
         let hashes = match synchronization {
             Ok(()) => {
                 job.state = MiningState::Completed;
+                job.hashes = Some(hashes.clone());
                 Some(Arc::new(hashes))
             }
             Err(error) => {

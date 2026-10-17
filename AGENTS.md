@@ -36,7 +36,7 @@ npm run build --prefix web
 - Use `cargo run -p thus-spoke-zakura -- <args>` to run the launcher from source. The package is `thus-spoke-zakura`; `ths` is only the binary name.
 - Rebuild images with `cargo run -p thus-spoke-zakura -- build --dev` after changing `crates/ths-server` or `web/`. `ths` runs prebuilt Docker images and will not pick up source changes otherwise.
 - Use `THS_DEV_API=<dashboard-url> npm run dev --prefix web` for frontend work against a running instance. Get the URL from `ths endpoints`.
-- Expect `cargo test --workspace` to run without Docker. The live `activity_recovery` regression is `#[ignore]`d and needs Docker; read "Activity-recovery integration test" in `README.md` before running or changing it.
+- Expect `cargo test --workspace` to run without Docker. The live `activity_recovery` regression is `#[ignore]`d and needs Docker; read "Activity-recovery integration test" in `book/development.md` before running or changing it.
 
 ## Always
 
@@ -45,7 +45,7 @@ npm run build --prefix web
 - Use the Zakura wallet crates (`zakura-keys`, `zakura-primitives`, `zakura-client-*`). `crates/ths-server/Cargo.toml` imports them under `zcash_*` aliases.
 - Treat accounts 1 to 5 as user accounts. Keep account 6 (`TREASURY_ACCOUNT_ID` in `crates/ths-server/src/db.rs`), the mining and faucet treasury, out of user-facing account lists and balances.
 - Do not remove or weaken idempotency-key validation, deduplication, or activity recovery. Changes to these flows require regression tests.
-- Update the command table in `README.md` when adding or changing `ths` commands or flags.
+- Update the command reference in `book/cli.md` when adding or changing `ths` commands or flags.
 
 ## Code quality
 

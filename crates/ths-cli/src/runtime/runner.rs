@@ -3,16 +3,16 @@ use super::*;
 impl Runtime {
     pub fn wait(&self, name: &InstanceName, timeout: Duration, json: bool) -> Result<()> {
         let shutdown = Shutdown::install()?;
-        let endpoints = self.read_instance(name)?.endpoints;
         let deadline = Instant::now()
             .checked_add(timeout)
             .context("settlement timeout is too large")?;
-        let status = wait_until_settled(
-            &|remaining| runtime_status(&endpoints, remaining),
+        let status = self.wait_for_settlement(
+            name,
             deadline,
-            Duration::from_millis(750),
+            STARTUP_GRACE,
             &shutdown,
             !json,
+            &runtime_status,
         )?;
         if json {
             println!("{}", serde_json::to_string_pretty(&status)?);
@@ -26,6 +26,88 @@ impl Runtime {
         }
         Ok(())
     }
+
+    pub(super) fn wait_for_settlement(
+        &self,
+        name: &InstanceName,
+        deadline: Instant,
+        grace: Duration,
+        shutdown: &Shutdown,
+        progress: bool,
+        read_status: &dyn Fn(&Endpoints, Duration) -> Result<RuntimeStatus>,
+    ) -> Result<RuntimeStatus> {
+        let grace = Instant::now() + grace;
+        let seen = std::cell::Cell::new(false);
+        let metadata = self.instance_dir(name).join("instance.json");
+        let read_instance = || match self.read_instance(name) {
+            Ok(instance) => {
+                seen.set(true);
+                Ok(Some(instance))
+            }
+            Err(error) if metadata.exists() => Err(error),
+            Err(_) => Ok(None),
+        };
+        let current = |instance: &Instance| -> Result<()> {
+            if self.being_stopped(name)? {
+                bail!("environment {name} is being stopped");
+            }
+            if !self.owner_active(name)? {
+                if Instant::now() < grace {
+                    bail!("environment {name} has no running launcher yet");
+                }
+                return Err(anyhow!(WaitEnded(format!(
+                    "environment {name} has no running launcher; its containers were left by one that exited. Delete them with `ths --name {name} stop`"
+                ))));
+            }
+            if !self.ready_owner_wrote(name, instance)? {
+                bail!("environment {name} is still starting");
+            }
+            Ok(())
+        };
+        let observe = |instance: Instance, remaining: Duration| -> Result<RuntimeStatus> {
+            let ownership = self.ownership_state(name)?;
+            current(&instance)?;
+            let status = read_status(&instance.endpoints, remaining)?;
+            if self.ownership_state(name)? != ownership {
+                bail!("environment {name} changed owner while its status was read");
+            }
+            match read_instance()? {
+                Some(after) if after == instance => current(&after)?,
+                Some(_) => bail!("environment {name} changed while its status was read"),
+                None => bail!("environment {name} was deleted while its status was read"),
+            }
+            Ok(status)
+        };
+        wait_until_settled(
+            &|remaining| {
+                if let Some(instance) = read_instance()? {
+                    return observe(instance, remaining);
+                }
+                if !seen.get() && Instant::now() < grace {
+                    bail!("environment {name} does not exist yet");
+                }
+                if self.owner_active(name)? {
+                    if seen.get() {
+                        bail!("environment {name} is being replaced or deleted");
+                    }
+                    bail!("environment {name} is still starting");
+                }
+                if let Some(instance) = read_instance()? {
+                    return observe(instance, remaining);
+                }
+                Err(anyhow!(WaitEnded(if seen.get() {
+                    format!("environment {name} was deleted while waiting")
+                } else {
+                    format!("instance {name} does not exist")
+                })))
+            },
+            deadline,
+            Duration::from_millis(750),
+            shutdown,
+            progress,
+        )
+    }
+
     pub fn run(&self, name: &InstanceName, timeout: Duration, command: &[OsString]) -> Result<u8> {
         let shutdown = Shutdown::install()?;
         let mut context = LifecycleContext::new(LifecyclePolicy::default());
@@ -35,6 +117,8 @@ impl Runtime {
                 .context("startup timeout is too large")?,
         );
         context.overall_deadline = Some(deadline);
+        host_ports(0)?;
+        let ownership = self.own_start(name, &shutdown, &context)?;
         let prepared = {
             let requested = || shutdown.try_interrupted();
             let docker = LifecycleDocker::production(
@@ -52,6 +136,7 @@ impl Runtime {
             })()
         };
         if let Err(error) = prepared {
+            let error = ownership.session().explain(name, error);
             let failures = context.finish_helpers(Deadline::after(context.policy.cleanup));
             if failures.is_empty() {
                 return Err(error);
@@ -65,15 +150,17 @@ impl Runtime {
                     .join("; ")
             ));
         }
-        self.run_with_policy(
+        self.run_owned(
             name,
             command,
             &std::env::current_dir().context("reading the current directory")?,
             &DockerHost,
             &shutdown,
             &context,
+            ownership,
         )
     }
+    #[cfg(test)]
     pub(super) fn run_with_policy(
         &self,
         name: &InstanceName,
@@ -84,7 +171,30 @@ impl Runtime {
         context: &LifecycleContext,
     ) -> Result<u8> {
         host_ports(0)?;
-        let _lifecycle = self.lock_instance(name)?;
+        let ownership = self.own_start(name, shutdown, context)?;
+        self.run_owned(
+            name,
+            command,
+            current_dir,
+            host,
+            shutdown,
+            context,
+            ownership,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_owned(
+        &self,
+        name: &InstanceName,
+        command: &[OsString],
+        current_dir: &Path,
+        host: &dyn StartHost,
+        shutdown: &Shutdown,
+        context: &LifecycleContext,
+        ownership: StartOwnership,
+    ) -> Result<u8> {
+        let session = ownership.session();
         let deadline = context.overall_deadline.context("missing run deadline")?;
         if deadline.expired() {
             bail!("environment did not start before the timeout");
@@ -134,7 +244,11 @@ impl Runtime {
                 true,
             )?;
             println!("{name} is settled; running child command…");
-            host.run_child(command, current_dir, name, &allocated.endpoints, shutdown)
+            let ready = self.mark_ready(name, session)?;
+            let outcome =
+                host.run_child(command, current_dir, name, &allocated.endpoints, shutdown);
+            drop(ready);
+            outcome
         })();
         if matches!(&primary, Ok(ChildOutcome::Exited(code)) if *code != 0)
             || matches!(&primary, Ok(ChildOutcome::Signaled))
@@ -145,6 +259,17 @@ impl Runtime {
             }
         }
         cleanup.state = CleanupGuard::Explicit;
+        let primary = primary.map_err(|error| session.explain(name, error));
+        if session.requested() && matches!(primary, Ok(ChildOutcome::Signaled)) {
+            eprintln!("{name} was stopped by another command.");
+        }
+        let _stopping = match self.mark_stopping(name) {
+            Ok(marker) => Some(marker),
+            Err(error) => {
+                eprintln!("could not mark {name} as stopping: {error:#}");
+                None
+            }
+        };
         let cleaned = host
             .delete_partial(self, name, context, Deadline::after(context.policy.cleanup))
             .and_then(CleanupReport::into_result);
@@ -165,6 +290,19 @@ impl Runtime {
         }
     }
 }
+
+pub(super) const STARTUP_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+pub(super) struct WaitEnded(String);
+
+impl Display for WaitEnded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WaitEnded {}
 
 pub(super) fn display_height(height: Option<u64>) -> String {
     height.map_or_else(|| "unavailable".to_owned(), |height| height.to_string())
@@ -202,6 +340,7 @@ pub(super) fn wait_until_settled(
         }
         let status = match read_status(remaining.min(Duration::from_secs(5))) {
             Ok(status) => status,
+            Err(error) if error.is::<WaitEnded>() => return Err(error),
             Err(error) => {
                 let error = format!("{error:#}");
                 if progress && last_error.as_deref() != Some(error.as_str()) {
@@ -262,16 +401,10 @@ pub(super) fn run_child(
         .split_first()
         .context("run requires a child command")?;
     let mut process = Command::new(program);
-    process
-        .args(arguments)
-        .current_dir(current_dir)
-        .env("THS_INSTANCE", name.to_string())
-        .env("THS_NETWORK", "regtest")
-        .env("THS_API_URL", &endpoints.dashboard)
-        .env("THS_ZAKURA_RPC_URL", &endpoints.rpc)
-        .env("THS_LIGHTWALLETD_URL", &endpoints.lightwalletd)
-        .env("THS_LIGHTWALLETD_TLS", "false")
-        .env("THS_P2P_ADDR", &endpoints.p2p);
+    process.args(arguments).current_dir(current_dir);
+    for (key, value) in child_environment(name, endpoints) {
+        process.env(key, value);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

@@ -334,6 +334,12 @@ async fn failed_partial_startup_cleans_exact_names_in_reverse_order_and_retries(
                     .any(|arguments| arguments[0] == "--name" && arguments[1] == expected_names[0])
         })
         .expect("fixture must invoke the exact owned node container");
+    for pair in [
+        ["--volume", &format!("{}:/data", fixture.names.chain_volume)],
+        ["--env", "ZAKURA_STATE__CACHE_DIR=/data"],
+    ] {
+        assert!(node_run.args.windows(2).any(|arguments| arguments == pair));
+    }
     assert!(
         node_run
             .args

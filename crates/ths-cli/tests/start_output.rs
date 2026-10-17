@@ -15,7 +15,45 @@ use std::{
     time::{Duration, Instant},
 };
 
-static NEXT_PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
+static NEXT_PORT_OFFSET: AtomicU16 = AtomicU16::new(20_000);
+
+fn next_port_offset(offsets: &AtomicU16) -> u16 {
+    loop {
+        let offset = offsets.fetch_add(10, Ordering::Relaxed);
+        assert!(offset <= 32_730, "no free port set for the startup fixture");
+        // Startup checks all four ports before the fake readiness servers bind.
+        let listeners: std::io::Result<Vec<_>> = [32_805, 18_232, 18_233, 9_067]
+            .into_iter()
+            .map(|port| TcpListener::bind(("127.0.0.1", port + offset)))
+            .collect();
+        match listeners {
+            Ok(_) => return offset,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("checking startup fixture ports at offset {offset}: {error}"),
+        }
+    }
+}
+
+#[test]
+fn fixture_skips_each_occupied_published_port() {
+    let offsets = AtomicU16::new(30_000);
+    for port in [32_805, 18_232, 18_233, 9_067] {
+        let (offset, listener) = loop {
+            let offset = next_port_offset(&offsets);
+            if let Ok(listener) = TcpListener::bind(("127.0.0.1", port + offset)) {
+                break (offset, listener);
+            }
+        };
+        offsets.store(offset, Ordering::Relaxed);
+        let selected = next_port_offset(&offsets);
+        assert_ne!(
+            selected,
+            offset,
+            "fixture selected occupied port {}",
+            listener.local_addr().unwrap()
+        );
+    }
+}
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -28,7 +66,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let port_offset = 20_000 + NEXT_PORT_OFFSET.fetch_add(10, Ordering::Relaxed);
+        let port_offset = next_port_offset(&NEXT_PORT_OFFSET);
         let commands_path = directory.path().join("commands");
         let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_stop = Arc::clone(&stop_server);
@@ -125,6 +163,41 @@ impl Fixture {
             .stderr(Stdio::piped());
         command
     }
+
+    fn start_with_browser_failure(&self) -> Child {
+        self.start_with_browser_opener(
+            "#!/bin/sh\nprintf '%s\\n' called > \"$THS_TEST_OPEN_MARKER\"\nexit 1\n",
+        )
+    }
+
+    fn start_with_browser_opener(&self, script: &str) -> Child {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let opener_path = self.directory.path().join(opener);
+        fs::write(&opener_path, script).unwrap();
+        fs::set_permissions(opener_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        self.command()
+            .args([
+                "--json",
+                "--name",
+                &self.name,
+                "start",
+                "--port-offset",
+                &self.port_offset.to_string(),
+            ])
+            .env("THS_TEST_FAIL_INIT", "0")
+            .env("THS_TEST_DELETE_ELSEWHERE", "0")
+            .env(
+                "THS_TEST_OPEN_MARKER",
+                self.directory.path().join("open-marker"),
+            )
+            .spawn()
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
@@ -218,17 +291,25 @@ fn output_after_shutdown(
         }
     }
     let success = finish(&mut child).success();
+    let stdout = stdout_thread.join().unwrap();
+    let stderr = stderr_thread.join().unwrap();
     for kind in ["container", "volume", "network"] {
         let resources = fixture.directory.path().join("state").join(kind);
         assert!(
-            fs::read_dir(resources).unwrap().next().is_none(),
-            "fake {kind} resources were not removed"
+            fs::read_dir(&resources)
+                .unwrap_or_else(|error| panic!(
+                    "reading {}: {error}; launcher stderr: {stderr}",
+                    resources.display()
+                ))
+                .next()
+                .is_none(),
+            "fake {kind} resources were not removed; launcher stderr: {stderr}"
         );
     }
     (
         success,
-        stdout_thread.join().unwrap(),
-        stderr_thread.join().unwrap(),
+        stdout,
+        stderr,
         fs::read_to_string(fixture.directory.path().join("commands")).unwrap(),
         fixture.port_offset,
     )
@@ -312,6 +393,151 @@ fn json_start_stdout_is_one_document_after_external_deletion() {
     assert!(!commands.contains("rm -f"));
     assert!(!commands.contains("volume rm"));
     assert!(!commands.contains("network rm"));
+}
+
+#[test]
+fn json_start_browser_open_failure_keeps_stdout_parseable_through_stop() {
+    let fixture = Fixture::new();
+    let doctor = fixture
+        .command()
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    assert!(doctor.status.success());
+    let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let instance_dir =
+        std::path::PathBuf::from(doctor["config_dir"].as_str().unwrap()).join(&fixture.name);
+    let mut child = fixture.start_with_browser_failure();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let stdout_thread = thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stdout).lines() {
+            output.push_str(&line.unwrap());
+            output.push('\n');
+            if serde_json::from_str::<serde_json::Value>(&output).is_ok() {
+                let _ = ready_sender.send(());
+            }
+        }
+        output
+    });
+    let (warning_sender, warning_receiver) = mpsc::channel();
+    let stderr_thread = thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if line.contains("could not open the dashboard automatically") {
+                let _ = warning_sender.send(());
+            }
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    });
+
+    assert!(
+        ready_receiver.recv_timeout(Duration::from_secs(20)).is_ok(),
+        "launcher did not print endpoints"
+    );
+    let marker = fixture.directory.path().join("open-marker");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "browser opener was not invoked");
+    assert!(
+        instance_dir.join("instance.json").exists(),
+        "instance metadata was not written to the configured directory"
+    );
+    assert!(
+        warning_receiver
+            .recv_timeout(Duration::from_secs(20))
+            .is_ok(),
+        "launcher did not report the browser failure"
+    );
+
+    let stop_deadline = Instant::now() + Duration::from_secs(20);
+    let stopped = loop {
+        let stopped = fixture
+            .command()
+            .args(["--name", &fixture.name, "stop"])
+            .output()
+            .unwrap();
+        if stopped.status.success()
+            || !String::from_utf8_lossy(&stopped.stderr).contains("already in use")
+            || Instant::now() >= stop_deadline
+        {
+            break stopped;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        stopped.status.success(),
+        "ths stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let status = finish(&mut child);
+    let stdout = stdout_thread.join().unwrap();
+    let stderr = stderr_thread.join().unwrap();
+    assert!(status.success(), "launcher exited {status}: {stderr}");
+    let endpoints: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let dashboard = endpoints["dashboard"].as_str().unwrap();
+    assert!(
+        stderr.contains("could not open the dashboard automatically"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(dashboard), "{stderr}");
+    assert!(
+        stderr.contains(&format!("ths --name {} open", fixture.name)),
+        "{stderr}"
+    );
+
+    for kind in ["container", "volume", "network"] {
+        let resources = fixture.directory.path().join("state").join(kind);
+        assert!(
+            fs::read_dir(resources).unwrap().next().is_none(),
+            "fake {kind} resources were not removed"
+        );
+    }
+    assert!(!instance_dir.exists(), "instance metadata was not removed");
+    let commands = fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
+    assert!(commands.contains("rm -f"));
+    assert!(commands.contains("volume rm"));
+    assert!(commands.contains("network rm"));
+    assert_eq!(commands.matches("rm -f").count(), 4, "{commands}");
+    assert_eq!(commands.matches("volume rm").count(), 4, "{commands}");
+    assert_eq!(commands.matches("network rm").count(), 1, "{commands}");
+}
+
+#[test]
+fn json_start_stops_cleanly_during_browser_open() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with_browser_opener(
+        "#!/bin/sh\nprintf '%s\\n' called > \"$THS_TEST_OPEN_MARKER\"\nsleep 30\n",
+    );
+    let marker = fixture.directory.path().join("open-marker");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "browser opener was not invoked");
+
+    let stopped = fixture
+        .command()
+        .args(["--name", &fixture.name, "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "ths stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let status = finish(&mut child);
+    let stdout = std::io::read_to_string(child.stdout.take().unwrap()).unwrap();
+    let stderr = std::io::read_to_string(child.stderr.take().unwrap()).unwrap();
+    assert!(status.success(), "launcher exited {status}: {stderr}");
+    serde_json::from_str::<serde_json::Value>(&stdout).unwrap();
 }
 
 #[test]

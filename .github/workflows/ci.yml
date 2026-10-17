@@ -29,6 +29,33 @@ jobs:
             ([.packages[].name] | any(. == "zcash_keys") | not) and
             ([.packages[].name] | any(. == "zcash_primitives") | not)'
 
+  launcher-compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Build Linux release launcher
+        run: cargo build --locked --release -p thus-spoke-zakura --features release-distribution --target "${{ matrix.target }}"
+      - name: Verify launcher on Ubuntu 22.04 and Debian 12
+        shell: bash
+        run: |
+          launcher="$PWD/target/${{ matrix.target }}/release/ths"
+          for image in ubuntu:22.04 debian:12; do
+            docker run --rm --volume "$launcher:/tmp/ths:ro" "$image" /tmp/ths --version
+          done
+
   book:
     runs-on: ubuntu-latest
     steps:
@@ -89,6 +116,7 @@ jobs:
         run: docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
       - name: Run live activity recovery regressions
         run: |
+          cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact reorg_and_rollback_preserve_canonical_wallet_and_payment_state
           cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
           cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact concurrent_identical_sends_have_one_chain_effect
           cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact address_faucet_retry_after_server_restart_pays_each_destination_once

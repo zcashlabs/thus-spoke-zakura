@@ -7,6 +7,7 @@ fn send_args(from: u8, to: u8, destination_pool: Pool, memo: Option<&str>) -> Se
         to: Some(to),
         uri: None,
         amount: Some(SendAmount(1)),
+        max: false,
         source_pool: Pool::Ironwood,
         destination_pool,
         memo: memo.map(str::to_owned),

@@ -20,6 +20,11 @@ export function useServerEvents(): void {
   useEffect(() => {
     const source = new EventSource('/api/v1/events');
 
+    // Discard pre-subscription reads; the stream does not replay missed updates.
+    source.onopen = () => {
+      void queryClient.cancelQueries().then(() => queryClient.invalidateQueries());
+    };
+
     const onUpdate = (event: MessageEvent<string>) => {
       const keys = TOPICS[event.data] ?? Object.values(TOPICS).flat();
       for (const key of keys) {

@@ -128,6 +128,10 @@ impl NodeRpc {
         self.call_within(GENERATE_TIMEOUT, "generate", json!([blocks]))
             .await
     }
+    pub(crate) async fn invalidate_block(&self, hash: &str) -> Result<()> {
+        self.call::<Value>("invalidateblock", json!([hash])).await?;
+        Ok(())
+    }
     pub async fn block(&self, id: &str) -> Result<Value> {
         self.call("getblock", json!([id, 2])).await
     }

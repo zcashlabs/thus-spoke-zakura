@@ -11,6 +11,20 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+async fn automatic_mining_waits_for_chain_operation_within_the_dispatch_budget() {
+    let (mut state, _dir) = state_with_local_wallet();
+    let (url, calls) = crate::state::tests::counting_rpc(true).await;
+    Arc::get_mut(&mut state.0).unwrap().rpc = NodeRpc::new(url);
+    let _chain = state.0.mining.chain_operations.write().await;
+    let attempt = PaymentAttempt {
+        state: &state,
+        dispatch_deadline: Some(Instant::now() + Duration::from_millis(50)),
+    };
+    assert!(attempt.mine_and_sync(1).await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn expired_attempt_observes_preparation_and_keeps_guards_until_recording_finishes() {
     let (state, dir) = state_with_local_wallet();

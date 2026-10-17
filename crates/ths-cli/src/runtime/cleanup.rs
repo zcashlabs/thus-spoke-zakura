@@ -25,12 +25,13 @@ impl Runtime {
     }
 
     pub(super) fn verified_cleanup(&self, name: &InstanceName) -> Result<CleanupReport> {
-        let _lock = self.lock_instance(name)?;
         let policy = LifecyclePolicy::default();
-        let context = LifecycleContext::new(policy);
-        let deadline = Deadline::after(policy.cleanup);
-        let docker = lifecycle_docker(&context, deadline, Cancellation::Ignore);
-        self.cleanup_core(name, &docker, false, deadline, &context)
+        self.verified_cleanup_with(name, &policy, || {
+            let context = LifecycleContext::new(policy);
+            let deadline = Deadline::after(policy.cleanup);
+            let docker = lifecycle_docker(&context, deadline, Cancellation::Ignore);
+            self.cleanup_core(name, &docker, false, deadline, &context)
+        })
     }
 
     #[cfg(test)]

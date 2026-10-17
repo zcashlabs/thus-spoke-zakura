@@ -13,7 +13,12 @@ async fn status_counts_accounts_without_reading_the_seed() {
         .unwrap();
 
     let response = router(state)
-        .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/v1/status")
+                .header("host", "127.0.0.1:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -24,8 +29,51 @@ async fn status_counts_accounts_without_reading_the_seed() {
     assert_eq!(status["account_count"], 5);
 }
 
+#[tokio::test]
+async fn non_loopback_host_cannot_access_the_seed_endpoint() {
+    let (state, _dir) = state_with_local_wallet();
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/dev/seed")
+                .header("host", "attacker.example")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirmation":"I understand this seed is for regtest only"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        error,
+        serde_json::json!({
+            "error": {
+                "message": "Host must be a loopback address",
+                "status": 403
+            }
+        })
+    );
+}
+
 use super::*;
 use crate::wallet::WALLET_BIRTHDAY_HEIGHT;
+
+#[test]
+fn public_dashboard_endpoint_uses_configured_port_or_loopback_default() {
+    assert_eq!(
+        public_dashboard_endpoint(Some("http://127.0.0.1:32805")),
+        "http://127.0.0.1:32805"
+    );
+    assert_eq!(public_dashboard_endpoint(None), "http://127.0.0.1:8080");
+}
+
 fn wallet_status(
     state: &'static str,
     fully_scanned_height: Option<u64>,
@@ -55,6 +103,7 @@ fn settlement_for_test(
         node.map(checkpoint).as_ref(),
         lightwalletd.map(checkpoint).as_ref(),
         wallet,
+        true,
     )
 }
 
@@ -95,10 +144,10 @@ fn settlement_requires_all_three_components_at_the_same_tip() {
         hash: "replacement".to_owned(),
     };
     let wallet = wallet_status("ready", Some(105), None);
-    let status = settlement_status(Some(&canonical), Some(&replacement), &wallet);
+    let status = settlement_status(Some(&canonical), Some(&replacement), &wallet, true);
     assert_eq!(status.settlement_blocker, Some("chain_mismatch"));
 
-    let status = settlement_status(Some(&replacement), Some(&replacement), &wallet);
+    let status = settlement_status(Some(&replacement), Some(&replacement), &wallet, true);
     assert!(
         !status.settled,
         "a same-height reorg needs wallet reconciliation"
@@ -163,14 +212,194 @@ fn settlement_allows_a_canonical_tip_before_the_wallet_birthday() {
     let mut wallet = wallet_status("ready", None, None);
     wallet.observed_height = Some(tip.height);
     wallet.observed_hash = Some(tip.hash.clone());
-    assert!(settlement_status(Some(&tip), Some(&tip), &wallet).settled);
+    assert!(settlement_status(Some(&tip), Some(&tip), &wallet, true).settled);
     wallet.observed_hash = Some("orphaned".to_owned());
-    assert!(!settlement_status(Some(&tip), Some(&tip), &wallet).settled);
+    assert!(!settlement_status(Some(&tip), Some(&tip), &wallet, true).settled);
+}
+
+#[test]
+fn settlement_waits_for_startup_after_the_components_agree() {
+    let tip = ChainCheckpoint {
+        height: 101,
+        hash: "canonical".to_owned(),
+    };
+    let wallet = wallet_status("ready", Some(101), None);
+    let status = settlement_status(Some(&tip), Some(&tip), &wallet, false);
+    assert!(!status.settled);
+    assert_eq!(status.settlement_blocker, Some("starting"));
+
+    let status = settlement_status(None, Some(&tip), &wallet, false);
+    assert_eq!(status.settlement_blocker, Some("node_unavailable"));
+
+    assert!(settlement_status(Some(&tip), Some(&tip), &wallet, true).settled);
 }
 
 use crate::state::tests::{api_get, counting_rpc};
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+fn lightwalletd_probe(
+    listener: tokio::net::TcpListener,
+) -> (String, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let available = Arc::new(AtomicBool::new(true));
+    let availability = available.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = tokio::select! {
+                socket = listener.accept() => socket.unwrap(),
+                completed = connections.join_next(), if !connections.is_empty() => {
+                    completed.unwrap().unwrap();
+                    continue;
+                }
+            };
+            let available = availability.clone();
+            connections.spawn(async move {
+                let mut connection = h2::server::handshake(socket).await.unwrap();
+                while let Some(request) = connection.accept().await {
+                    let (request, mut response) = request.unwrap();
+                    assert_eq!(
+                        request.uri().path(),
+                        "/cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLatestBlock"
+                    );
+                    let mut stream = response
+                        .send_response(
+                            axum::http::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/grpc")
+                                .body(())
+                                .unwrap(),
+                            false,
+                        )
+                        .unwrap();
+                    let mut trailers = axum::http::HeaderMap::new();
+                    if available.load(Ordering::SeqCst) {
+                        // gRPC frame containing BlockID: height=1, hash=[1; 32].
+                        let mut frame = vec![0, 0, 0, 0, 36, 0x08, 1, 0x12, 32];
+                        frame.extend_from_slice(&[1; 32]);
+                        stream
+                            .send_data(axum::body::Bytes::from(frame), false)
+                            .unwrap();
+                        trailers.insert("grpc-status", "0".parse().unwrap());
+                    } else {
+                        trailers.insert("grpc-status", "14".parse().unwrap());
+                    }
+                    stream.send_trailers(trailers).unwrap();
+                }
+            });
+        }
+    });
+    (endpoint, available, server)
+}
+
+#[tokio::test]
+async fn health_checks_current_dependencies_without_requiring_settlement() {
+    let (local, _dir) = state_with_local_wallet();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (lightwalletd, available, server) = lightwalletd_probe(listener);
+    let node_available = Arc::new(AtomicBool::new(true));
+    let availability = node_available.clone();
+    let rpc = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |Json(request): Json<Value>| {
+            let available = availability.clone();
+            async move {
+                if !available.load(Ordering::SeqCst) {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                assert_eq!(request["method"], "getblockchaininfo");
+                Json(json!({"result": {"chain": "regtest", "blocks": 101,
+                    "bestblockhash": "a".repeat(64)}, "error": null, "id": request["id"]}))
+                .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+    let node = tokio::spawn(async move { axum::serve(listener, rpc).await.unwrap() });
+    let state = AppState::new(
+        local.0.store.clone(),
+        local.0.wallet.clone().with_lightwalletd(lightwalletd),
+        rpc_url,
+        "test".into(),
+    );
+    state.mark_started();
+    assert_eq!(
+        api_get(&state, "/api/v1/health").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    state.0.wallet_snapshot.write().await.status.last_success_at = Some(1);
+    for (node_up, lightwalletd_up) in [
+        (true, true),
+        (true, false),
+        (true, true),
+        (false, true),
+        (true, true),
+    ] {
+        node_available.store(node_up, Ordering::SeqCst);
+        available.store(lightwalletd_up, Ordering::SeqCst);
+        let (code, health) = api_get(&state, "/api/v1/health").await;
+        let ok = node_up && lightwalletd_up;
+        assert_eq!(
+            code,
+            if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        );
+        assert_eq!(health["ok"], ok);
+        assert_eq!(health["wallet_sync"]["last_success_at"], 1);
+        assert_eq!(health["wallet_sync"]["state"], "syncing");
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let (code, health) = api_get(&state, "/api/v1/health").await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health["ok"], false);
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let (_, _, server) = lightwalletd_probe(listener);
+    let (code, health) = api_get(&state, "/api/v1/health").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(health["ok"], true);
+    node.abort();
+    assert!(node.await.unwrap_err().is_cancelled());
+    let (code, health) = api_get(&state, "/api/v1/health").await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health["ok"], false);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn health_returns_unavailable_when_lightwalletd_stalls() {
+    let (local, _dir) = state_with_local_wallet();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (rpc_url, _) = counting_rpc(true).await;
+    let state = AppState::new(
+        local.0.store.clone(),
+        local.0.wallet.clone().with_lightwalletd(endpoint),
+        rpc_url,
+        "test".into(),
+    );
+    state.mark_started();
+    state.0.wallet_snapshot.write().await.status.last_success_at = Some(1);
+    // The bound listener never answers the HTTP/2 handshake.
+    let (code, health) = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        api_get(&state, "/api/v1/health"),
+    )
+    .await
+    .expect("health ignored the lightwalletd probe deadline");
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health["ok"], false);
+}
 
 #[tokio::test]
 async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() {
@@ -387,9 +616,11 @@ use crate::state::tests::api_request;
 async fn health_and_chain_effects_wait_until_startup_finishes() {
     let (state, _dir) = state_with_local_wallet();
     let (rpc_url, calls) = counting_rpc(true).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (lightwalletd, _, server) = lightwalletd_probe(listener);
     let state = AppState::new(
         state.0.store.clone(),
-        state.0.wallet.clone(),
+        state.0.wallet.clone().with_lightwalletd(lightwalletd),
         rpc_url,
         "test".into(),
     );
@@ -441,6 +672,8 @@ async fn health_and_chain_effects_wait_until_startup_finishes() {
     let (code, health) = api_get(&state, "/api/v1/health").await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(health["ok"], true);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }
 
 use crate::api::payments::tests::valid_send;

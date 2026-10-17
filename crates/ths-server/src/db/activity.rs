@@ -33,6 +33,46 @@ pub enum Recipient<'a> {
 }
 
 impl Store {
+    pub(crate) fn unconfirm_blocks(&self, hashes: &[String]) -> Result<Vec<(String, String)>> {
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        let mut confirmations = Vec::new();
+        for hash in hashes {
+            for table in ["activity", "address_faucets"] {
+                let mut query = tx.prepare(&format!(
+                    "SELECT txid,block_hash FROM {table} WHERE status='confirmed' AND block_hash=?1"
+                ))?;
+                confirmations.extend(
+                    query
+                        .query_map([hash], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+                tx.execute(
+                    &format!("UPDATE {table} SET status='unconfirmed',block_hash=NULL,last_error=NULL WHERE status='confirmed' AND block_hash=?1"),
+                    [hash],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(confirmations)
+    }
+
+    pub(crate) fn confirm_reorged_transaction(&self, txid: &str, hash: &str) -> Result<()> {
+        if hash.is_empty() {
+            bail!("block hash is required to confirm activity");
+        }
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        for table in ["activity", "address_faucets"] {
+            tx.execute(
+                &format!("UPDATE {table} SET status='confirmed',block_hash=?1,last_error=NULL WHERE status='unconfirmed' AND txid=?2"),
+                params![hash, txid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn activities(&self, limit: u32) -> Result<Vec<Activity>> {
         let db = self.0.lock().unwrap();
         let mut query = db.prepare(&format!(
@@ -427,7 +467,7 @@ impl Store {
     ) -> Result<Activity> {
         let db = self.0.lock().unwrap();
         db.execute(
-            "UPDATE activity SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast')",
+            "UPDATE activity SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast','unconfirmed')",
             params![id, expected_status, expected_txid],
         )?;
         activity_by_id(&db, id).map_err(Into::into)

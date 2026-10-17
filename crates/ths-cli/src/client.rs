@@ -6,10 +6,40 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct MineResult {
-    pub(crate) blocks: usize,
-    pub(crate) hashes: Vec<String>,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct MiningJob {
+    pub(crate) id: String,
+    pub(crate) requested_blocks: u32,
+    pub(crate) completed_blocks: u32,
+    pub(crate) state: MiningJobState,
+    pub(crate) error: Option<String>,
+    pub(crate) progress_uncertain: bool,
+    // Older servers may omit this; treat it the same as "not completed yet".
+    #[serde(default)]
+    pub(crate) hashes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MiningJobState {
+    Mining,
+    Syncing,
+    Completed,
+    Failed,
+}
+
+/// `--json` output for `mine`. Keeps the `blocks`/`hashes` fields and meaning
+/// from the legacy endpoint's successful output, alongside the job API's
+/// richer state so a partial or failed job is not just a bare error string.
+#[derive(Debug, Serialize)]
+struct MineOutput {
+    id: String,
+    blocks: u32,
+    requested_blocks: u32,
+    state: MiningJobState,
+    error: Option<String>,
+    progress_uncertain: bool,
+    hashes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -22,6 +52,77 @@ struct FaucetResult {
     status: String,
     #[serde(default)]
     last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ChainTip {
+    height: u64,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ChainChangeResult {
+    depth: u32,
+    old_tip: ChainTip,
+    new_tip: ChainTip,
+    removed_hashes: Vec<String>,
+    replacement_hashes: Vec<String>,
+    retained_txids: Vec<String>,
+    failed_transactions: Vec<TransactionFailure>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TransactionFailure {
+    txid: String,
+    error: String,
+}
+
+pub(crate) fn change_chain(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    operation: &str,
+    depth: u32,
+    keep_txs: bool,
+) -> Result<ChainChangeResult> {
+    let body = if operation == "reorg" {
+        serde_json::json!({"depth": depth, "keep_txs": keep_txs})
+    } else {
+        serde_json::json!({"depth": depth})
+    };
+    client
+        .post(format!("{dashboard}/api/v1/{operation}"))
+        .json(&body)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .context("chain operation failed; inspect the current tip before retrying")
+}
+
+pub(crate) fn render_chain_change(
+    result: &ChainChangeResult,
+    name: &InstanceName,
+    operation: &str,
+    json: bool,
+) -> Result<String> {
+    if json {
+        return Ok(serde_json::to_string_pretty(result)?);
+    }
+    let action = if operation == "reorg" {
+        "Reorganized"
+    } else {
+        "Rolled back"
+    };
+    let mut output = format!(
+        "{action} {} blocks on {name}.\nNew tip: {} ({})",
+        result.depth, result.new_tip.height, result.new_tip.hash
+    );
+    for failure in &result.failed_transactions {
+        output.push_str(&format!(
+            "\nNot retained: {}: {}",
+            failure.txid, failure.error
+        ));
+    }
+    Ok(output)
 }
 
 fn confirmed_status() -> String {
@@ -66,6 +167,15 @@ struct ActivityHistoryEntry {
 /// processing them after the command stops waiting.
 const PAYMENT_WAIT: Duration = Duration::from_secs(30);
 const PAYMENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long `mine` waits for its job to finish. The environment keeps mining
+/// after the command stops waiting, the same as a payment.
+const MINE_WAIT: Duration = Duration::from_secs(300);
+const MINE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Caps one request (submitting or polling a job), matching the single-HTTP-
+/// attempt budget used for readiness probes elsewhere. A stalled or dropped
+/// connection errors out on its own instead of blocking the overall deadline.
+const MINE_POLL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 trait Payment: serde::de::DeserializeOwned + Serialize {
     fn status(&self) -> &str;
@@ -260,6 +370,49 @@ struct PaymentUri {
     memo: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SendQuote {
+    max_zatoshi: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransferAmount {
+    Exact(u64),
+    Max,
+}
+
+fn quote_max_amount(
+    client: &reqwest::blocking::Client,
+    dashboard: &str,
+    name: &InstanceName,
+    deadline: Instant,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> Result<u64> {
+    let timeout = remaining(deadline)
+        .ok_or_else(|| anyhow!("maximum transfer quote timed out"))
+        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
+    let quote: SendQuote = client
+        .post(format!("{dashboard}/api/v1/send/quote"))
+        .json(&serde_json::json!({
+            "from_account": from,
+            "source_pool": source_pool,
+            "destination_pool": destination_pool,
+        }))
+        .timeout(timeout)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
+    if quote.max_zatoshi == 0 {
+        bail!(
+            "account {from} has no spendable {source_pool} funds remaining after the network fee"
+        );
+    }
+    Ok(quote.max_zatoshi)
+}
+
 impl Runtime {
     fn instance_client(&self, name: &InstanceName) -> Result<(String, reqwest::blocking::Client)> {
         let app_container = format!("{}-app", prefix(name));
@@ -275,20 +428,131 @@ impl Runtime {
 
     pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
-        let result: MineResult = client
-            .post(format!("{dashboard}/api/v1/mine"))
-            .json(&serde_json::json!({"blocks": blocks}))
-            .send()
-            .map_err(anyhow::Error::from)
-            .and_then(decode_response)
+        self.mine_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            Instant::now() + MINE_WAIT,
+            blocks,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mine_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        deadline: Instant,
+        blocks: u32,
+        json: bool,
+    ) -> Result<()> {
+        let journal = IntentJournal::open(&self.instance_dir(name), "mining")?;
+        let intent = format!("mine:{blocks}");
+        let idempotency_key = journal.key_for(&intent)?;
+
+        let mut job = submit_mining_job(client, dashboard, blocks, &idempotency_key, deadline)
             .with_context(|| format!("asking environment {name} to mine {blocks} blocks"))?;
-        if json {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        } else {
-            println!("Mined {} blocks on {name}.", result.blocks);
-            if let Some(tip) = result.hashes.last() {
-                println!("New tip: {tip}");
+
+        let mut last_printed = None;
+        let timed_out = loop {
+            if !json {
+                let line = mine_status_line(&job, name);
+                if last_printed.as_ref() != Some(&line) {
+                    writeln!(out, "{line}")?;
+                    last_printed = Some(line);
+                }
             }
+            match job.state {
+                MiningJobState::Completed | MiningJobState::Failed => break false,
+                MiningJobState::Mining | MiningJobState::Syncing => {}
+            }
+            let Some(left) = remaining(deadline) else {
+                break true;
+            };
+            std::thread::sleep(MINE_POLL_INTERVAL.min(left));
+            // A poll's own failure (a stall, a reset, a dropped connection,
+            // anything that is not an actual response from the server) says
+            // nothing about whether the job is still running, so it is
+            // retried within the deadline rather than failing the command.
+            // Only a real response, even an error one, is authoritative and
+            // handled by `decode_response`.
+            let Some(left) = remaining(deadline) else {
+                break true;
+            };
+            match client
+                .get(format!("{dashboard}/api/v1/mining/jobs/{}", job.id))
+                .timeout(MINE_POLL_ATTEMPT_TIMEOUT.min(left))
+                .send()
+            {
+                Ok(response) => {
+                    job = decode_response(response)
+                        .with_context(|| format!("checking mining job {} on {name}", job.id))?;
+                }
+                Err(_) => continue,
+            }
+        };
+
+        if timed_out {
+            if json {
+                let output = unresolved_json(Some(&job), &idempotency_key)?;
+                writeln!(out, "{}", serde_json::to_string_pretty(&output)?)?;
+            } else {
+                writeln!(out, "{}", mine_status_line(&job, name))?;
+                writeln!(out, "Run the same command to check it again.")?;
+            }
+            bail!(
+                "mining job {} on {name} is still running; run the same command to check it again",
+                job.id
+            );
+        }
+
+        if json {
+            let output = MineOutput {
+                id: job.id.clone(),
+                blocks: job.completed_blocks,
+                requested_blocks: job.requested_blocks,
+                state: job.state,
+                error: job.error.clone(),
+                progress_uncertain: job.progress_uncertain,
+                hashes: job.hashes.clone(),
+            };
+            writeln!(out, "{}", serde_json::to_string_pretty(&output)?)?;
+        }
+
+        // The job reached a terminal state: replaying this key would only ever
+        // return this same frozen job, so forget it and let a future `mine`
+        // with the same block count start a fresh one. Cleared only after the
+        // output above is written: if that write fails, the key must still
+        // survive so a retry does not start a second job for output we never
+        // actually delivered.
+        journal.clear(&[(&intent, &idempotency_key)])?;
+
+        if job.state == MiningJobState::Failed {
+            bail!(job.error.unwrap_or_else(|| "mining failed".to_owned()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn change_chain(
+        &self,
+        name: &InstanceName,
+        operation: &str,
+        depth: u32,
+        keep_txs: bool,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let result = change_chain(&dashboard, &client, operation, depth, keep_txs)?;
+        println!("{}", render_chain_change(&result, name, operation, json)?);
+        if !result.failed_transactions.is_empty() {
+            bail!(
+                "chain changed, but {} transaction(s) could not be retained",
+                result.failed_transactions.len()
+            );
         }
         Ok(())
     }
@@ -571,26 +835,60 @@ impl Runtime {
         to: u8,
         source_pool: &str,
         destination_pool: &str,
-        amount_zatoshi: u64,
+        amount: TransferAmount,
         memo: Option<&str>,
         json: bool,
     ) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
-        self.submit_send(
+        self.wallet_send_with(
             name,
             &dashboard,
             &client,
             std::io::stdout().lock(),
             Instant::now() + PAYMENT_WAIT,
             from,
+            to,
+            source_pool,
+            destination_pool,
+            amount,
+            memo,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_send_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        to: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        amount: TransferAmount,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        self.submit_transfer(
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            from,
+            amount,
             serde_json::json!({
                 "from_account": from,
                 "to_account": to,
                 "source_pool": source_pool,
                 "destination_pool": destination_pool,
-                "amount_zatoshi": amount_zatoshi,
                 "memo": memo,
             }),
+            source_pool,
+            destination_pool,
             memo,
             json,
         )
@@ -604,7 +902,7 @@ impl Runtime {
         from: u8,
         source_pool: &str,
         uri: &str,
-        amount_zatoshi: Option<u64>,
+        amount: Option<TransferAmount>,
         json: bool,
     ) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
@@ -615,7 +913,7 @@ impl Runtime {
             from,
             source_pool,
             uri,
-            amount_zatoshi,
+            amount,
             json,
         )
     }
@@ -629,7 +927,7 @@ impl Runtime {
         from: u8,
         source_pool: &str,
         uri: &str,
-        amount_zatoshi: Option<u64>,
+        amount: Option<TransferAmount>,
         json: bool,
     ) -> Result<()> {
         let response = client
@@ -638,27 +936,138 @@ impl Runtime {
             .send()
             .with_context(|| format!("asking environment {name} to read the payment URI"))?;
         let request: PaymentUri = decode_response(response)?;
-        let amount_zatoshi = match (request.amount_zatoshi, amount_zatoshi) {
-            (Some(amount), None) | (None, Some(amount)) => amount,
-            (Some(_), Some(_)) => bail!("the payment URI already sets an amount; omit --amount"),
-            (None, None) => bail!("the payment URI has no amount; pass --amount"),
+        let amount = match (request.amount_zatoshi, amount) {
+            (Some(amount), None) => TransferAmount::Exact(amount),
+            (None, Some(amount)) => amount,
+            (Some(_), Some(TransferAmount::Exact(_))) => {
+                bail!("the payment URI already sets an amount; omit --amount")
+            }
+            (Some(_), Some(TransferAmount::Max)) => {
+                bail!("the payment URI already sets an amount; omit --max")
+            }
+            (None, None) => bail!("the payment URI has no amount; pass --amount or --max"),
         };
-        self.submit_send(
+        self.submit_transfer(
             name,
             dashboard,
             client,
             std::io::stdout().lock(),
             Instant::now() + PAYMENT_WAIT,
             from,
+            amount,
             serde_json::json!({
                 "from_account": from,
                 "to_address": request.address,
                 "source_pool": source_pool,
                 "destination_pool": request.destination_pool,
-                "amount_zatoshi": amount_zatoshi,
                 "memo": request.memo,
             }),
+            source_pool,
+            &request.destination_pool,
             request.memo.as_deref(),
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_transfer(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        amount: TransferAmount,
+        mut body: serde_json::Value,
+        source_pool: &str,
+        destination_pool: &str,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        match amount {
+            TransferAmount::Exact(amount) => {
+                body["amount_zatoshi"] = amount.into();
+                self.submit_send(
+                    name, dashboard, client, out, deadline, from, body, memo, json,
+                )
+            }
+            TransferAmount::Max => self.submit_max_send(
+                name,
+                dashboard,
+                client,
+                out,
+                deadline,
+                from,
+                body,
+                source_pool,
+                destination_pool,
+                memo,
+                json,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_max_send(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        mut body: serde_json::Value,
+        source_pool: &str,
+        destination_pool: &str,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let journal = IntentJournal::open(&self.instance_dir(name), "send")?;
+        let entries = journal.read()?;
+        let saved = entries.keys().find_map(|fingerprint| {
+            let value: serde_json::Value = serde_json::from_str(fingerprint).ok()?;
+            (value.get("amount_mode")?.as_str()? == "max" && value.get("request")? == &body).then(
+                || {
+                    value
+                        .get("amount_zatoshi")?
+                        .as_u64()
+                        .map(|amount| (fingerprint.clone(), amount))
+                },
+            )?
+        });
+        let (fingerprint, amount_zatoshi) = match saved {
+            Some(saved) => saved,
+            None => {
+                let amount = quote_max_amount(
+                    client,
+                    dashboard,
+                    name,
+                    deadline,
+                    from,
+                    source_pool,
+                    destination_pool,
+                )?;
+                let fingerprint = serde_json::to_string(&serde_json::json!({
+                    "amount_mode": "max",
+                    "amount_zatoshi": amount,
+                    "request": body.clone(),
+                }))?;
+                (fingerprint, amount)
+            }
+        };
+        body["amount_zatoshi"] = amount_zatoshi.into();
+        self.submit_send_with_journal(
+            &journal,
+            &fingerprint,
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            from,
+            body,
+            memo,
             json,
         )
     }
@@ -671,10 +1080,10 @@ impl Runtime {
         name: &InstanceName,
         dashboard: &str,
         client: &reqwest::blocking::Client,
-        mut out: impl std::io::Write,
+        out: impl std::io::Write,
         deadline: Instant,
         from: u8,
-        mut body: serde_json::Value,
+        body: serde_json::Value,
         memo: Option<&str>,
         json: bool,
     ) -> Result<()> {
@@ -683,8 +1092,38 @@ impl Runtime {
         // exactly: every field distinguishes intents, and an absent memo (`null`) differs from an
         // empty one.
         let fingerprint = serde_json::to_string(&body)?;
-        let resumed = journal.read()?.contains_key(&fingerprint);
-        let idempotency_key = journal.key_for(&fingerprint)?;
+        self.submit_send_with_journal(
+            &journal,
+            &fingerprint,
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            from,
+            body,
+            memo,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_send_with_journal(
+        &self,
+        journal: &IntentJournal,
+        fingerprint: &str,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        mut body: serde_json::Value,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let resumed = journal.read()?.contains_key(fingerprint);
+        let idempotency_key = journal.key_for(fingerprint)?;
         if resumed && !json {
             eprintln!("Checking the saved payment with idempotency key {idempotency_key}.");
         }
@@ -742,7 +1181,7 @@ impl Runtime {
                 return Err(error.context(format!("asking environment {name} to send")));
             }
         };
-        journal.clear(&[(&fingerprint, &idempotency_key)])?;
+        journal.clear(&[(fingerprint, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&activity)?)?;
         }
@@ -789,6 +1228,68 @@ pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
         bail!("rejected ({status}): {detail}");
     }
     response.json().context("decoding response")
+}
+
+/// Only retries a transport-level send failure, where it is unknown whether
+/// the server received the request. A decoded HTTP response, even an error
+/// one, confirms the server saw this attempt, so it is returned immediately.
+/// Bounded by the same overall deadline as polling: a lost response after the
+/// server already accepted the request must not submit a second mining
+/// operation with a different idempotency key.
+fn submit_mining_job(
+    client: &reqwest::blocking::Client,
+    dashboard: &str,
+    blocks: u32,
+    idempotency_key: &str,
+    deadline: Instant,
+) -> Result<MiningJob> {
+    let body = serde_json::json!({"blocks": blocks, "idempotency_key": idempotency_key});
+    loop {
+        let Some(left) = remaining(deadline) else {
+            bail!(
+                "timed out submitting the mining job; it may have been accepted and could \
+                 still be running. Run the same command to check it again."
+            );
+        };
+        if let Ok(response) = client
+            .post(format!("{dashboard}/api/v1/mining/jobs"))
+            .json(&body)
+            .timeout(MINE_POLL_ATTEMPT_TIMEOUT.min(left))
+            .send()
+        {
+            return decode_response(response);
+        }
+        // An unreachable server fails instantly, so without a pause this
+        // would otherwise spin for the whole deadline instead of retrying
+        // at a reasonable rate.
+        std::thread::sleep(MINE_POLL_INTERVAL.min(left));
+    }
+}
+
+/// Wording mirrors the dashboard's `MiningStatus` component, so the CLI and
+/// the dashboard describe the same job the same way. The tip hash on
+/// completion and the job ID on failure restore what the legacy endpoint's
+/// text output showed, since the job itself is otherwise a bare count.
+pub(crate) fn mine_status_line(job: &MiningJob, name: &InstanceName) -> String {
+    let count = format!(
+        "{} of {} blocks confirmed on {name}",
+        job.completed_blocks, job.requested_blocks
+    );
+    let progress = if job.progress_uncertain {
+        format!("At least {count}; the last mining result is uncertain.")
+    } else {
+        format!("{count}.")
+    };
+    let state = match job.state {
+        MiningJobState::Mining => "Mining blocks…".to_owned(),
+        MiningJobState::Syncing => "Synchronizing wallet…".to_owned(),
+        MiningJobState::Completed => match job.hashes.as_ref().and_then(|hashes| hashes.last()) {
+            Some(tip) => format!("Mining completed. Wallet synchronized. New tip: {tip}"),
+            None => "Mining completed. Wallet synchronized.".to_owned(),
+        },
+        MiningJobState::Failed => format!("Mining job {} failed.", job.id),
+    };
+    format!("{progress} {state}")
 }
 
 fn format_zec(zatoshi: u64) -> String {

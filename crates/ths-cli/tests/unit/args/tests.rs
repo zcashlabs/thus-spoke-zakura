@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn parses_reorg_and_rollback_depths() {
+    for args in [
+        vec!["ths", "reorg", "--depth", "3"],
+        vec!["ths", "reorg", "--depth", "1000", "--keep-txs", "--json"],
+        vec!["ths", "--name", "alice", "rollback", "--depth", "1"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+    }
+    for command in ["reorg", "rollback"] {
+        for depth in ["0", "1001", "-1", "1.5"] {
+            assert!(Cli::try_parse_from(["ths", command, "--depth", depth]).is_err());
+        }
+        assert!(Cli::try_parse_from(["ths", command]).is_err());
+    }
+    assert!(Cli::try_parse_from(["ths", "rollback", "--depth", "1", "--keep-txs"]).is_err());
+}
+
+#[test]
 fn separates_building_from_starting() {
     let default = Cli::try_parse_from(["ths"]).unwrap();
     assert!(default.command.is_none());
@@ -78,6 +96,19 @@ fn separates_building_from_starting() {
     ));
 
     assert!(Cli::try_parse_from(["ths", "start", "--port-offset", "1"]).is_ok());
+
+    let cli = Cli::try_parse_from(["ths", "endpoints"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Endpoints { env: false })
+    ));
+
+    let cli = Cli::try_parse_from(["ths", "--name", "alice", "endpoints", "--env"]).unwrap();
+    assert_eq!(cli.name.unwrap().to_string(), "alice");
+    assert!(matches!(
+        cli.command,
+        Some(Command::Endpoints { env: true })
+    ));
 }
 
 #[test]
@@ -282,9 +313,12 @@ fn wallet_send_takes_a_payment_uri_instead_of_a_destination() {
     };
     assert_eq!(args.uri.as_deref(), Some("zcash:uregtest1abc?amount=1"));
     assert_eq!((args.to, args.amount), (None, None));
+    assert!(!args.max);
 
-    // --amount is still accepted for a URI that omits one.
+    // --amount or --max can supply an amount omitted by the URI.
     assert!(parse(&["--uri", "zcash:uregtest1abc", "--amount", "1"]).is_ok());
+    assert!(parse(&["--uri", "zcash:uregtest1abc", "--max"]).is_ok());
+    assert!(parse(&["--uri", "zcash:uregtest1abc", "--amount", "1", "--max"]).is_err());
     // The URI already names the destination, its pool, and any memo.
     assert!(parse(&["--uri", "zcash:uregtest1abc", "--to", "2"]).is_err());
     assert!(
@@ -297,7 +331,25 @@ fn wallet_send_takes_a_payment_uri_instead_of_a_destination() {
         .is_err()
     );
     assert!(parse(&["--uri", "zcash:uregtest1abc", "--memo", "hi"]).is_err());
-    // Without a URI, a destination and an amount are required.
+    // Without a URI, a destination and either --amount or --max are required.
     assert!(parse(&["--amount", "1"]).is_err());
     assert!(parse(&["--to", "2"]).is_err());
+    assert!(parse(&["--to", "2", "--max"]).is_ok());
+    assert!(parse(&["--to", "2", "--amount", "1", "--max"]).is_err());
+}
+
+#[test]
+fn shield_and_unshield_accept_exactly_one_amount_mode() {
+    for command in ["shield", "unshield"] {
+        let parse = |amount: &[&str]| {
+            let mut argv = vec!["ths", "wallet", command, "--from", "1", "--to", "1"];
+            argv.extend_from_slice(amount);
+            Cli::try_parse_from(argv)
+        };
+
+        assert!(parse(&["--amount", "1"]).is_ok());
+        assert!(parse(&["--max"]).is_ok());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--amount", "1", "--max"]).is_err());
+    }
 }

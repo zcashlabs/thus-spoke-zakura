@@ -23,6 +23,8 @@ pub(crate) struct Inner {
     pub(crate) mining: Arc<MiningCoordinator>,
     #[cfg(test)]
     pub(crate) mining_runtime: Option<Arc<dyn MiningRuntime>>,
+    #[cfg(test)]
+    pub(crate) chain_runtime: Option<Arc<dyn crate::chain::ChainRuntime>>,
     pub(crate) store: Store,
     pub(crate) wallet: RealWallet,
     pub(crate) rpc: NodeRpc,
@@ -68,6 +70,8 @@ impl AppState {
             mining: Arc::new(MiningCoordinator::new()),
             #[cfg(test)]
             mining_runtime: None,
+            #[cfg(test)]
+            chain_runtime: None,
             store,
             wallet,
             rpc: NodeRpc::new(rpc),

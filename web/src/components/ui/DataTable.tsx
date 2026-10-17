@@ -65,7 +65,23 @@ export function Row({
       // row's implicit `row` role and strip the table relationships; keyboard
       // and screen reader users navigate via the link inside the first cell,
       // which every clickable row is required to carry.
-      onClick={to ? () => void navigate(to) : undefined}
+      onClick={
+        to
+          ? (event) => {
+              if (
+                event.defaultPrevented ||
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey ||
+                (event.target as Element).closest('a, button, input, select, textarea')
+              )
+                return;
+              void navigate(to);
+            }
+          : undefined
+      }
       className={cn(
         'border-line hover:bg-accent-soft animate-fade-in border-b transition-colors last:border-b-0',
         '[&>td]:px-5 [&>td]:py-3.5 [&>td]:align-middle',

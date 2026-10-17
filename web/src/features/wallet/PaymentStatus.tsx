@@ -19,15 +19,17 @@ import { paymentRecipient, type PaymentIdentity } from '@/hooks/payment-identity
 import { errorMessage } from '@/lib/api';
 import { formatZecAmount } from '@/lib/money';
 import { cn } from '@/lib/cn';
+import { absoluteTime } from '@/lib/format';
 
 export function PaymentStatus({
   identity,
   restored,
-  pendingKey,
+  inFlight,
   busy,
   claimAnnouncement,
   onTerminal,
   onResume,
+  onForget,
   onDismiss,
   onNew,
   container,
@@ -35,14 +37,16 @@ export function PaymentStatus({
   onHiddenFocus,
   focusRequest,
   onView,
+  onFollowTransaction,
 }: {
   identity: PaymentIdentity;
   restored: boolean;
-  pendingKey: string | null;
+  inFlight: boolean;
   busy: boolean;
   claimAnnouncement: (key: string) => boolean;
   onTerminal: (identity: PaymentIdentity) => Promise<void>;
   onResume: (identity: PaymentIdentity) => void;
+  onForget: () => Promise<void>;
   onDismiss: () => void;
   onNew: () => void;
   container: HTMLElement | null;
@@ -50,8 +54,9 @@ export function PaymentStatus({
   onHiddenFocus: () => void;
   focusRequest: object | null;
   onView: () => void;
+  onFollowTransaction: () => void;
 }) {
-  const status = usePaymentStatus(identity.key, true);
+  const status = usePaymentStatus(identity.key, true, 'address' in identity.variables);
   const activity = status.data;
   const toast = useToast();
   const titleId = useId();
@@ -71,7 +76,7 @@ export function PaymentStatus({
   const terminal = isTerminalPayment(activity);
   const confirmed = activity?.status === 'confirmed';
   const failed = activity?.status === 'failed';
-  const inFlight = pendingKey === identity.key;
+  const canForget = status.isSuccess && activity === null && !inFlight;
   const variables = identity.variables;
   const destination = paymentRecipient(variables);
   useEffect(() => {
@@ -163,6 +168,17 @@ export function PaymentStatus({
       if (mounted.current) setCheckingCleanup(false);
     }
   };
+  const forget = async () => {
+    setCheckingCleanup(true);
+    try {
+      await onForget();
+      if (mounted.current) setCleanupError(null);
+    } catch (error) {
+      if (mounted.current) setCleanupError(errorMessage(error));
+    } finally {
+      if (mounted.current) setCheckingCleanup(false);
+    }
+  };
   const checking = !activity && status.isPending && status.isFetching;
   const label = confirmed
     ? 'Confirmed'
@@ -241,6 +257,11 @@ export function PaymentStatus({
       {!terminal && !activity && !status.isPending && !status.isError && (
         <p className="text-ink-muted mt-2">No record yet. The request is saved.</p>
       )}
+      {canForget && (
+        <p className="text-ink-muted mt-1">
+          Forgetting removes it from this browser only; it does not cancel server work.
+        </p>
+      )}
       {!terminal && activity?.last_error && (
         <PaymentWarning className="mt-2">
           <p>Latest execution error: {activity.last_error}</p>
@@ -298,11 +319,38 @@ export function PaymentStatus({
               Resume
             </Button>
           )}
+          {canForget && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              loading={checkingCleanup}
+              aria-describedby={titleId}
+              onClick={() => void forget()}
+            >
+              Forget saved request
+            </Button>
+          )}
           {confirmed && activity.txid && (
             <Link
               className="text-accent-strong self-center underline underline-offset-2"
               aria-describedby={titleId}
               to={`/explorer/tx/${activity.txid}`}
+              onClick={(event) => {
+                const { button, altKey, ctrlKey, metaKey, shiftKey, currentTarget } = event;
+                const opensSeparateContext =
+                  currentTarget.target !== '' && currentTarget.target.toLowerCase() !== '_self';
+                if (
+                  button === 0 &&
+                  !altKey &&
+                  !ctrlKey &&
+                  !metaKey &&
+                  !shiftKey &&
+                  !opensSeparateContext
+                ) {
+                  onFollowTransaction();
+                }
+              }}
             >
               View transaction
             </Link>
@@ -338,15 +386,17 @@ export function PaymentStatus({
       </div>
       <div id={detailsId} hidden={!detailsOpen} className="text-ink-muted mt-2 space-y-1">
         {restored && <p>Previous payment</p>}
-        <p>
-          Pool route:{' '}
-          {identity.kind === 'send'
-            ? `${identity.variables.source_pool} → ${identity.variables.destination_pool}`
-            : identity.variables.pool}
-        </p>
+        {identity.kind === 'send' ? (
+          <p>
+            Pool route: {identity.variables.source_pool} → {identity.variables.destination_pool}
+          </p>
+        ) : 'pool' in identity.variables ? (
+          <p>Pool route: {identity.variables.pool}</p>
+        ) : null}
         {identity.kind === 'send' && identity.variables.to_address && (
           <p>Destination: {identity.variables.to_address}</p>
         )}
+        {'address' in identity.variables && <p>Destination: {identity.variables.address}</p>}
         {identity.kind === 'send' && (
           <p>
             Memo:{' '}
@@ -357,7 +407,7 @@ export function PaymentStatus({
                 : identity.variables.memo}
           </p>
         )}
-        {activity?.created_at && <p>Created: {activity.created_at}</p>}
+        {activity?.created_at && <p>Created: {absoluteTime(activity.created_at)}</p>}
         {failed && <p>Adding funds won’t restart this payment. Start a new one to try again.</p>}
       </div>
     </article>,

@@ -69,9 +69,10 @@ fn embedded_installer_receives_exact_version_and_destination() {
         "test \"$THS_VERSION\" = 4.5.6 && test \"$THS_INSTALL_DIR\" = /tmp/ths\n",
         &version,
         Path::new("/tmp/ths"),
+        false,
     )
     .unwrap();
-    assert!(run_installer("exit 7\n", &version, Path::new("/tmp/ths")).is_err());
+    assert!(run_installer("exit 7\n", &version, Path::new("/tmp/ths"), false).is_err());
 }
 
 #[test]
@@ -94,6 +95,47 @@ fn uninstall_removes_only_an_executable_named_ths() {
     std::fs::write(&unexpected, "keep me").unwrap();
     assert!(remove_installed_executable(&unexpected).is_err());
     assert!(unexpected.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn update_and_uninstall_act_on_the_launcher_behind_a_symlink() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    let link = directory.path().join("link");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(&link).unwrap();
+    let launcher = real.join("ths");
+    std::fs::write(&launcher, "0.3.0").unwrap();
+    std::os::unix::fs::symlink(&launcher, link.join("ths")).unwrap();
+
+    let resolved = resolve_launcher(&link.join("ths")).unwrap();
+    assert_eq!(resolved, std::fs::canonicalize(&launcher).unwrap());
+
+    // The installer replaces `$THS_INSTALL_DIR/ths` with `mv -f`, which would turn a symlink
+    // into a regular file.
+    run_installer(
+        "printf 0.2.1 > \"$THS_INSTALL_DIR/ths.new\" && mv -f \"$THS_INSTALL_DIR/ths.new\" \"$THS_INSTALL_DIR/ths\"\n",
+        &Version::new(0, 2, 1),
+        resolved.parent().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read_to_string(&launcher).unwrap(), "0.2.1");
+    assert!(
+        std::fs::symlink_metadata(link.join("ths"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    remove_installed_executable(&resolved).unwrap();
+    assert!(!launcher.exists());
+    assert!(
+        std::fs::symlink_metadata(link.join("ths"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 fn serve_once(status: &'static str, body: &'static str) -> String {

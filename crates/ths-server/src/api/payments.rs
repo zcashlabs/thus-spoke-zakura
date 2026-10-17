@@ -1,5 +1,4 @@
-use super::error::require_started;
-use super::error::{ApiError, ApiResult};
+use super::error::{ApiError, ApiJson, ApiQuery, ApiResult, require_started};
 use crate::state::AppState;
 use crate::wallet::PaymentError;
 use crate::{
@@ -9,11 +8,7 @@ use crate::{
     wallet::SendQuote,
 };
 use anyhow::Context;
-use axum::{
-    Json,
-    extract::{Query, State},
-    http::StatusCode,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use axum::{
     http::{HeaderValue, header::LOCATION},
     response::{IntoResponse, Response},
@@ -40,7 +35,7 @@ pub(crate) struct SendRequest {
 }
 pub(crate) async fn send(
     State(state): State<AppState>,
-    Json(req): Json<SendRequest>,
+    ApiJson(req): ApiJson<SendRequest>,
 ) -> ApiResult<PaymentResponse<Activity>> {
     require_started(&state)?;
     let (recipient, _) = validate_send(&req)?;
@@ -92,7 +87,7 @@ pub(crate) struct PaymentUri {
 
 pub(crate) async fn parse_payment_uri(
     State(state): State<AppState>,
-    Json(req): Json<PaymentUriRequest>,
+    ApiJson(req): ApiJson<PaymentUriRequest>,
 ) -> ApiResult<Json<PaymentUri>> {
     Ok(Json(payment_uri(&state.0.store, &req.uri)?))
 }
@@ -115,11 +110,17 @@ fn payment_uri(store: &Store, uri: &str) -> ApiResult<PaymentUri> {
         Ok(Some(Memo::Text(text))) => Some(String::from(&*text)),
         _ => return Err(ApiError::bad_request("only text memos are supported")),
     };
+    // ZIP-321 treats an explicit zero as a requested amount. Send cannot pay
+    // it, while an omitted amount stays unset so the sender can supply one.
+    let amount_zatoshi = payment.amount().map(u64::from);
+    if amount_zatoshi == Some(0) {
+        return Err(ApiError::bad_request("amount must be greater than zero"));
+    }
     Ok(PaymentUri {
         to_account: development_account_for(store, &address)?,
         address,
         destination_pool,
-        amount_zatoshi: payment.amount().map(u64::from),
+        amount_zatoshi,
         memo,
     })
 }
@@ -149,7 +150,7 @@ pub(crate) struct PaymentRequestResponse {
 
 pub(crate) async fn payment_request(
     State(state): State<AppState>,
-    Json(req): Json<PaymentRequest>,
+    ApiJson(req): ApiJson<PaymentRequest>,
 ) -> ApiResult<Json<PaymentRequestResponse>> {
     require_user_account(req.account_id)?;
     let amount = req
@@ -190,8 +191,9 @@ pub(crate) struct SendQuoteRequest {
 }
 pub(crate) async fn send_quote(
     State(state): State<AppState>,
-    Json(req): Json<SendQuoteRequest>,
+    ApiJson(req): ApiJson<SendQuoteRequest>,
 ) -> ApiResult<Json<SendQuote>> {
+    require_started(&state)?;
     require_user_account(req.from_account)?;
     require_pool(&req.source_pool, "source_pool")?;
     require_pool(&req.destination_pool, "destination_pool")?;
@@ -221,7 +223,7 @@ pub(crate) struct FaucetRequest {
 }
 pub(crate) async fn faucet(
     State(state): State<AppState>,
-    Json(req): Json<FaucetRequest>,
+    ApiJson(req): ApiJson<FaucetRequest>,
 ) -> ApiResult<PaymentResponse<Activity>> {
     require_started(&state)?;
     require_key(&req.idempotency_key)?;
@@ -235,6 +237,7 @@ pub(crate) async fn faucet(
         return Err(ApiError::bad_request("amount must be greater than zero"));
     }
     require_pool(&req.pool, "pool")?;
+    require_non_dust_amount(req.amount_zatoshi, req.pool == "transparent")?;
     let pending = state.0.store.claim_faucet(
         req.account_id,
         &req.pool,
@@ -387,16 +390,26 @@ async fn execute_address_faucet<R: AddressFaucetRuntime>(
 
 pub(crate) async fn faucet_address(
     State(state): State<AppState>,
-    Json(req): Json<FaucetAddressRequest>,
+    ApiJson(req): ApiJson<FaucetAddressRequest>,
 ) -> ApiResult<PaymentResponse<FaucetAddressResponse>> {
     require_started(&state)?;
     require_key(&req.idempotency_key)?;
-    require_faucet_address(&req.address)?;
+    let address = require_faucet_address(&req.address)?;
     if req.amount_zatoshi == 0 || req.amount_zatoshi > 5 * ZATOSHIS_PER_ZEC {
         return Err(ApiError::bad_request(
             "amount must be greater than zero and no more than 5 ZEC",
         ));
     }
+    // The SDK falls back to a unified address's transparent receiver when it
+    // has neither a supported Orchard (Ironwood) nor Sapling receiver.
+    let transparent = match address {
+        Address::Transparent(_) => true,
+        Address::Unified(address) => {
+            address.has_transparent() && !address.has_orchard() && !address.has_sapling()
+        }
+        _ => false,
+    };
+    require_non_dust_amount(req.amount_zatoshi, transparent)?;
     // An existing external claim keeps its store even if the address later
     // becomes a development-account address.
     let destination = if state
@@ -435,6 +448,16 @@ pub(crate) async fn faucet_address(
 
 pub(crate) fn require_key(key: &str) -> ApiResult<()> {
     validate_idempotency_key(key).map_err(ApiError::bad_request)
+}
+
+fn require_non_dust_amount(amount_zatoshi: u64, transparent: bool) -> ApiResult<()> {
+    // Zakura's standard P2PKH and P2SH outputs both have a 54-zatoshi dust threshold.
+    if transparent && amount_zatoshi < 54 {
+        return Err(ApiError::bad_request(
+            "transparent outputs must be at least 54 zatoshi",
+        ));
+    }
+    Ok(())
 }
 
 fn require_pool(pool: &str, field: &str) -> ApiResult<()> {
@@ -487,6 +510,7 @@ fn validate_send(req: &SendRequest) -> ApiResult<(Recipient<'_>, Option<MemoByte
             "amount_zatoshi must be between 1 and {MAX_MONEY}"
         )));
     }
+    require_non_dust_amount(req.amount_zatoshi, req.destination_pool == "transparent")?;
     let memo = parse_memo(req.memo.as_deref(), &req.destination_pool)?;
     Ok((recipient, memo))
 }
@@ -520,9 +544,9 @@ fn require_user_account(id: u8) -> ApiResult<()> {
     }
 }
 
-fn require_faucet_address(value: &str) -> ApiResult<()> {
+fn require_faucet_address(value: &str) -> ApiResult<Address> {
     match Address::decode(&regtest_network(), value) {
-        Some(Address::Unified(_) | Address::Transparent(_)) => Ok(()),
+        Some(address @ (Address::Unified(_) | Address::Transparent(_))) => Ok(address),
         Some(_) => Err(ApiError::bad_request(
             "destination must be a unified or transparent Regtest address",
         )),
@@ -561,7 +585,7 @@ pub(crate) struct FaucetAddressQuery {
 
 pub(crate) async fn faucet_address_status(
     State(state): State<AppState>,
-    Query(query): Query<FaucetAddressQuery>,
+    ApiQuery(query): ApiQuery<FaucetAddressQuery>,
 ) -> ApiResult<Json<FaucetAddressResponse>> {
     require_key(&query.idempotency_key)?;
     stored_address_faucet(&state.0.store, &query.idempotency_key)?
@@ -583,7 +607,7 @@ fn payment_response<T>(
 ) -> ApiResult<PaymentResponse<T>> {
     let status = match status {
         "confirmed" | "failed" => StatusCode::OK,
-        "preparing" | "prepared" | "broadcast" => StatusCode::ACCEPTED,
+        "preparing" | "prepared" | "broadcast" | "unconfirmed" => StatusCode::ACCEPTED,
         status => return Err(anyhow::anyhow!("payment has unsupported status {status}").into()),
     };
     let mut url =

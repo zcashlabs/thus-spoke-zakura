@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     args::{Pool, SendAmount, SendArgs},
+    client::TransferAmount,
     runtime::{InstanceName, Runtime},
 };
 
@@ -24,18 +25,25 @@ pub(super) fn send(
     json: bool,
 ) -> Result<()> {
     check_send(&args)?;
+    let amount = if args.max {
+        Some(TransferAmount::Max)
+    } else {
+        args.amount
+            .map(SendAmount::zatoshi)
+            .map(TransferAmount::Exact)
+    };
     if let Some(uri) = &args.uri {
         return runtime.wallet_send_uri(
             name,
             args.from,
             args.source_pool.as_str(),
             uri,
-            args.amount.map(SendAmount::zatoshi),
+            amount,
             json,
         );
     }
-    let (Some(to), Some(amount)) = (args.to, args.amount) else {
-        bail!("--to and --amount are required unless --uri is given");
+    let (Some(to), Some(amount)) = (args.to, amount) else {
+        bail!("--to and either --amount or --max are required unless --uri is given");
     };
     runtime.wallet_send(
         name,
@@ -43,7 +51,7 @@ pub(super) fn send(
         to,
         args.source_pool.as_str(),
         args.destination_pool.as_str(),
-        amount.zatoshi(),
+        amount,
         args.memo.as_deref(),
         json,
     )

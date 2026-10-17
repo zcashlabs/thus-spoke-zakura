@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import { post, request } from './client';
+import { ApiError } from './errors';
 import {
   accountSchema,
   activitySchema,
+  addressFaucetSchema,
   addressSchema,
   blockPageSchema,
   blockSchema,
@@ -15,7 +17,28 @@ import {
   transactionSchema,
   type Pool,
   type SendQuoteInput,
+  type AddressFaucet,
+  type Activity,
 } from './schemas';
+
+/** Adapt the address faucet's smaller status response to the shared payment UI. */
+function addressFaucetActivity(payment: AddressFaucet, key: string): Activity {
+  return {
+    id: key,
+    kind: 'faucet',
+    from_account: null,
+    to_account: null,
+    to_address: payment.address,
+    source_pool: 'ironwood',
+    destination_pool: payment.address.startsWith('t') ? 'transparent' : 'ironwood',
+    amount_zatoshi: payment.amount_zatoshi,
+    txid: payment.txid,
+    block_hash: payment.block_hash,
+    status: payment.status,
+    last_error: payment.last_error,
+    created_at: '',
+  };
+}
 
 export const api = {
   status: () => request('/status', statusSchema),
@@ -91,6 +114,32 @@ export const api = {
       ...input,
       amount_zatoshi: Number(input.amount_zatoshi),
     }),
+
+  faucetAddress: async (input: {
+    address: string;
+    amount_zatoshi: bigint;
+    idempotency_key: string;
+  }) =>
+    addressFaucetActivity(
+      await post('/faucet/address', addressFaucetSchema, {
+        ...input,
+        amount_zatoshi: Number(input.amount_zatoshi),
+      }),
+      input.idempotency_key,
+    ),
+
+  faucetAddressStatus: async (key: string) => {
+    try {
+      const result = await request(
+        `/faucet/address?idempotency_key=${encodeURIComponent(key)}`,
+        addressFaucetSchema,
+      );
+      return addressFaucetActivity(result, key);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
 
   startMining: (blocks: number, idempotency_key: string) =>
     post('/mining/jobs', miningJobSchema, { blocks, idempotency_key }),

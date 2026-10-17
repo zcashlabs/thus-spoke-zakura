@@ -1,0 +1,17 @@
+name: Issue
+description: Describe a problem and how you would solve it
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happens now? What should happen? Give a concrete example or reproduction steps when possible. Omit AI analysis, metadata, tool calls, and unrelated logs.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Explain your proposed change or what you have tried, and how it addresses the problem. If you do not know, say so.
+    validations:
+      required: true

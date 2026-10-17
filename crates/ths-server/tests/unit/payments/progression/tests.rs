@@ -57,6 +57,177 @@ async fn journal_height_rpc(slow: Arc<AtomicBool>) -> (String, tokio::task::Join
 }
 
 #[tokio::test]
+async fn orphaned_requests_survive_restart_and_are_only_observed_not_reexecuted() {
+    let stage = Arc::new(AtomicUsize::new(0));
+    let current_stage = stage.clone();
+    let methods = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rpc_methods = methods.clone();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let stage = current_stage.clone();
+            let methods = rpc_methods.clone();
+            async move {
+                let method = request["method"].as_str().unwrap();
+                methods.lock().unwrap().push(method.to_owned());
+                let result = match method {
+                    "getrawtransaction" => {
+                        if stage.load(Ordering::SeqCst) == 0 {
+                            return Json(
+                                json!({"result":null,"error":{"code":-5,"message":"not found"}}),
+                            );
+                        }
+                        if stage.load(Ordering::SeqCst) == 2 {
+                            return Json(json!({"result":{"txid":request["params"][0],
+                                "blockhash":"removed","in_active_chain":false},"error":null}));
+                        }
+                        let confirmations = match stage.load(Ordering::SeqCst) {
+                            1 => -1,
+                            3 => 0,
+                            _ => 1,
+                        };
+                        let mut tx =
+                            json!({"txid":request["params"][0],"confirmations":confirmations});
+                        if confirmations != 0 {
+                            tx["blockhash"] = json!("replacement");
+                        }
+                        tx
+                    }
+                    "getblock" => json!({"height":100}),
+                    "getblockhash" => json!("replacement"),
+                    _ => panic!("orphaned payment attempted execution: {method}"),
+                };
+                Json(json!({"result":result,"error":null}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (initial, dir) = state_with_local_wallet();
+    let account = initial
+        .0
+        .store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            12_000,
+            "orphaned-account",
+            Some("memo"),
+        )
+        .unwrap();
+    initial
+        .0
+        .store
+        .record_prepared(&account.id, "account-tx", b"account bytes", 140)
+        .unwrap();
+    initial
+        .0
+        .store
+        .confirm(&account.id, "account-tx", "removed")
+        .unwrap();
+    let external = initial
+        .0
+        .store
+        .claim_address_faucet("tm-external", 12_000, "orphaned-address")
+        .unwrap();
+    initial
+        .0
+        .store
+        .record_address_prepared(&external.id, "address-tx", b"address bytes", 140)
+        .unwrap();
+    initial
+        .0
+        .store
+        .confirm_address(&external.id, "address-tx", "removed")
+        .unwrap();
+    initial
+        .0
+        .store
+        .unconfirm_blocks(&["removed".into()])
+        .unwrap();
+    drop(initial);
+    let store = Store::open(dir.path().join("server.db")).unwrap();
+    store.initialize().unwrap();
+    let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
+    let state = AppState::new(store, wallet, endpoint, "test".into());
+    state.mark_started();
+
+    let (code, replay) = crate::state::tests::api_request(&state, "POST", "/api/v1/send",
+        json!({"from_account":1,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood",
+            "amount_zatoshi":12_000,"idempotency_key":"orphaned-account","memo":"memo"})).await;
+    assert_eq!(code, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(replay["id"], account.id);
+    assert_eq!(replay["status"], "unconfirmed");
+    let mut traversal = PaymentTraversal::default();
+    for observation in 0..=4 {
+        stage.store(observation, Ordering::SeqCst);
+        progress_payment_intents_with_traversal(
+            &state,
+            Instant::now() + PAYMENT_DISPATCH_BUDGET,
+            &mut traversal,
+        )
+        .await
+        .unwrap();
+        let account = state.0.store.activity(&account.id).unwrap();
+        let address = state
+            .0
+            .store
+            .address_faucet_for_key("orphaned-address")
+            .unwrap()
+            .unwrap();
+        let expected = if observation == 4 {
+            "confirmed"
+        } else {
+            "unconfirmed"
+        };
+        assert_eq!(account.status, expected);
+        assert_eq!(address.status, expected);
+        assert_eq!(account.txid, "account-tx");
+        assert_eq!(address.txid, "address-tx");
+        assert_eq!(account.last_error, None);
+        assert_eq!(address.last_error, None);
+        if observation < 4 {
+            assert_eq!(account.block_hash, None);
+            assert_eq!(address.block_hash, None);
+            assert!(
+                methods
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|method| method == "getrawtransaction")
+            );
+        } else {
+            assert_eq!(account.block_hash.as_deref(), Some("replacement"));
+            assert_eq!(address.block_hash.as_deref(), Some("replacement"));
+        }
+    }
+    assert_eq!(
+        state
+            .0
+            .store
+            .prepared_transaction(&account.id)
+            .unwrap()
+            .raw_transaction,
+        b"account bytes"
+    );
+    assert_eq!(
+        state
+            .0
+            .store
+            .optional_prepared_transaction(&external.id)
+            .unwrap()
+            .unwrap()
+            .raw_transaction,
+        b"address bytes"
+    );
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn slow_journal_height_lookup_preserves_recovery_and_external_dispatch_across_passes() {
     let slow = Arc::new(AtomicBool::new(true));
     let (endpoint, server) = journal_height_rpc(slow.clone()).await;
