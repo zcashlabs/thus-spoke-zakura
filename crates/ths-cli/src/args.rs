@@ -79,6 +79,23 @@ pub(crate) enum Command {
         #[arg(long)]
         env: bool,
     },
+    /// Call a method on the instance's Zakura JSON-RPC endpoint.
+    Rpc {
+        /// Print the full JSON-RPC response.
+        #[arg(long)]
+        raw: bool,
+        /// Allow `stop`, which shuts the Zakura node down.
+        #[arg(long)]
+        yes: bool,
+        /// JSON-RPC method name.
+        method: String,
+        /// JSON-RPC parameters.
+        ///
+        /// Numbers, `true`, `false`, `null`, objects, and arrays are parsed as JSON.
+        /// Any other value is sent as a string.
+        #[arg(value_name = "PARAMS", allow_hyphen_values = true)]
+        params: Vec<String>,
+    },
     /// Mine blocks on a running development environment.
     Mine {
         /// Number of blocks to mine.

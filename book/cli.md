@@ -1,8 +1,9 @@
 # Appendix A: `ths` CLI reference
 
 `ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
-environment and, once an environment is running, talks to its dashboard API on
-your behalf. This page documents every command in detail, with examples.
+environment and, once an environment is running, talks to its dashboard API or
+Zakura JSON-RPC on your behalf. This page documents every command in detail,
+with examples.
 
 Read [Chapter 1](getting-started.md) for an instance's lifecycle, [Chapter
 3](accounts-and-balances.md) for accounts and pools, and [Chapter
@@ -22,7 +23,8 @@ to run in order. For a worked dashboard flow, see [Chapter
     where the command supports it.
 - Use `-h` / `--help` or `ths help <command>` for help; `-V` /
   `--version` prints the launcher version. `--json` does not convert logs,
-  browser opening, builds, or cleanup messages into JSON and is rejected for `run`.
+  browser opening, builds, cleanup messages, or `rpc` results into JSON and is
+  rejected for `run`. Use `rpc --raw` for the full JSON-RPC response.
 - Accounts are referred to by **index**, `1` through `5`. Every environment
   starts with five disposable development accounts; there is no need to copy
   full Regtest addresses to use the commands on this page. (A hidden sixth
@@ -30,8 +32,9 @@ to run in order. For a worked dashboard flow, see [Chapter
   CLI.)
 - Amounts are ZEC decimal strings with up to 8 decimal places, e.g. `1`,
   `0.5`, `2.25000001`. These are disposable Regtest coins with no value.
-- Commands that call the app (`mine`, `reorg`, `rollback`, `faucet`, and `wallet` subcommands) require
-  a running environment. Start one first with `ths` (or `ths --name <NAME>`).
+- Commands that call the app (`mine`, `reorg`, `rollback`, `faucet`, and `wallet`
+  subcommands) or the node (`rpc`) require a running environment. Start one
+  first with `ths` (or `ths --name <NAME>`).
   `stop` and `reset --force` can remove resources left by an interrupted run.
 
 ---
@@ -170,6 +173,36 @@ ths endpoints --env
 
 JSON output includes `"network": "regtest"` and `"tls": false`; lightwalletd
 uses plaintext HTTP on loopback.
+
+### `ths rpc [--raw] [--yes] <METHOD> [PARAMS...]`
+
+Calls one method on the named instance's Zakura JSON-RPC endpoint and prints
+the result. The endpoint is the loopback URL stored for that instance. The
+call is sent only when the Zakura container recorded for the instance is still
+that container, is owned by the instance, and still publishes that URL. A
+container that only reuses the name is refused.
+
+```console
+ths rpc getblockcount
+ths rpc getblockhash 0
+ths rpc --raw getblockchaininfo
+ths --name alice rpc getblockcount
+```
+
+`getblockcount` prints the current height. A string result, such as a block
+hash, is printed without quotes. Objects and arrays are pretty-printed JSON.
+`--raw` prints the full JSON-RPC response instead of only `result`. The global
+`--json` flag does not change this output.
+
+Parameters are parsed as JSON when they are numbers, `true`, `false`, `null`,
+objects, or arrays. Any other argument is sent as a string.
+
+An RPC error prints the node's error message and exits nonzero. `stop` shuts
+the node down, so it is refused unless `--yes` is set:
+
+```console
+ths rpc --yes stop
+```
 
 ### `ths logs [app|zakura|lightwalletd] [-f|--follow] [--tail N | --head N]`
 
@@ -701,6 +734,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths status [--json]` | Show app-container running state and endpoints |
 | `ths open` | Open the running dashboard |
 | `ths endpoints [--json \| --env]` | Print endpoints, or `export` lines for the variables `ths run` passes to its child |
+| `ths rpc [--raw] [--yes] <METHOD> [PARAMS...]` | Call the instance's Zakura JSON-RPC and print the result |
 | `ths mine <N>` | Mine blocks and synchronize the wallet |
 | `ths reorg --depth N [--keep-txs]` | Replace recent blocks, optionally attempting transaction reinclusion |
 | `ths rollback --depth N` | Remove recent blocks without replacements |

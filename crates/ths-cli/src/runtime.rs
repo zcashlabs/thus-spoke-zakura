@@ -58,6 +58,7 @@ use crate::client::{RuntimeStatus, runtime_status};
 pub(crate) use instance::Endpoints;
 pub(crate) use resources::container_running;
 use resources::*;
+mod rpc;
 mod runner;
 use runner::*;
 mod startup;

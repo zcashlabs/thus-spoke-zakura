@@ -190,6 +190,10 @@ pub(super) fn docker_inherit_in(args: &[&str], current_dir: &std::path::Path) ->
     docker_command(args, Some(current_dir))
 }
 pub(super) fn docker_command(args: &[&str], current_dir: Option<&std::path::Path>) -> Result<()> {
+    #[cfg(test)]
+    if let Some(docker) = scripted_docker() {
+        return docker.run(args);
+    }
     let mut command = docker_cli();
     command.args(args);
     if let Some(current_dir) = current_dir {
@@ -205,11 +209,46 @@ pub(super) fn docker_output<const N: usize>(args: [&str; N]) -> Result<String> {
     docker_output_args(&args)
 }
 pub(super) fn docker_output_args(args: &[&str]) -> Result<String> {
+    #[cfg(test)]
+    if let Some(docker) = scripted_docker() {
+        return docker.output(args);
+    }
     let output = docker_cli().args(args).output().context("running Docker")?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+// Tests install a Docker stand-in so a same-named container on the machine
+// cannot satisfy a command that must prove ownership first.
+#[cfg(test)]
+thread_local! {
+    static SCRIPTED_DOCKER: std::cell::RefCell<Option<std::sync::Arc<dyn DockerResourceCommands>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn scripted_docker() -> Option<std::sync::Arc<dyn DockerResourceCommands>> {
+    SCRIPTED_DOCKER.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(super) fn with_scripted_docker<T>(
+    docker: impl DockerResourceCommands + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    SCRIPTED_DOCKER.with(|slot| {
+        *slot.borrow_mut() = Some(std::sync::Arc::new(docker));
+    });
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            SCRIPTED_DOCKER.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    let _clear = Clear;
+    body()
 }
 
 pub(super) fn docker_cli() -> Command {

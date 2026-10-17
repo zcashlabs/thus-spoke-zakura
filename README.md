@@ -43,7 +43,8 @@ Choose the dashboard steps **or** the commands for one payment of each kind.
 Running both makes additional payments. For your own application, run
 `ths endpoints --json` to get this instance's local API, Zakura RPC, and
 lightwalletd addresses. `eval "$(ths endpoints --env)"` exports the same
-variables `ths run` passes to its child. See
+variables `ths run` passes to its child. `ths rpc <METHOD>` calls that Zakura
+endpoint and prints the result. See
 [Connect your application](book/connect-an-app.md) for the request format.
 
 To test chain reorganizations, run `ths reorg --depth 3` to replace recent

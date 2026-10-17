@@ -51,6 +51,12 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Status => runtime.status(&name, cli.json),
         Command::Open => runtime.open(&name),
         Command::Endpoints { env } => runtime.endpoints(&name, cli.json, env),
+        Command::Rpc {
+            raw,
+            yes,
+            method,
+            params,
+        } => runtime.rpc(&name, &method, &params, raw, yes),
         Command::Mine { blocks } => runtime.mine(&name, blocks, cli.json),
         Command::Reorg { depth, keep_txs } => {
             runtime.change_chain(&name, "reorg", depth, keep_txs, cli.json)
