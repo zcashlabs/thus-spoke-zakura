@@ -63,3 +63,44 @@ async fn explicit_availability_statuses_are_retryable_without_a_json_rpc_body() 
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+#[tokio::test]
+async fn canonical_hash_is_none_only_above_the_tip() {
+    // Zakura answers `getblockhash` above its tip with the generic code -1, so the tip tells a
+    // vanished height apart from any other failure.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rpc = NodeRpc::new(format!("http://{}", listener.local_addr().unwrap()));
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(|axum::Json(request): axum::Json<Value>| async move {
+            let response = match (
+                request["method"].as_str().unwrap(),
+                request["params"][0].as_u64(),
+            ) {
+                ("getblockchaininfo", _) => {
+                    json!({"result":{"chain":"regtest","blocks":5,"bestblockhash":"5".repeat(64)},"error":null})
+                }
+                ("getblockhash", Some(2 | 6)) => json!({
+                    "result":null,
+                    "error":{"code":-1,"message":"Provided index is greater than the current tip"}
+                }),
+                ("getblockhash", Some(height)) if height <= 5 => {
+                    json!({"result":height.to_string().repeat(64),"error":null})
+                }
+                (method, params) => panic!("unexpected rpc {method} {params:?}"),
+            };
+            axum::Json(response)
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    assert_eq!(rpc.canonical_hash(4).await.unwrap(), Some("4".repeat(64)));
+    assert_eq!(rpc.canonical_hash(6).await.unwrap(), None);
+    let error = rpc.canonical_hash(2).await.unwrap_err();
+    assert!(
+        error.to_string().contains("getblockhash failed"),
+        "{error:#}"
+    );
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}

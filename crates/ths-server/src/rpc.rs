@@ -141,6 +141,18 @@ impl NodeRpc {
     pub async fn block_hash(&self, height: u32) -> Result<String> {
         self.call("getblockhash", json!([height])).await
     }
+    /// Zakura's block hash at `height`, or `None` once its chain is shorter than that.
+    /// `getblockhash` above the tip fails with the generic code -1, so the tip decides.
+    pub async fn canonical_hash(&self, height: u32) -> Result<Option<String>> {
+        let error = match self.block_hash(height).await {
+            Ok(hash) => return Ok(Some(hash)),
+            Err(error) => error,
+        };
+        match self.checkpoint().await {
+            Ok(tip) if tip.height < u64::from(height) => Ok(None),
+            _ => Err(error),
+        }
+    }
     pub async fn unspent_output(&self, txid: &str, index: u32) -> Result<Option<Value>> {
         self.call("gettxout", json!([txid, index, true])).await
     }

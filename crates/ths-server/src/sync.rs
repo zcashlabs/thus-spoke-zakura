@@ -31,10 +31,20 @@ impl AppState {
         notify(self, "sync");
 
         let result = async {
-            if let Some(target) = target_height {
+            if let Some(height) = target_height {
+                let hash = crate::reconcile::within_deadline(
+                    deadline,
+                    "reading the mined block hash",
+                    self.0.rpc.block_hash(u32::try_from(height)?),
+                )
+                .await?;
                 self.0
                     .wallet
-                    .wait_for_height(target, deadline.saturating_duration_since(Instant::now()))
+                    .wait_for_block(
+                        &ChainCheckpoint { height, hash },
+                        deadline.saturating_duration_since(Instant::now()),
+                        |height| self.0.rpc.canonical_hash(height),
+                    )
                     .await?;
             }
             let target = crate::reconcile::within_deadline(
