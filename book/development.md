@@ -162,6 +162,7 @@ docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:loca
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --list
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact reorg_and_rollback_preserve_canonical_wallet_and_payment_state
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact external_transparent_spend_reconciles_after_restart
 ```
 
 Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart

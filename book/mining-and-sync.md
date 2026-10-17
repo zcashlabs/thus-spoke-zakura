@@ -111,9 +111,20 @@ after reconciliation succeeds.
 2. The wallet checks its scanned chain against Zakura and uses
    lightwalletd's compact blocks to catch up. A mismatch can require a
    rewind and rescan.
+   It also imports mined transaction history for public transparent
+   addresses, including transactions created by another wallet using the
+   development accounts. This records spent outputs as well as incoming
+   funds. Each address has durable history progress; existing wallets
+   backfill from their birthday on the first run with this support.
 3. On success, the server refreshes account balances, marks sync `ready`,
    and notifies dashboard query hooks. On failure it reports `error`;
    the last known balances can remain visible and may be stale.
+
+Transparent history must catch up through the scanned checkpoint before
+that snapshot is published. Interrupted history requests retain their last
+complete progress and retry; a reorganization rewinds history progress
+with the wallet. This does not add external transactions to the
+request-based Recent activity feed.
 
 This is why the Network page, Explorer, Recent activity, and Wallet page can
 show different stages of one event. They are observations of different

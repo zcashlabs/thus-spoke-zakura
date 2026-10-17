@@ -11,6 +11,8 @@ mod faucet;
 mod recovery;
 #[path = "scenarios/activity_recovery/send.rs"]
 mod send;
+#[path = "scenarios/activity_recovery/transparent_history.rs"]
+mod transparent_history;
 #[path = "scenarios/activity_recovery/treasury.rs"]
 mod treasury;
 
@@ -44,6 +46,12 @@ use support::{
     RecoveryPhase, RegtestStack, TerminationSignals, lose_payment_response, request_json, rpc,
     rpc_with_timeout,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn external_transparent_spend_reconciles_after_restart() -> Result<()> {
+    transparent_history::external_transparent_spend_reconciles_after_restart().await
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker and prepared regtest images"]

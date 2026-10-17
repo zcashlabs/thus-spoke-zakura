@@ -76,6 +76,9 @@ mod journal;
 mod payments;
 mod recovery;
 mod submission;
+mod transparent_history;
+
+pub(crate) use transparent_history::{HistoryQuery, HistoryTransaction};
 
 pub use journal::PreparedPayment;
 use journal::{PreparedPaymentsMigration, prepared_payment};
@@ -189,6 +192,7 @@ impl RealWallet {
             .with_external_migrations(vec![
                 Box::new(PreparedPaymentsMigration),
                 Box::new(recovery::TreasuryCursorMigration),
+                Box::new(transparent_history::TransparentHistoryMigration),
             ])
             .init_or_migrate(&mut db)
             .map_err(|e| anyhow::anyhow!("initializing wallet database: {e}"))?;
@@ -389,6 +393,10 @@ impl RealWallet {
                     "UPDATE ext_tsz_treasury_cursor SET height=?1,block_hash=?2,updated_at=CURRENT_TIMESTAMP WHERE height>=?1",
                     rusqlite::params![height, hash],
                 )?;
+                ext.execute(
+                    "UPDATE ext_ths_transparent_history SET height=?1,block_hash=?2 WHERE height>=?1",
+                    rusqlite::params![height, hash],
+                )?;
                 Ok(())
             })
         })
@@ -545,5 +553,9 @@ mod treasury_sync_tests;
 #[cfg(test)]
 #[path = "../tests/unit/wallet/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/support/transparent_history.rs"]
+pub(crate) mod transparent_history_test_support;
 
 const TREASURY_SHIELDING_JOURNAL_ID: &str = "private-treasury-shielding-v1";
