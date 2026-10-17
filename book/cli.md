@@ -8,8 +8,10 @@ Read [Chapter 1](getting-started.md) for an instance's lifecycle, [Chapter
 3](accounts-and-balances.md) for accounts and pools, and [Chapter
 6](architecture/operations.md) before retrying a payment or mine request.
 The examples below demonstrate individual commands; they are not one script
-to run in order. For a worked dashboard flow, see [Chapter
-4](using-the-dashboard.md).
+to run in order. If a send or faucet command cannot write its result, fix the
+output destination and repeat the same arguments against the same instance.
+Its saved payment identity remains available for that retry. For a worked
+dashboard flow, see [Chapter 4](using-the-dashboard.md).
 
 ## Conventions used below
 
@@ -532,8 +534,10 @@ fee; using the same account and pool is rejected. CLI `send`, `shield`, and
 `unshield` journal a key for the resolved request body, including memo. Each
 invocation submits once, then polls read-only keyed activity within a 30-second
 budget. Pending, unknown, or rejected results retain the key; rerun unchanged
-arguments and the same instance to resume. Observing `confirmed` or terminal
-`failed` clears it, so an identical command afterward can create another payment.
+arguments and the same instance to resume. A stdout write error also retains
+that identity, including the resolved amount for `--max`. Successfully reporting
+`confirmed` or terminal `failed` clears it, so an identical command afterward can
+create another payment.
 Pending/unknown output includes the key (also in JSON) and exits nonzero;
 see the [caller table](architecture/operations.md#which-caller-are-you-retrying).
 

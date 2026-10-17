@@ -1509,3 +1509,430 @@ pub(super) fn send_interruption_probe() {
     );
     panic!("the interrupted send finished before it was killed: {finished:?}");
 }
+
+/// Fails either before any output or after a prefix was already delivered.
+struct PaymentResultWriter {
+    remaining: usize,
+    written: Vec<u8>,
+}
+
+impl PaymentResultWriter {
+    fn new(remaining: usize) -> Self {
+        Self {
+            remaining,
+            written: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for PaymentResultWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "payment result pipe closed",
+            ));
+        }
+        let count = self.remaining.min(bytes.len());
+        self.written.extend_from_slice(&bytes[..count]);
+        self.remaining -= count;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_payment_output_error(error: anyhow::Error) {
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn send_retains_identity_when_reporting_a_terminal_result_fails() {
+    for (json, status) in [(true, "confirmed"), (false, "confirmed"), (true, "failed")] {
+        for prefix in [0, 32] {
+            let (_dir, runtime, alpha) = payment_runtime();
+            let intent = send_intent(Some("memo"));
+            let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+            let unrelated = journal.key_for("unrelated").unwrap();
+            drop(journal);
+            let response = activity_json(status, "original-tx", Some("stored failure"));
+            let (url, requests) = serve(vec![("200 OK", response); 3]);
+            let client = reqwest::blocking::Client::new();
+            let mut failed_output = PaymentResultWriter::new(prefix);
+            let error = runtime
+                .submit_send(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut failed_output,
+                    Instant::now() + Duration::from_secs(5),
+                    1,
+                    intent.clone(),
+                    Some("memo"),
+                    json,
+                )
+                .unwrap_err();
+            assert_payment_output_error(error);
+            assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+            let original_key = sent_key(&requests.recv().unwrap());
+            assert_eq!(
+                saved_send_key(&runtime, &alpha, &intent),
+                Some(original_key.clone())
+            );
+
+            // A new command invocation reopens the journal and recovers this exact payment.
+            for retry in [true, false] {
+                let mut out = Vec::new();
+                let result = runtime.submit_send(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut out,
+                    Instant::now() + Duration::from_secs(5),
+                    1,
+                    intent.clone(),
+                    Some("memo"),
+                    json,
+                );
+                assert_eq!(result.is_err(), status == "failed");
+                if json {
+                    assert_eq!(json_stdout(&out)["txid"], "original-tx");
+                } else {
+                    assert!(
+                        String::from_utf8(out)
+                            .unwrap()
+                            .contains("Transaction: original-tx")
+                    );
+                }
+                assert_eq!(sent_key(&requests.recv().unwrap()) == original_key, retry);
+                assert_eq!(saved_send_key(&runtime, &alpha, &intent), None);
+            }
+            let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+            assert_eq!(journal.read().unwrap().get("unrelated"), Some(&unrelated));
+        }
+    }
+}
+
+fn address_result_json(status: &str) -> String {
+    serde_json::json!({
+        "address": "utest", "amount_zatoshi": 100, "txid": "original-address-tx",
+        "block_hash": (status == "confirmed").then_some("block"),
+        "status": status, "last_error": "stored failure",
+    })
+    .to_string()
+}
+
+#[test]
+fn address_faucet_retains_identity_when_reporting_a_terminal_result_fails() {
+    for (json, status) in [(true, "confirmed"), (false, "confirmed"), (true, "failed")] {
+        for prefix in [0, 32] {
+            let (_dir, runtime, alpha) = payment_runtime();
+            let response = address_result_json(status);
+            let (url, requests) = serve(vec![("200 OK", response); 3]);
+            let client = reqwest::blocking::Client::new();
+            let mut failed_output = PaymentResultWriter::new(prefix);
+            let error = runtime
+                .faucet_with(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut failed_output,
+                    Instant::now() + Duration::from_secs(5),
+                    "utest",
+                    100,
+                    json,
+                )
+                .unwrap_err();
+            assert_payment_output_error(error);
+            assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+            let original_key = sent_key(&requests.recv().unwrap());
+            let saved = || {
+                IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+                    .unwrap()
+                    .read()
+                    .unwrap()
+            };
+            assert_eq!(saved().get("address:utest:100"), Some(&original_key));
+            for retry in [true, false] {
+                let mut out = Vec::new();
+                let result = runtime.faucet_with(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut out,
+                    Instant::now() + Duration::from_secs(5),
+                    "utest",
+                    100,
+                    json,
+                );
+                assert_eq!(result.is_err(), status == "failed");
+                if json {
+                    assert_eq!(json_stdout(&out)["txid"], "original-address-tx");
+                } else {
+                    assert!(
+                        String::from_utf8(out)
+                            .unwrap()
+                            .contains("Transaction: original-address-tx")
+                    );
+                }
+                assert_eq!(sent_key(&requests.recv().unwrap()) == original_key, retry);
+                assert!(saved().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn wallet_faucet_retains_every_identity_when_reporting_terminal_results_fails() {
+    for json in [true, false] {
+        for prefix in [0, 32] {
+            for second_status in ["confirmed", "failed"] {
+                let (_dir, runtime, alpha) = payment_runtime();
+                let faucet_result = |account: u8, status: &str, txid: &str| {
+                    let mut result: serde_json::Value =
+                        serde_json::from_str(&activity_json(status, txid, Some("stored failure")))
+                            .unwrap();
+                    result["id"] = format!("faucet-{account}").into();
+                    result["kind"] = "faucet".into();
+                    result["from_account"] = serde_json::Value::Null;
+                    result["to_account"] = account.into();
+                    result.to_string()
+                };
+                let confirmed = faucet_result(1u8, "confirmed", "first-tx");
+                let second = faucet_result(2u8, second_status, "second-tx");
+                let (url, requests) = serve(vec![
+                    ("200 OK", confirmed.clone()),
+                    ("200 OK", second.clone()),
+                    ("200 OK", confirmed.clone()),
+                    ("200 OK", second.clone()),
+                    ("200 OK", confirmed),
+                    ("200 OK", second),
+                ]);
+                let client = reqwest::blocking::Client::new();
+                let mut failed_output = PaymentResultWriter::new(prefix);
+                let error = runtime
+                    .wallet_faucet_with(
+                        &alpha,
+                        &url,
+                        &client,
+                        &mut failed_output,
+                        Instant::now() + Duration::from_secs(5),
+                        &[1, 2],
+                        100,
+                        "ironwood",
+                        json,
+                    )
+                    .unwrap_err();
+                assert_payment_output_error(error);
+                assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+                let originals = [
+                    sent_key(&requests.recv().unwrap()),
+                    sent_key(&requests.recv().unwrap()),
+                ];
+                let saved = || {
+                    IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                };
+                let entries = saved();
+                assert_eq!(entries.len(), 2);
+                for (index, key) in originals.iter().enumerate() {
+                    assert_eq!(
+                        entries.get(&format!("wallet:ironwood:100:1,2:{}", index + 1)),
+                        Some(key)
+                    );
+                }
+                for retry in [true, false] {
+                    let mut out = Vec::new();
+                    let result = runtime.wallet_faucet_with(
+                        &alpha,
+                        &url,
+                        &client,
+                        &mut out,
+                        Instant::now() + Duration::from_secs(5),
+                        &[1, 2],
+                        100,
+                        "ironwood",
+                        json,
+                    );
+                    assert_eq!(result.is_err(), second_status == "failed");
+                    assert!(!out.is_empty());
+                    for key in &originals {
+                        assert_eq!(sent_key(&requests.recv().unwrap()) == *key, retry);
+                    }
+                    assert!(saved().is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wallet_faucet_keeps_unfinished_batch_keys_after_an_output_error() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![
+        ("200 OK", activity_json("confirmed", "first-tx", None)),
+        ("200 OK", activity_json("broadcast", "second-tx", None)),
+    ]);
+    let error = runtime
+        .wallet_faucet_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_millis(500),
+            &[1, 2],
+            100,
+            "ironwood",
+            true,
+        )
+        .unwrap_err();
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    for account in 1..=2 {
+        assert_eq!(
+            saved[&format!("wallet:ironwood:100:1,2:{account}")],
+            sent_key(&requests.recv().unwrap())
+        );
+    }
+}
+
+#[test]
+fn terminal_payment_failures_still_release_keys_in_text_mode() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let intent = send_intent(None);
+    let (url, _requests) = serve(vec![(
+        "200 OK",
+        activity_json("failed", "failed-tx", Some("stored failure")),
+    )]);
+    let error = runtime
+        .submit_send(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            intent.clone(),
+            None,
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("stored failure"));
+    assert_eq!(saved_send_key(&runtime, &alpha, &intent), None);
+
+    let (url, _requests) = serve(vec![("200 OK", address_result_json("failed"))]);
+    let error = runtime
+        .faucet_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_secs(5),
+            "utest",
+            100,
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("stored failure"));
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn max_send_retains_its_resolved_amount_after_a_result_write_error() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":490,"txid":"max-txid","block_hash":"block","status":"confirmed"}"#;
+    let (url, requests) = serve(vec![
+        (
+            "200 OK",
+            r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#,
+        ),
+        ("200 OK", confirmed),
+        ("200 OK", confirmed),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &client,
+            PaymentResultWriter::new(0),
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+    assert_payment_output_error(error);
+    assert!(
+        requests
+            .recv()
+            .unwrap()
+            .0
+            .starts_with("POST /api/v1/send/quote ")
+    );
+    let original_key = sent_key(&requests.recv().unwrap());
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "send")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved.values().next(), Some(&original_key));
+    let fingerprint: serde_json::Value =
+        serde_json::from_str(saved.keys().next().unwrap()).unwrap();
+    assert_eq!(fingerprint["amount_zatoshi"], 490);
+    let mut out = Vec::new();
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap();
+    let retry = requests.recv().unwrap();
+    assert!(retry.0.starts_with("POST /api/v1/send "));
+    assert_eq!(sent_key(&retry), original_key);
+    let body: serde_json::Value = serde_json::from_str(&retry.1).unwrap();
+    assert_eq!(body["amount_zatoshi"], 490);
+    assert_eq!(json_stdout(&out)["txid"], "max-txid");
+    assert!(
+        requests.try_recv().is_err(),
+        "a retry must not request another quote"
+    );
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "send")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}

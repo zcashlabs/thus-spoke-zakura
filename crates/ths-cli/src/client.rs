@@ -651,11 +651,11 @@ impl Runtime {
         if result.status == "confirmed" && result.block_hash.is_none() {
             bail!("faucet reported confirmation without a block hash; retry the same command");
         }
-        journal.clear(&[(&intent, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&result)?)?;
         }
         if result.status == "failed" {
+            journal.clear(&[(&intent, &idempotency_key)])?;
             bail!(
                 "faucet payment to {} failed: {}",
                 result.address,
@@ -674,6 +674,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(&intent, &idempotency_key)])?;
         Ok(())
     }
 
@@ -774,17 +776,6 @@ impl Runtime {
                 }
             }
         }
-        if followed
-            .iter()
-            .all(|outcome| matches!(outcome, Followed::Settled(_)))
-        {
-            let settled: Vec<_> = intents
-                .iter()
-                .zip(&keys)
-                .map(|(intent, key)| (intent.as_str(), key.as_str()))
-                .collect();
-            journal.clear(&settled)?;
-        }
         if json {
             let pending: Vec<_> = pending.iter().map(|(_, value)| value).collect();
             writeln!(
@@ -815,6 +806,18 @@ impl Runtime {
             for failure in &failures {
                 eprintln!("Failed to fund {failure}");
             }
+        }
+        // Release the batch together, only after its results were written.
+        if followed
+            .iter()
+            .all(|outcome| matches!(outcome, Followed::Settled(_)))
+        {
+            let settled: Vec<_> = intents
+                .iter()
+                .zip(&keys)
+                .map(|(intent, key)| (intent.as_str(), key.as_str()))
+                .collect();
+            journal.clear(&settled)?;
         }
         if failures.is_empty() && pending.is_empty() {
             Ok(())
@@ -1181,11 +1184,11 @@ impl Runtime {
                 return Err(error.context(format!("asking environment {name} to send")));
             }
         };
-        journal.clear(&[(fingerprint, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&activity)?)?;
         }
         if activity.status == "failed" {
+            journal.clear(&[(fingerprint, &idempotency_key)])?;
             bail!(
                 "payment from account {from} to {} failed: {}",
                 activity.recipient(),
@@ -1213,6 +1216,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(fingerprint, &idempotency_key)])?;
         Ok(())
     }
 }
