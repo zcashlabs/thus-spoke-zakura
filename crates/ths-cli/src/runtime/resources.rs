@@ -80,7 +80,105 @@ pub(super) fn owned_resource(
         );
     }
     let details = docker.output(&[kind, "inspect", target])?;
-    inspected_resource_identity(kind, target, name, &details).map(Some)
+    match inspected_resource_identity(kind, target, name, &details) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if kind == "network" => {
+            match unlabeled_network_identity(docker, target, name, &details)? {
+                Some(id) => Ok(Some(id)),
+                None => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Releases up to v0.3.0 created the instance network without a label. Such a network still
+/// belongs to this instance when every container attached to it, running or stopped, carries
+/// the instance label; an unlabeled network with no attached containers, or with a foreign
+/// one, stays refused.
+fn unlabeled_network_identity(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+    details: &str,
+) -> Result<Option<String>> {
+    let Some(id) = unlabeled_network_id(details) else {
+        return Ok(None);
+    };
+    match network_attachment(docker, target, name)? {
+        Attachment::Owned => Ok(Some(id)),
+        Attachment::Empty | Attachment::Foreign => Ok(None),
+    }
+}
+
+/// An unlabeled network whose ID the recovery journal already holds was adopted by an earlier
+/// cleanup that removed its containers first; the caller matches the recorded ID, so the
+/// attachment check only refuses a foreign container that joined since.
+pub(super) fn recorded_unlabeled_network_identity(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+    details: &str,
+) -> Result<Option<String>> {
+    let Some(id) = unlabeled_network_id(details) else {
+        return Ok(None);
+    };
+    match network_attachment(docker, target, name)? {
+        Attachment::Empty | Attachment::Owned => Ok(Some(id)),
+        Attachment::Foreign => Ok(None),
+    }
+}
+
+fn unlabeled_network_id(details: &str) -> Option<String> {
+    let resources = serde_json::from_str::<serde_json::Value>(details).ok()?;
+    let network = resources.as_array()?.first()?;
+    if !network["Labels"][INSTANCE_LABEL].is_null() {
+        return None;
+    }
+    network["Id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+enum Attachment {
+    Empty,
+    Owned,
+    Foreign,
+}
+
+/// Containers attached to the network, running or stopped: `docker network inspect` lists
+/// only running ones.
+fn network_attachment(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+) -> Result<Attachment> {
+    let attached = docker.output(&[
+        "container",
+        "ls",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        &format!("network={target}"),
+        "--format",
+        "{{.ID}}",
+    ])?;
+    let attached: Vec<&str> = attached
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .collect();
+    if attached.is_empty() {
+        return Ok(Attachment::Empty);
+    }
+    for id in attached {
+        let container = docker.output(&["container", "inspect", id])?;
+        if inspected_resource_identity("container", id, name, &container).is_err() {
+            return Ok(Attachment::Foreign);
+        }
+    }
+    Ok(Attachment::Owned)
 }
 
 pub(super) fn mutation_failure(

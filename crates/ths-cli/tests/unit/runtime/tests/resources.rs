@@ -123,6 +123,171 @@ fn unlabeled_network_collision_preserves_data_and_metadata() {
 }
 
 #[test]
+fn unlabeled_network_is_adopted_when_its_containers_are_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let mut docker = RecordingDocker::new("ths-alpha-app", "ths-alpha-wallet", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "volume",
+        "ths-alpha-wallet",
+        r#"[{"Name":"ths-alpha-wallet","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container".to_owned(),
+    );
+
+    runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap();
+
+    assert_eq!(
+        *docker.runs.lock().unwrap(),
+        [
+            "rm -f owned-container",
+            "volume rm ths-alpha-wallet",
+            "network rm old-network",
+        ]
+    );
+}
+
+#[test]
+fn unlabeled_network_with_a_foreign_container_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let mut docker = RecordingDocker::new("ths-alpha-app\nother-app", "", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "container",
+        "other-app",
+        r#"[{"Id":"foreign-container","Config":{"Labels":{}}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container\nforeign-container".to_owned(),
+    );
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+    assert!(docker.runs.lock().unwrap().is_empty());
+}
+
+fn adopted_unlabeled_network_after_failed_removal() -> (Runtime, RecordingDocker) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime { root: dir.keep() };
+    let mut docker = RecordingDocker::new("ths-alpha-app", "ths-alpha-wallet", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "volume",
+        "ths-alpha-wallet",
+        r#"[{"Name":"ths-alpha-wallet","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container".to_owned(),
+    );
+    docker.retain.lock().unwrap().push("old-network".into());
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("ths-alpha is still present after removal"),
+        "{error:#}"
+    );
+    assert_eq!(
+        *docker.runs.lock().unwrap(),
+        [
+            "rm -f owned-container",
+            "volume rm ths-alpha-wallet",
+            "network rm old-network",
+        ]
+    );
+    docker.retain.lock().unwrap().clear();
+    docker
+        .extra_output
+        .remove("container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}");
+    docker.extra_output.insert(
+        "network ls --no-trunc --format {{.ID}}".to_owned(),
+        "old-network".to_owned(),
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --format {{.ID}}".to_owned(),
+        String::new(),
+    );
+    (runtime, docker)
+}
+
+#[test]
+fn unlabeled_network_removal_is_retried_from_its_recorded_id() {
+    let (runtime, docker) = adopted_unlabeled_network_after_failed_removal();
+
+    runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap();
+
+    assert_eq!(docker.runs.lock().unwrap()[3..], ["network rm old-network"]);
+    assert!(docker.networks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn recorded_unlabeled_network_is_refused_once_a_foreign_container_joins() {
+    let (runtime, mut docker) = adopted_unlabeled_network_after_failed_removal();
+    docker.inspect(
+        "container",
+        "other-app",
+        r#"[{"Id":"foreign-container","Config":{"Labels":{}}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=old-network --format {{.ID}}".to_owned(),
+        "foreign-container".to_owned(),
+    );
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+    assert_eq!(docker.runs.lock().unwrap().len(), 3);
+}
+
+#[test]
 fn new_networks_are_labeled_for_owned_cleanup() {
     struct NewNetwork(AtomicBool);
 

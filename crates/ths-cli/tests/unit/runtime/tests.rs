@@ -99,6 +99,16 @@ impl DockerResourceCommands for RecordingDocker {
         };
         match args {
             ["container", "ls", "-a", "--format", "{{.Names}}"] => Ok(listed(&self.containers)),
+            [
+                "container",
+                "ls",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                _,
+                "--format",
+                "{{.ID}}",
+            ] => Ok(String::new()),
             ["volume", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.volumes)),
             ["network", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.networks)),
             [kind, "inspect", target] => {

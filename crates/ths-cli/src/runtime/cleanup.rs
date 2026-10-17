@@ -177,7 +177,20 @@ impl Runtime {
                             name: target.to_owned(),
                             identity: Some(id.clone()),
                         };
-                        match inspected_resource_identity(kind, target, name, &details) {
+                        let identity =
+                            match inspected_resource_identity(kind, target, name, &details) {
+                                Err(error) if kind == "network" => {
+                                    match recorded_unlabeled_network_identity(
+                                        docker, &id, name, &details,
+                                    ) {
+                                        Ok(Some(observed)) => Ok(observed),
+                                        Ok(None) => Err(error),
+                                        Err(listing) => Err(listing),
+                                    }
+                                }
+                                identity => identity,
+                            };
+                        match identity {
                             Ok(observed) if recovery::identity_matches(&recorded, &observed) => {
                                 targets.push((kind.to_owned(), id, target.to_owned()));
                                 return Ok(());
