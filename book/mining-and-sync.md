@@ -74,7 +74,9 @@ curl -fsS "$DASHBOARD_URL/api/v1/status"
 curl -fsS "$DASHBOARD_URL/api/v1/accounts"
 ```
 
-`ths status` reports container status and endpoints, not chain height. In
+`ths status` reports the combined app, Zakura, and lightwalletd container state
+and endpoints, not chain height or settlement. Use `ths wait` when a script
+needs the node, index, and wallet settled at one tip. In
 `GET /api/v1/status`, `node.blocks` is the node height and
 `node.bestblockhash` is the tip hash.
 

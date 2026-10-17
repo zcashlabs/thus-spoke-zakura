@@ -132,8 +132,10 @@ default: running
   P2P          127.0.0.1:18233
 ```
 
-`ths status` reports whether the app container is running and prints
-endpoints. It does **not** report the node height or wallet scan status.
+`ths status` reports the combined app, Zakura, and lightwalletd container state
+and prints endpoints. It exits nonzero unless all three services are running.
+It does **not** report the node height or wallet scan status; use `ths wait`
+when a script needs the node, index, and wallet settled at one tip.
 `ths endpoints --json` reports these keys:
 
 | Key | Owner and purpose |

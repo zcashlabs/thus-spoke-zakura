@@ -211,6 +211,26 @@ fn environments_are_classified_by_their_long_running_services() {
 }
 
 #[test]
+fn status_uses_the_environment_state_and_preserves_json_compatibility() {
+    let degraded = environment("default", ["running", "exited", "running", "exited"]);
+    assert!(status_text(&degraded).starts_with("default: degraded\n  Dashboard"));
+
+    let json = serde_json::to_value(StatusOutput::from(&degraded)).unwrap();
+    assert_eq!(json["name"], "default");
+    assert_eq!(json["running"], false);
+    assert_eq!(json["state"], "degraded");
+    assert_eq!(json["endpoints"]["dashboard"], "http://127.0.0.1:8080");
+    assert_eq!(json["containers"][0]["service"], "app");
+    assert_eq!(json["containers"][1]["service"], "zakura");
+    assert_eq!(json["containers"][1]["state"], "exited");
+
+    let running = environment("default", ["running", "running", "running", "exited"]);
+    let json = serde_json::to_value(StatusOutput::from(&running)).unwrap();
+    assert_eq!(json["running"], true);
+    assert_eq!(json["state"], "running");
+}
+
+#[test]
 fn the_list_groups_active_before_inactive_and_hints_only_for_inactive() {
     let active = environment("default", ["running", "running", "running", "exited"]);
     let degraded = environment("partial", ["exited", "running", "running", "exited"]);

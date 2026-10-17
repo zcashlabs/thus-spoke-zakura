@@ -382,6 +382,138 @@ fn human_start_keeps_lifecycle_and_docker_output_on_stdout() {
 }
 
 #[test]
+fn status_matches_list_and_fails_when_a_service_has_stopped() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start(false, false, false);
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let stdout_thread = thread::spawn(move || {
+        let mut output = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line.contains("is ready") {
+                let _ = ready_sender.send(());
+            }
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    });
+    let stderr_thread = thread::spawn(move || std::io::read_to_string(stderr).unwrap());
+    assert!(
+        ready_receiver.recv_timeout(Duration::from_secs(20)).is_ok(),
+        "launcher did not become ready"
+    );
+
+    let healthy = fixture
+        .command()
+        .args(["--name", &fixture.name, "status"])
+        .output()
+        .unwrap();
+    assert!(healthy.status.success());
+    assert!(
+        String::from_utf8(healthy.stdout)
+            .unwrap()
+            .starts_with(&format!("{}: running\n", fixture.name))
+    );
+
+    let degraded_human = fixture
+        .command()
+        .args(["--name", &fixture.name, "status"])
+        .env("THS_TEST_EXITED_SERVICE", "zakura")
+        .output()
+        .unwrap();
+    assert!(!degraded_human.status.success());
+    assert!(degraded_human.stderr.is_empty());
+    assert!(
+        String::from_utf8(degraded_human.stdout)
+            .unwrap()
+            .starts_with(&format!("{}: degraded\n", fixture.name))
+    );
+
+    let degraded = fixture
+        .command()
+        .args(["--json", "--name", &fixture.name, "status"])
+        .env("THS_TEST_EXITED_SERVICE", "zakura")
+        .output()
+        .unwrap();
+    assert!(!degraded.status.success());
+    assert!(degraded.stderr.is_empty());
+    let degraded: serde_json::Value = serde_json::from_slice(&degraded.stdout).unwrap();
+    assert_eq!(degraded["running"], false);
+    assert_eq!(degraded["state"], "degraded");
+    assert_eq!(degraded["containers"][1]["service"], "zakura");
+    assert_eq!(degraded["containers"][1]["state"], "exited");
+
+    let listed = fixture
+        .command()
+        .args(["--json", "list"])
+        .env("THS_TEST_EXITED_SERVICE", "zakura")
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(degraded["state"], listed[0]["state"]);
+
+    let stopped = fixture
+        .command()
+        .args(["--name", &fixture.name, "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "ths stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(finish(&mut child).success());
+    stdout_thread.join().unwrap();
+    let stderr = stderr_thread.join().unwrap();
+    assert!(stderr.contains("init diagnostic"));
+}
+
+#[test]
+fn status_rejects_an_unknown_environment_without_a_raw_docker_error() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args(["--name", "ghost", "status"])
+        .env("THS_TEST_MISSING_INSPECT", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("environment ghost is not running"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("no such object"), "{stderr}");
+}
+
+#[test]
+fn cleanup_commands_reject_an_unknown_environment() {
+    let fixture = Fixture::new();
+    for arguments in [
+        vec!["--name", "ghost", "stop"],
+        vec!["--name", "ghost", "reset", "--force"],
+    ] {
+        let output = fixture.command().args(arguments).output().unwrap();
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("environment ghost does not exist"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("Stopped and deleted"), "{stderr}");
+        assert!(!stderr.contains("Deleted ghost"), "{stderr}");
+    }
+}
+
+#[test]
 fn json_start_stdout_is_one_document_after_external_deletion() {
     let (success, stdout, stderr, commands, _) = output_after_shutdown(true, false, true);
     assert!(success, "{stderr}");

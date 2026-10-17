@@ -54,23 +54,21 @@ pub(crate) struct Instance {
 }
 
 impl Runtime {
-    pub fn status(&self, name: &InstanceName, json: bool) -> Result<()> {
-        let endpoints = self
+    pub fn status(&self, name: &InstanceName, json: bool) -> Result<bool> {
+        let instance = self
             .read_instance(name)
-            .map(|i| i.endpoints)
-            .or_else(|_| inspect_endpoints(&prefix(name)))?;
-        let running = container_running(&format!("{}-app", prefix(name)))?;
+            .or_else(|_| inspect_unrecorded_instance(name, &DockerCli))?;
+        let environment = inspect_environment(instance, &DockerCli)?;
+        let running = environment.state == "running";
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"name": name.to_string(), "running": running, "endpoints": endpoints})
-                )?
+                serde_json::to_string_pretty(&StatusOutput::from(&environment))?
             );
         } else {
-            println!("{}", status_text(name, running, &endpoints));
+            println!("{}", status_text(&environment));
         }
-        Ok(())
+        Ok(running)
     }
 
     pub fn endpoints(&self, name: &InstanceName, json: bool, env: bool) -> Result<()> {
@@ -127,6 +125,29 @@ impl Runtime {
     pub(super) fn recovery_path(&self, name: &InstanceName) -> PathBuf {
         self.instance_dir(name).join(recovery::RECOVERY_FILE)
     }
+}
+
+fn inspect_unrecorded_instance(
+    name: &InstanceName,
+    docker: &impl DockerResourceCommands,
+) -> Result<Instance> {
+    let containers = SERVICES
+        .into_iter()
+        .map(|service| container_status(docker, name, service))
+        .collect::<Result<Vec<_>>>()?;
+    if containers
+        .iter()
+        .all(|container| container.state == "missing")
+    {
+        bail!("environment {name} is not running; start it with `ths --name {name}`");
+    }
+    Ok(Instance {
+        name: name.to_string(),
+        version: 1,
+        endpoints: inspect_endpoints(&prefix(name))?,
+        created_at: None,
+        session: None,
+    })
 }
 
 #[derive(Debug)]
@@ -189,10 +210,6 @@ pub(super) fn endpoints_for(ports: &HostPorts) -> Endpoints {
     }
 }
 
-pub(super) fn status_text(name: &InstanceName, running: bool, e: &Endpoints) -> String {
-    let state = if running { "running" } else { "stopped" };
-    format!("{name}: {state}\n{}", endpoint_lines(e))
-}
 pub(super) fn endpoint_lines(e: &Endpoints) -> String {
     format!(
         "  Dashboard    {}\n  Zakura RPC   {}\n  lightwalletd {}  (network={}, tls={})\n  P2P          {}",
@@ -440,7 +457,9 @@ impl Runtime {
                 let _stopping = self.mark_stopping(name)?;
                 remove_if_present(&self.session_path(name))?;
                 let _lock = self.lock_instance(name)?;
-                return cleanup();
+                let mut report = cleanup()?;
+                report.environment_found |= claimed.is_some() || requested.is_some();
+                return Ok(report);
             }
             let session = self.read_session(name)?;
             if self.read_owner(name)? != claimed {
@@ -678,12 +697,7 @@ impl Runtime {
                 let path = entry?.path().join("instance.json");
                 if path.exists() {
                     let instance = serde_json::from_slice::<Instance>(&fs::read(&path)?)?;
-                    let name = instance.name.parse()?;
-                    let containers = SERVICES
-                        .into_iter()
-                        .map(|service| container_status(docker, &name, service))
-                        .collect::<Result<Vec<_>>>();
-                    environments.push(environment_status(instance, containers));
+                    environments.push(inspect_environment(instance, docker)?);
                 }
             }
         }
@@ -714,7 +728,40 @@ pub(super) struct EnvironmentStatus {
     pub(super) containers: Vec<ContainerStatus>,
 }
 
+#[derive(Serialize)]
+pub(super) struct StatusOutput<'a> {
+    name: &'a str,
+    running: bool,
+    state: &'static str,
+    endpoints: &'a Endpoints,
+    containers: &'a [ContainerStatus],
+}
+
+impl<'a> From<&'a EnvironmentStatus> for StatusOutput<'a> {
+    fn from(environment: &'a EnvironmentStatus) -> Self {
+        Self {
+            name: &environment.instance.name,
+            running: environment.state == "running",
+            state: environment.state,
+            endpoints: &environment.instance.endpoints,
+            containers: &environment.containers,
+        }
+    }
+}
+
 pub(super) const SERVICES: [&str; 4] = ["app", "zakura", "lightwalletd", "init"];
+
+fn inspect_environment(
+    instance: Instance,
+    docker: &impl DockerResourceCommands,
+) -> Result<EnvironmentStatus> {
+    let name = instance.name.parse()?;
+    let containers = SERVICES
+        .into_iter()
+        .map(|service| container_status(docker, &name, service))
+        .collect::<Result<Vec<_>>>();
+    Ok(environment_status(instance, containers))
+}
 
 /// keeps an environment whose containers can't be read, such as while docker is stopped, with
 /// its live status unknown.
@@ -735,6 +782,15 @@ pub(super) fn environment_status(
         instance,
         containers,
     }
+}
+
+pub(super) fn status_text(environment: &EnvironmentStatus) -> String {
+    format!(
+        "{}: {}\n{}",
+        environment.instance.name,
+        environment.state,
+        endpoint_lines(&environment.instance.endpoints)
+    )
 }
 
 /// an environment's state from its long-running services; `init` is not one of them. a paused

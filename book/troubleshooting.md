@@ -29,9 +29,10 @@ ths --name alice endpoints --json
 ths --name alice logs app
 ```
 
-Omit `--name alice` for `default`. `ths status` reports whether the app
-container is running; it does **not** show the node height. The Network
-page and `GET /api/v1/status` show node height and wallet sync status.
+Omit `--name alice` for `default`. `ths status` reports the combined app,
+Zakura, and lightwalletd container state; it does **not** show the node height
+or wallet settlement. Use `ths wait` for settlement. The Network page and
+`GET /api/v1/status` show node height and wallet sync status.
 An instance keeps the same ports across runs; a different instance has
 different ports only because it was started with a different
 `--port-offset`.

@@ -48,7 +48,11 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Pull => runtime.pull(),
         Command::Update { .. } => unreachable!("update is handled before runtime discovery"),
         Command::Uninstall => unreachable!("uninstall is handled before runtime discovery"),
-        Command::Status => runtime.status(&name, cli.json),
+        Command::Status => {
+            return runtime
+                .status(&name, cli.json)
+                .map(|running| ExitCode::from(u8::from(!running)));
+        }
         Command::Open => runtime.open(&name),
         Command::Endpoints { env } => runtime.endpoints(&name, cli.json, env),
         Command::Mine { blocks } => runtime.mine(&name, blocks, cli.json),
