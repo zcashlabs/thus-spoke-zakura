@@ -34,6 +34,8 @@ pub(crate) struct Inner {
     pub(crate) wallet_sync: Mutex<()>,
     pub(crate) treasury_replenishment: Mutex<()>,
     pub(crate) wallet_snapshot: RwLock<WalletSnapshot>,
+    /// whether the last background tick reached lightwalletd; startup waits for it, so true.
+    pub(crate) lightwalletd_reachable: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -80,6 +82,7 @@ impl AppState {
             payments: Mutex::new(()),
             wallet_sync: Mutex::new(()),
             treasury_replenishment: Mutex::new(()),
+            lightwalletd_reachable: AtomicBool::new(true),
             wallet_snapshot: RwLock::new(WalletSnapshot {
                 accounts,
                 status: WalletSyncStatus {
