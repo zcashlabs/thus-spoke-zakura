@@ -173,7 +173,8 @@ Prints or streams logs for a service in the named environment. Defaults to the
 `app` (dashboard/server) service. Without `--tail` or `--head`, it prints
 all available Docker logs. Counts must be positive. `--head` conflicts with
 `--tail` and `--follow`; `--tail` can be combined with `--follow`. Output remains
-log text even with the global `--json` flag.
+log text even with the global `--json` flag. App lines are plain text, without
+terminal color codes.
 
 ```console
 ths logs                       # available logs from the app service

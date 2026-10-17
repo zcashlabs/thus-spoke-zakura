@@ -3,6 +3,7 @@ mod args;
 mod bootstrap;
 mod chain;
 mod db;
+mod logging;
 mod mining;
 mod network;
 mod payments;
@@ -11,6 +12,10 @@ mod rpc;
 mod state;
 mod sync;
 mod wallet;
+
+pub fn init_tracing() {
+    logging::init();
+}
 
 pub async fn run_from<I, T>(argv: I) -> anyhow::Result<()>
 where
