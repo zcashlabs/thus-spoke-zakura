@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { EmptyState, ErrorState } from '@/components/ui/StateBlock';
 import { SkeletonRows } from '@/components/ui/Skeleton';
@@ -19,8 +18,22 @@ const COLUMNS: Column[] = [
 ];
 
 export function BlockList() {
-  const [before, setBefore] = useState<number | undefined>(undefined);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const cursor = searchParams.get('before');
+  const before =
+    cursor !== null && /^\d+$/.test(cursor) && Number.isSafeInteger(Number(cursor))
+      ? Number(cursor)
+      : undefined;
   const blocks = useBlocks(before);
+
+  function setBefore(height: number | undefined) {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      if (height === undefined) next.delete('before');
+      else next.set('before', String(height));
+      return next;
+    });
+  }
 
   return (
     <Panel
