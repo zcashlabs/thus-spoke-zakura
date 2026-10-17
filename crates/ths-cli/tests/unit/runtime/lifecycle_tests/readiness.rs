@@ -363,6 +363,7 @@ fn hanging_diagnostic_logs_expire_on_the_readiness_budget() {
         program: "/bin/sh".into(),
         prefix_args: vec![script.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
+        child_ops: None,
     };
     let started = Instant::now();
     let failure = wait_ready(

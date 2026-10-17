@@ -69,6 +69,12 @@ pub(super) struct LifecycleDocker<'a> {
     pub(super) program: String,
     pub(super) prefix_args: Vec<String>,
     pub(super) env: Vec<(String, String)>,
+    /// Test-only hook to replace how a spawned child's liveness is observed,
+    /// so tests can deterministically exercise "the child looks hung" without
+    /// racing a real process's actual exit timing. Always `None` outside
+    /// tests.
+    #[cfg(test)]
+    pub(super) child_ops: Option<&'a dyn ChildOps>,
 }
 
 impl<'a> LifecycleDocker<'a> {
@@ -86,6 +92,8 @@ impl<'a> LifecycleDocker<'a> {
             program: "docker".to_owned(),
             prefix_args: Vec::new(),
             env: Vec::new(),
+            #[cfg(test)]
+            child_ops: None,
         }
     }
 
@@ -102,7 +110,15 @@ impl<'a> LifecycleDocker<'a> {
             program: self.program.clone(),
             prefix_args: self.prefix_args.clone(),
             env: self.env.clone(),
+            #[cfg(test)]
+            child_ops: self.child_ops,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_child_ops(mut self, ops: &'a dyn ChildOps) -> Self {
+        self.child_ops = Some(ops);
+        self
     }
 
     pub(super) fn operation_deadline(&self) -> Deadline {
@@ -127,6 +143,27 @@ impl<'a> LifecycleDocker<'a> {
             command.env(key, value);
         }
         let mut helpers = self.context.helpers.borrow_mut();
+        // `output()` always calls with `Capture` (reads: inspect, ls); `run()`
+        // never does (mutations: rm, volume rm, network rm, volume create).
+        // The injected child_ops only applies to the mutation being removed,
+        // not to the read calls cleanup_core makes around it (ownership
+        // preflight, absence verification) — otherwise every read would also
+        // look permanently hung.
+        #[cfg(test)]
+        if mode != OutputMode::Capture
+            && let Some(ops) = self.child_ops
+        {
+            return run_observed(
+                &mut command,
+                self.operation_deadline(),
+                self.cancellation,
+                mode,
+                &self.context.policy,
+                &mut helpers,
+                ops,
+                false,
+            );
+        }
         run(
             &mut command,
             self.operation_deadline(),

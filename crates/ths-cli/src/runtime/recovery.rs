@@ -77,6 +77,9 @@ pub(super) struct RecoveryJournal {
 
 impl RecoveryJournal {
     pub(super) fn create(path: PathBuf, name: &InstanceName) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
         let journal = Self {
             path,
             record: RecoveryRecord {
@@ -247,9 +250,6 @@ impl RecoveryJournal {
     }
 
     fn store(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        }
         let temporary = self.path.with_extension("json.tmp");
         let payload =
             serde_json::to_vec_pretty(&self.record).context("encoding recovery journal")?;

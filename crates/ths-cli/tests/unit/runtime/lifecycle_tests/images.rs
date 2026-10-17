@@ -15,6 +15,7 @@ fn cancelled_image_check_is_not_classified_as_a_missing_image() {
         program: "/bin/sh".into(),
         prefix_args: vec![script.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
+        child_ops: None,
     };
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(30));
@@ -56,6 +57,7 @@ fn missing_image_advice_requires_a_completed_listing() {
         program: "/bin/sh".into(),
         prefix_args: vec![sleep.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
+        child_ops: None,
     };
     let started = Instant::now();
     let error = startup_require_image(&docker, "example/image:missing").unwrap_err();

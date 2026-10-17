@@ -22,6 +22,8 @@ use crate::lifecycle::{
     Cancellation, CapturedOutput, CommandFailure, CommandFailureKind, Deadline, HelperSet,
     LifecyclePolicy, OutputMode, run,
 };
+#[cfg(test)]
+use crate::lifecycle::{ChildOps, run_observed};
 
 use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
