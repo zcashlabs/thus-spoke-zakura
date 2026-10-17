@@ -90,8 +90,9 @@ curl -fsS "$DASHBOARD_URL/api/v1/send" \
   --data '{"from_account":1,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":100000000,"idempotency_key":"book-account-1-to-2-v1"}'
 ```
 
-The POST response is one activity object, and the same object is what
-`GET /api/v1/activity` returns in a list. It has thirteen fields:
+The response is one payment-journal activity object. A keyed
+`GET /api/v1/activity?idempotency_key=<key>` returns that same object in a
+one-item list:
 
 | Field | Meaning |
 | --- | --- |
@@ -108,6 +109,20 @@ The POST response is one activity object, and the same object is what
 | `status` | `preparing`, `prepared`, `broadcast`, `confirmed`, `unconfirmed` after a deliberate reorg/rollback, or a stored terminal `failed` result. |
 | `created_at` | When the row was inserted, as `YYYY-MM-DD HH:MM:SS` UTC. |
 | `last_error` | Stored diagnostic, or `null`. |
+
+An unkeyed `GET /api/v1/activity` returns unified wallet history. It merges
+these journal records with transactions observed by the wallet and adds chain
+metadata, memos, recipient and pool lists, and `from_accounts` and
+`to_accounts`. The arrays preserve every affected development account;
+`from_account` and `to_account` are only populated when their corresponding
+array contains exactly one account. A transaction appears once even when it
+affects multiple development accounts. Outputs to the hidden treasury account
+are excluded from the user-facing amount, recipients, and account lists.
+
+For external incoming transactions, transparent-source detection requires a
+Zakura transaction lookup. These lookups run concurrently within one short,
+shared budget and fail open: if Zakura is slow or unavailable, activity still
+returns and the unknown source pool remains absent.
 
 Read `txid`, `status`, and `block_hash` first; do not infer confirmation
 merely because HTTP returned 200. There is no memo field here. The supplied

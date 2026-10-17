@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { accountSchema, miningJobSchema, miningJobResponseSchema, statusSchema } from './schemas';
+import {
+  accountSchema,
+  activitySchema,
+  miningJobSchema,
+  miningJobResponseSchema,
+  statusSchema,
+} from './schemas';
 
 const baseStatus = {
   instance: 'default',
@@ -65,6 +71,95 @@ describe('accountSchema', () => {
     const account = accountSchema.parse(legacyAccount);
     expect(account.unified_full_viewing_key).toBeUndefined();
     expect(account.transparent_zatoshi).toBe(123n);
+  });
+});
+
+describe('activitySchema', () => {
+  it('rejects unknown activity kinds instead of treating them as sends', () => {
+    const result = activitySchema.safeParse({
+      id: 'wallet:unknown-kind',
+      kind: 'receive',
+      source_pool: 'ironwood',
+      destination_pool: 'ironwood',
+      amount_zatoshi: 1,
+      txid: 'ab'.repeat(32),
+      status: 'confirmed',
+      created_at: '2026-10-10 00:00:00',
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('preserves every recipient address returned for a transaction', () => {
+    const activity = activitySchema.parse({
+      id: 'wallet:multi-recipient',
+      kind: 'transaction',
+      direction: 'outgoing',
+      from_account: 1,
+      to_account: null,
+      to_address: 'uregtest1external1',
+      recipient_addresses: ['uregtest1external1', 'uregtest1external2'],
+      source_pool: 'ironwood',
+      destination_pool: 'ironwood',
+      amount_zatoshi: 100_000_000,
+      txid: 'ab'.repeat(32),
+      block_hash: null,
+      status: 'confirmed',
+      last_error: null,
+      created_at: '2026-10-15 12:00:00',
+    });
+
+    expect(activity.recipient_addresses).toEqual(['uregtest1external1', 'uregtest1external2']);
+  });
+
+  it('accepts an incoming transaction whose sender creation time is unknown', () => {
+    const activity = activitySchema.parse({
+      id: 'wallet:incoming',
+      kind: 'transaction',
+      direction: 'incoming',
+      from_account: null,
+      to_account: null,
+      from_accounts: [],
+      to_accounts: [2, 3],
+      to_address: null,
+      recipient_addresses: ['uregtest1account2'],
+      source_pool: null,
+      destination_pool: 'ironwood',
+      amount_zatoshi: 10_000_000,
+      txid: 'cd'.repeat(32),
+      block_hash: 'ef'.repeat(32),
+      mined_height: 121,
+      status: 'confirmed',
+      last_error: null,
+      created_at: null,
+    });
+
+    expect(activity.created_at).toBeNull();
+    expect(activity.mined_height).toBe(121);
+    expect(activity.to_accounts).toEqual([2, 3]);
+  });
+
+  it('rejects the hidden treasury account in affected account lists', () => {
+    expect(() =>
+      activitySchema.parse({
+        id: 'wallet:treasury',
+        kind: 'transaction',
+        direction: 'incoming',
+        from_account: null,
+        to_account: null,
+        from_accounts: [],
+        to_accounts: [2, 6],
+        to_address: null,
+        source_pool: null,
+        destination_pool: 'ironwood',
+        amount_zatoshi: 10,
+        txid: 'ab'.repeat(32),
+        block_hash: null,
+        status: 'confirmed',
+        last_error: null,
+        created_at: null,
+      }),
+    ).toThrow();
   });
 });
 

@@ -539,6 +539,65 @@ fn activity_output_handles_empty_history_and_preserves_json_fields() {
 }
 
 #[test]
+fn activity_output_renders_external_incoming_transactions() {
+    let activity = vec![serde_json::json!({
+        "id": "wallet:incoming:2",
+        "kind": "transaction",
+        "direction": "incoming",
+        "from_account": null,
+        "to_account": 2,
+        "to_address": null,
+        "source_pool": null,
+        "destination_pool": "ironwood",
+        "source_pools": [],
+        "destination_pools": ["ironwood"],
+        "amount_zatoshi": 100_000_000,
+        "txid": "incoming",
+        "block_hash": "block",
+        "mined_height": 121,
+        "status": "confirmed",
+        "created_at": null,
+        "last_error": null,
+    })];
+
+    let output = activity_lines(&activity).unwrap();
+    assert!(output.contains("receive  confirmed  1 ZEC"), "{output}");
+    assert!(
+        output.contains("Route: external (unknown pool) -> account 2 (ironwood)"),
+        "{output}"
+    );
+    assert!(output.contains("Mined at height: 121"), "{output}");
+}
+
+#[test]
+fn activity_output_preserves_multi_account_routes() {
+    let activity = vec![serde_json::json!({
+        "id": "wallet:multi-account",
+        "kind": "transaction",
+        "direction": "incoming",
+        "from_account": null,
+        "to_account": null,
+        "from_accounts": [],
+        "to_accounts": [2, 3],
+        "to_address": null,
+        "source_pool": null,
+        "destination_pool": "ironwood",
+        "amount_zatoshi": 300_000_000,
+        "txid": "multi-account",
+        "block_hash": "block",
+        "status": "confirmed",
+        "created_at": null,
+        "last_error": null,
+    })];
+
+    let output = activity_lines(&activity).unwrap();
+    assert!(
+        output.contains("Route: external (unknown pool) -> accounts 2, 3 (ironwood)"),
+        "{output}"
+    );
+}
+
+#[test]
 fn activity_history_forwards_only_explicit_limits() {
     for (limit, expected_request) in [
         (None, "GET /api/v1/activity HTTP/1.1"),

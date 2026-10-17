@@ -148,17 +148,32 @@ pub(crate) struct Activity {
 #[derive(Debug, Deserialize)]
 struct ActivityHistoryEntry {
     kind: String,
+    #[serde(default)]
+    direction: Option<String>,
     from_account: Option<u8>,
     to_account: Option<u8>,
     #[serde(default)]
+    from_accounts: Vec<u8>,
+    #[serde(default)]
+    to_accounts: Vec<u8>,
+    #[serde(default)]
     to_address: Option<String>,
-    source_pool: String,
-    destination_pool: String,
+    #[serde(default)]
+    source_pool: Option<String>,
+    #[serde(default)]
+    destination_pool: Option<String>,
+    #[serde(default)]
+    source_pools: Vec<String>,
+    #[serde(default)]
+    destination_pools: Vec<String>,
     amount_zatoshi: u64,
     txid: String,
     block_hash: Option<String>,
+    #[serde(default)]
+    mined_height: Option<u32>,
     status: String,
-    created_at: String,
+    #[serde(default)]
+    created_at: Option<String>,
     #[serde(default)]
     last_error: Option<String>,
 }
@@ -1324,16 +1339,49 @@ pub(crate) fn activity_history(
 fn activity_kind(activity: &ActivityHistoryEntry) -> &'static str {
     if activity.kind == "faucet" {
         "faucet"
+    } else if activity.direction.as_deref() == Some("incoming") {
+        "receive"
     } else {
         match (
-            activity.source_pool.as_str(),
-            activity.destination_pool.as_str(),
+            activity.source_pool.as_deref(),
+            activity.destination_pool.as_deref(),
         ) {
-            ("transparent", "ironwood") => "shield",
-            ("ironwood", "transparent") => "unshield",
+            (Some("transparent"), Some("ironwood")) => "shield",
+            (Some("ironwood"), Some("transparent")) => "unshield",
             _ => "send",
         }
     }
+}
+
+fn activity_pool(primary: Option<&str>, pools: &[String]) -> String {
+    primary.map(str::to_owned).unwrap_or_else(|| {
+        if pools.is_empty() {
+            "unknown pool".to_owned()
+        } else {
+            pools.join("+")
+        }
+    })
+}
+
+fn activity_account(accounts: &[u8], account: Option<u8>) -> Option<String> {
+    match accounts {
+        [] => account.map(|account| format!("account {account}")),
+        [account] => Some(format!("account {account}")),
+        accounts => Some(format!(
+            "accounts {}",
+            accounts
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn activity_recipient(entry: &ActivityHistoryEntry) -> String {
+    activity_account(&entry.to_accounts, entry.to_account)
+        .or_else(|| entry.to_address.clone())
+        .unwrap_or_else(|| "an unknown recipient".to_owned())
 }
 
 pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
@@ -1346,15 +1394,24 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
         .map(|value| {
             let entry: ActivityHistoryEntry =
                 serde_json::from_value(value.clone()).context("decoding wallet activity entry")?;
+            let source_pool = activity_pool(entry.source_pool.as_deref(), &entry.source_pools);
+            let destination_pool =
+                activity_pool(entry.destination_pool.as_deref(), &entry.destination_pools);
             let source = if entry.kind == "faucet" {
-                format!("faucet ({})", entry.source_pool)
+                format!("faucet ({source_pool})")
+            } else if entry.direction.as_deref() == Some("incoming")
+                && entry.from_accounts.is_empty()
+                && entry.from_account.is_none()
+            {
+                format!("external ({source_pool})")
             } else {
-                match entry.from_account {
-                    Some(account) => format!("account {account} ({})", entry.source_pool),
-                    None => format!("unknown account ({})", entry.source_pool),
-                }
+                format!(
+                    "{} ({source_pool})",
+                    activity_account(&entry.from_accounts, entry.from_account)
+                        .unwrap_or_else(|| "unknown account".to_owned())
+                )
             };
-            let destination = recipient(entry.to_account, entry.to_address.as_deref());
+            let destination = activity_recipient(&entry);
             let mut lines = vec![
                 format!(
                     "{}  {}  {} ZEC",
@@ -1362,10 +1419,7 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
                     entry.status,
                     format_zec(entry.amount_zatoshi)
                 ),
-                format!(
-                    "  Route: {source} -> {destination} ({})",
-                    entry.destination_pool
-                ),
+                format!("  Route: {source} -> {destination} ({destination_pool})",),
             ];
             if !entry.txid.trim().is_empty() {
                 lines.push(format!("  Transaction: {}", entry.txid));
@@ -1376,7 +1430,11 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
             if let Some(error) = &entry.last_error {
                 lines.push(format!("  Error: {error}"));
             }
-            lines.push(format!("  Created: {}", entry.created_at));
+            if let Some(created_at) = &entry.created_at {
+                lines.push(format!("  Created: {created_at}"));
+            } else if let Some(height) = entry.mined_height {
+                lines.push(format!("  Mined at height: {height}"));
+            }
             Ok(lines.join("\n"))
         })
         .collect::<Result<Vec<_>>>()

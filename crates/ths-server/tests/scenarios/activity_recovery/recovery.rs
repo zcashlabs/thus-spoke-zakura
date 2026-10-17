@@ -558,6 +558,20 @@ pub(super) async fn exercise_recovery(
         confirmed.status == "confirmed",
         "recovered activity was not confirmed"
     );
+    let persisted_confirmed: Activity = serde_json::from_value(
+        wait_payment_state(
+            &client,
+            fixture.api_url(),
+            &admission.location,
+            "confirmed",
+            recovery_deadline,
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(
+        persisted_confirmed == expected_confirmed,
+        "payment journal did not reconcile the canonical confirmation: expected {expected_confirmed:?}, got {persisted_confirmed:?}"
+    );
     // Keep server mining faulted until direct-node inclusion is reconciled.
     // Autonomous retries may be rejected, but none may advance the chain.
     let recovery_counts = fixture.proxy().counts();

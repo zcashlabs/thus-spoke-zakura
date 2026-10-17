@@ -3,9 +3,9 @@ use super::payments::require_key;
 use crate::state::AppState;
 use crate::{
     db::{Account, Activity, USER_ACCOUNT_COUNT},
-    rpc::ChainCheckpoint,
-    rpc::ChainInfo,
+    rpc::{ChainCheckpoint, ChainInfo, NodeRpc},
     state::{WalletSyncStatus, wallet_matches_tip},
+    wallet::CanonicalActivity,
 };
 use axum::{
     Json,
@@ -13,8 +13,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 pub(crate) async fn health(State(state): State<AppState>) -> Response {
     let (node, lightwalletd) =
         tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_checkpoint());
@@ -178,15 +183,314 @@ pub(crate) struct Page {
     limit: Option<u32>,
     idempotency_key: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct ActivityEntry {
+    id: String,
+    kind: String,
+    direction: String,
+    from_account: Option<u8>,
+    to_account: Option<u8>,
+    from_accounts: Vec<u8>,
+    to_accounts: Vec<u8>,
+    to_address: Option<String>,
+    recipient_addresses: Vec<String>,
+    source_pool: Option<String>,
+    destination_pool: Option<String>,
+    source_pools: Vec<String>,
+    destination_pools: Vec<String>,
+    amount_zatoshi: u64,
+    txid: String,
+    block_hash: Option<String>,
+    mined_height: Option<u32>,
+    #[serde(skip)]
+    tx_index: Option<u32>,
+    confirmations: u32,
+    status: String,
+    created_at: Option<String>,
+    memos: Vec<String>,
+    last_error: Option<String>,
+}
+
+fn visible_account(account: Option<u8>) -> Option<u8> {
+    account.filter(|id| *id <= USER_ACCOUNT_COUNT)
+}
+
+fn only_account(accounts: &[u8]) -> Option<u8> {
+    match accounts {
+        [account] => Some(*account),
+        _ => None,
+    }
+}
+
+fn activity_direction(kind: &str, from_accounts: &[u8], to_accounts: &[u8]) -> &'static str {
+    if kind == "faucet" {
+        "incoming"
+    } else {
+        match (from_accounts, to_accounts) {
+            ([from], [to]) if from == to => "self",
+            ([], []) => "unknown",
+            ([], _) => "incoming",
+            (_, []) => "outgoing",
+            (_, _) => "internal",
+        }
+    }
+}
+
+impl ActivityEntry {
+    fn journal(activity: Activity) -> Self {
+        let from_account = visible_account(activity.from_account);
+        let to_account = visible_account(activity.to_account);
+        let from_accounts = from_account.into_iter().collect::<Vec<_>>();
+        let to_accounts = to_account.into_iter().collect::<Vec<_>>();
+        let direction = activity_direction(&activity.kind, &from_accounts, &to_accounts).to_owned();
+        let recipient_addresses = activity.to_address.iter().cloned().collect();
+        Self {
+            id: activity.id,
+            kind: activity.kind,
+            direction,
+            from_account,
+            to_account,
+            from_accounts,
+            to_accounts,
+            to_address: activity.to_address,
+            recipient_addresses,
+            source_pool: Some(activity.source_pool.clone()),
+            destination_pool: Some(activity.destination_pool.clone()),
+            source_pools: vec![activity.source_pool],
+            destination_pools: vec![activity.destination_pool],
+            amount_zatoshi: activity.amount_zatoshi,
+            txid: activity.txid,
+            block_hash: activity.block_hash,
+            mined_height: None,
+            tx_index: None,
+            confirmations: 0,
+            status: activity.status,
+            created_at: Some(activity.created_at),
+            memos: Vec::new(),
+            last_error: activity.last_error,
+        }
+    }
+
+    fn canonical(activity: CanonicalActivity) -> Self {
+        let recipient_addresses = activity.recipient_addresses;
+        let to_address = activity
+            .to_accounts
+            .is_empty()
+            .then(|| recipient_addresses.first().cloned())
+            .flatten();
+        Self {
+            id: format!("wallet:{}", activity.txid),
+            kind: "transaction".to_owned(),
+            direction: activity.direction.to_owned(),
+            from_account: activity.from_account,
+            to_account: activity.to_account,
+            from_accounts: activity.from_accounts,
+            to_accounts: activity.to_accounts,
+            to_address,
+            recipient_addresses,
+            source_pool: (activity.source_pools.len() == 1)
+                .then(|| activity.source_pools[0].clone()),
+            destination_pool: (activity.destination_pools.len() == 1)
+                .then(|| activity.destination_pools[0].clone()),
+            source_pools: activity.source_pools,
+            destination_pools: activity.destination_pools,
+            amount_zatoshi: activity.amount_zatoshi,
+            txid: activity.txid,
+            block_hash: activity.block_hash,
+            mined_height: activity.mined_height,
+            tx_index: activity.tx_index,
+            confirmations: activity.confirmations,
+            status: if activity.mined_height.is_some() {
+                "confirmed"
+            } else {
+                "pending"
+            }
+            .to_owned(),
+            created_at: activity.created_at,
+            memos: activity.memos,
+            last_error: None,
+        }
+    }
+
+    fn merge_journal(mut self, journal: Activity) -> Self {
+        self.id = journal.id;
+        self.kind = journal.kind;
+        if let Some(account) = visible_account(journal.from_account)
+            && !self.from_accounts.contains(&account)
+        {
+            self.from_accounts.push(account);
+            self.from_accounts.sort_unstable();
+        }
+        if let Some(account) = visible_account(journal.to_account)
+            && !self.to_accounts.contains(&account)
+        {
+            self.to_accounts.push(account);
+            self.to_accounts.sort_unstable();
+        }
+        self.from_account = only_account(&self.from_accounts);
+        self.to_account = only_account(&self.to_accounts);
+        self.direction =
+            activity_direction(&self.kind, &self.from_accounts, &self.to_accounts).to_owned();
+        self.to_address = if !self.to_accounts.is_empty() {
+            None
+        } else {
+            journal.to_address.clone().or(self.to_address)
+        };
+        if let Some(address) = journal.to_address.as_ref()
+            && !self.recipient_addresses.contains(address)
+        {
+            self.recipient_addresses.push(address.clone());
+            self.recipient_addresses.sort();
+        }
+        self.source_pool = Some(journal.source_pool.clone());
+        self.destination_pool = Some(journal.destination_pool.clone());
+        self.source_pools = vec![journal.source_pool];
+        self.destination_pools = vec![journal.destination_pool];
+        self.amount_zatoshi = journal.amount_zatoshi;
+        self.block_hash = self.block_hash.or(journal.block_hash);
+        if self.mined_height.is_none() {
+            self.status = journal.status;
+            self.last_error = journal.last_error;
+        }
+        self.created_at = Some(journal.created_at);
+        self
+    }
+}
+
+fn add_public_source_pools(activity: &mut CanonicalActivity, transaction: &Value) {
+    let has_transparent_inputs = transaction
+        .get("vin")
+        .and_then(Value::as_array)
+        .is_some_and(|inputs| {
+            inputs.iter().any(|input| {
+                input.get("coinbase").is_none()
+                    && input.get("txid").and_then(Value::as_str).is_some()
+            })
+        });
+    if has_transparent_inputs
+        && !activity
+            .source_pools
+            .iter()
+            .any(|pool| pool == "transparent")
+    {
+        activity.source_pools.push("transparent".to_owned());
+        activity.source_pools.sort();
+    }
+}
+
+async fn enrich_external_source_pools(state: &AppState, activity: &mut [CanonicalActivity]) {
+    enrich_external_source_pools_within(&state.0.rpc, activity, Duration::from_secs(2)).await;
+}
+
+async fn enrich_external_source_pools_within(
+    rpc: &NodeRpc,
+    activity: &mut [CanonicalActivity],
+    budget: Duration,
+) {
+    const CONCURRENCY: usize = 8;
+    let deadline = Instant::now() + budget;
+    let requests = activity
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, entry)| entry.direction == "incoming")
+        .map(|(index, entry)| (index, entry.txid.clone()))
+        .collect::<Vec<_>>();
+    let mut responses = stream::iter(requests)
+        .map(|(index, txid)| async move {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let result = if remaining.is_zero() {
+                None
+            } else {
+                Some(rpc.transaction_within(&txid, remaining).await)
+            };
+            (index, txid, result)
+        })
+        .buffer_unordered(CONCURRENCY);
+    while let Some((index, txid, result)) = responses.next().await {
+        match result {
+            Some(Ok(transaction)) => add_public_source_pools(&mut activity[index], &transaction),
+            Some(Err(error)) => tracing::warn!(
+                error = %format_args!("{error:#}"),
+                %txid,
+                "reading public activity inputs failed"
+            ),
+            None => {}
+        }
+    }
+}
+
+fn unified_activity(
+    journal: Vec<Activity>,
+    canonical: Vec<CanonicalActivity>,
+    limit: u32,
+) -> Vec<ActivityEntry> {
+    let mut transaction_ids = HashSet::new();
+    let mut canonical = canonical
+        .into_iter()
+        .filter(|entry| transaction_ids.insert(entry.txid.clone()))
+        .map(Some)
+        .collect::<Vec<_>>();
+    let mut activity = Vec::new();
+    for journal in journal {
+        let matched = (!journal.txid.is_empty()).then(|| {
+            canonical.iter().position(|candidate| {
+                candidate
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.txid == journal.txid)
+            })
+        });
+        let entry = if let Some(entry) = matched.flatten().and_then(|index| canonical[index].take())
+        {
+            ActivityEntry::canonical(entry).merge_journal(journal)
+        } else {
+            ActivityEntry::journal(journal)
+        };
+        activity.push(entry);
+    }
+    activity.extend(
+        canonical
+            .into_iter()
+            .flatten()
+            .map(ActivityEntry::canonical),
+    );
+    activity.sort_by(
+        |left, right| match (left.mined_height, right.mined_height) {
+            // Unmined journal entries are active work, so keep them ahead of
+            // confirmed chain history and order them by their local timestamp.
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, None) => right.created_at.cmp(&left.created_at),
+            // Block position is the canonical order. Regtest block timestamps are
+            // deterministic and begin in 2011, so they must not order activity.
+            (Some(left_height), Some(right_height)) => right_height
+                .cmp(&left_height)
+                .then_with(|| right.tx_index.cmp(&left.tx_index)),
+        },
+    );
+    activity.truncate(limit.min(100) as usize);
+    activity
+}
+
 pub(crate) async fn activity(
     State(state): State<AppState>,
     ApiQuery(page): ApiQuery<Page>,
-) -> ApiResult<Json<Vec<Activity>>> {
+) -> ApiResult<Response> {
     if let Some(key) = page.idempotency_key {
         require_key(&key)?;
         return Ok(Json(
-            state.0.store.activity_for_key(&key)?.into_iter().collect(),
-        ));
+            state
+                .0
+                .store
+                .activity_for_key(&key)?
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+        .into_response());
     }
-    Ok(Json(state.0.store.activities(page.limit.unwrap_or(30))?))
+    let limit = page.limit.unwrap_or(30).min(100);
+    let journal = state.0.store.activities(100)?;
+    let mut canonical = state.0.wallet.canonical_activity(100).await?;
+    enrich_external_source_pools(&state, &mut canonical).await;
+    Ok(Json(unified_activity(journal, canonical, limit)).into_response())
 }

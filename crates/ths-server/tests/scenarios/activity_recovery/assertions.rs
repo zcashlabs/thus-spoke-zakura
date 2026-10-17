@@ -238,7 +238,7 @@ pub(super) fn assert_persisted_send_response(
     expected.created_at = persisted.created_at.clone();
     anyhow::ensure!(
         persisted == &expected,
-        "persisted activity changed beyond its generated timestamp"
+        "persisted activity changed beyond its generated timestamp: expected {expected:?}, got {persisted:?}"
     );
     Ok(())
 }

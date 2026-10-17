@@ -72,11 +72,13 @@ use zcash_script::script;
 
 use crate::{network::regtest_network, rpc::ChainCheckpoint};
 
+mod history;
 mod journal;
 mod payments;
 mod recovery;
 mod submission;
 
+pub(crate) use history::CanonicalActivity;
 pub use journal::PreparedPayment;
 use journal::{PreparedPaymentsMigration, prepared_payment};
 pub use payments::{PaymentError, SendQuote};
@@ -138,6 +140,7 @@ pub struct RealWallet {
     db: Arc<Mutex<Db>>,
     account_ids: Vec<AccountUuid>,
     lightwalletd: String,
+    wallet_path: std::path::PathBuf,
 }
 
 struct MemoryBlockCache(BTreeMap<u32, CompactBlock>);
@@ -179,7 +182,7 @@ impl RealWallet {
         let secret = SecretVec::new(seed);
         let wallet_path = data_dir.join("wallet.db");
         let mut db = WalletDb::for_path(
-            wallet_path,
+            &wallet_path,
             regtest_network(),
             SystemClock,
             UnwrapErr(SysRng),
@@ -232,6 +235,7 @@ impl RealWallet {
             db: Arc::new(Mutex::new(db)),
             account_ids,
             lightwalletd,
+            wallet_path,
         })
     }
 

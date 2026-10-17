@@ -125,6 +125,7 @@ async fn canonical_balances_ignore_unmined_effects_without_deleting_them() {
         )),
         account_ids: vec![st.test_account().unwrap().id()],
         lightwalletd: String::new(),
+        wallet_path: path.clone(),
     };
     let store = crate::db::Store::open(dir.path().join("ths.db")).unwrap();
     store.initialize().unwrap();
