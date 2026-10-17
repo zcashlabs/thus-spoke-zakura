@@ -330,6 +330,7 @@ pub(super) fn ensure_lightwalletd(
         ],
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_app(
     prefix: &str,
     name: &InstanceName,
@@ -338,6 +339,7 @@ pub(super) fn ensure_app(
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
     mut dependencies: Vec<recovery::ResourceRef>,
+    mining: MiningConfig,
 ) -> Result<WatchedContainer> {
     dependencies.push(volume_dependency(journal, &format!("{prefix}-wallet"))?);
 
@@ -353,6 +355,52 @@ pub(super) fn ensure_app(
     let public_lightwalletd_env = format!("THS_PUBLIC_LIGHTWALLETD={public_lightwalletd}");
     let public_p2p_env = format!("THS_PUBLIC_P2P={public_p2p}");
     let public_dashboard_env = format!("THS_PUBLIC_DASHBOARD={public_dashboard}");
+    let mining_mode_env = format!("THS_MINING_MODE={}", mining.mode.as_str());
+    let block_time_env = mining
+        .block_time
+        .map(|seconds| format!("THS_BLOCK_TIME={seconds}"));
+    let mut args: Vec<String> = vec![
+        "create".into(),
+        "--name".into(),
+        target.clone(),
+        "--network".into(),
+        prefix.into(),
+        "--label".into(),
+        label(name),
+        "-p".into(),
+        dashboard_bind,
+        "-e".into(),
+        "THS_LISTEN=0.0.0.0:8080".into(),
+        "-e".into(),
+        "THS_ZAKURA_RPC=http://zakura:18232".into(),
+        "-e".into(),
+        "THS_LIGHTWALLETD=http://lightwalletd:9067".into(),
+        "-e".into(),
+        instance,
+        "-e".into(),
+        public_rpc_env,
+        "-e".into(),
+        public_lightwalletd_env,
+        "-e".into(),
+        public_p2p_env,
+        "-e".into(),
+        public_dashboard_env,
+        "-e".into(),
+        mining_mode_env,
+    ];
+    if let Some(block_time_env) = block_time_env {
+        args.push("-e".into());
+        args.push(block_time_env);
+    }
+    args.extend([
+        "-v".into(),
+        format!("{prefix}-wallet:/data"),
+        image,
+        "serve".into(),
+        "--data-dir".into(),
+        "/data".into(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let id = create_container(
         &target,
         name,
@@ -360,39 +408,7 @@ pub(super) fn ensure_app(
         journal,
         deadline,
         dependencies,
-        &[
-            "create",
-            "--name",
-            &target,
-            "--network",
-            prefix,
-            "--label",
-            &label(name),
-            "-p",
-            &dashboard_bind,
-            "-e",
-            "THS_LISTEN=0.0.0.0:8080",
-            "-e",
-            "THS_ZAKURA_RPC=http://zakura:18232",
-            "-e",
-            "THS_LIGHTWALLETD=http://lightwalletd:9067",
-            "-e",
-            &instance,
-            "-e",
-            &public_rpc_env,
-            "-e",
-            &public_lightwalletd_env,
-            "-e",
-            &public_p2p_env,
-            "-e",
-            &public_dashboard_env,
-            "-v",
-            &format!("{prefix}-wallet:/data"),
-            &image,
-            "serve",
-            "--data-dir",
-            "/data",
-        ],
+        &args,
     )?;
     if id.is_empty() {
         bail!("Docker returned no ID for app container {target}");

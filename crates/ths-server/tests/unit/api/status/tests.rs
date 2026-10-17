@@ -1,8 +1,9 @@
 use crate::api::router;
-use crate::state::tests::state_with_local_wallet;
+use crate::mining::MiningMode;
+use crate::state::tests::{state_with_local_wallet, state_with_mode};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 #[tokio::test]
 async fn status_counts_accounts_without_reading_the_seed() {
@@ -60,6 +61,32 @@ async fn non_loopback_host_cannot_access_the_seed_endpoint() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn status_reports_the_selected_mining_mode() {
+    for mode in [
+        MiningMode::Auto,
+        MiningMode::Interval,
+        MiningMode::Mempool,
+        MiningMode::Manual,
+    ] {
+        let (state, _dir) = state_with_mode(mode);
+        let (code, status) = api_get(&state, "/api/v1/status").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["mining_mode"], json!(mode.as_str()));
+        assert_eq!(status["auto_mine"], json!(mode.auto_mine()));
+        assert_eq!(
+            status["mine_on_mempool"],
+            json!(matches!(mode, MiningMode::Mempool))
+        );
+        let block_time = if matches!(mode, MiningMode::Interval) {
+            json!(2)
+        } else {
+            Value::Null
+        };
+        assert_eq!(status["block_time"], block_time, "{mode:?}");
+    }
 }
 
 use super::*;
@@ -235,7 +262,6 @@ fn settlement_waits_for_startup_after_the_components_agree() {
 }
 
 use crate::state::tests::{api_get, counting_rpc};
-use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

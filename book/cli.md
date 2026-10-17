@@ -57,6 +57,30 @@ each host port (default: `0`), and must be a multiple of 10. It is not multiplie
 by 10; the result must fit a valid nonzero host port. Startup fails and names an occupied port
 instead of selecting a random port.
 
+`start` also selects the instance's **mining mode**. Exactly one mode is active
+for the whole server lifetime, so the flags below are mutually exclusive:
+
+| Mode | Flag | Behavior |
+| --- | --- | --- |
+| `auto` (default) | none | Each payment, faucet, and treasury operation mines its own confirming block. |
+| `interval` | `--block-time <SECONDS>` | A background task mines an empty block every `<SECONDS>` seconds. The value must be a positive integer. |
+| `mempool` | `--mine-on-mempool` | A background task mines a block when the mempool holds a new, nonempty transaction set. |
+| `manual` | `--no-auto-mine` | Nothing is mined automatically; unresolved work waits for [`ths mine`](#ths-mine-blocks). |
+
+Funding the accounts during startup completes in **every** mode. Afterward, the
+mode decides who mines: in `auto`, a payment mines its own block; in `interval`
+and `mempool`, a background task produces blocks outside any manual job, so
+those blocks never count toward a `ths mine` request; in `manual`, a payment
+stays pending until you run `ths mine`. The selected mode is reported verbatim
+as `mining_mode` in `GET /api/v1/status` (with `block_time` for `interval`), and
+the dashboard's Network page names it. `ths run` always uses `auto`.
+
+```console
+ths start --block-time 2        # mine an empty block every 2 seconds
+ths start --mine-on-mempool     # mine whenever a transaction arrives
+ths start --no-auto-mine        # mine only when you run `ths mine`
+```
+
 ### `ths wait [--timeout <SECONDS>]`
 
 Waits for an instance's node, lightwalletd index, and wallet to be settled at
@@ -416,7 +440,15 @@ and Send dialogs, from a script or terminal:
 The mutating subcommands attempt to mine a confirming block and
 print the resulting transaction ID. If auto-mining fails, activity may remain
 in `broadcast` state; `send`, `shield`, and `unshield` print a confirming block
-hash when one is available. Pass `--json` for machine-readable output.
+hash when one is available. In `interval`, `mempool`, and `manual` modes the
+command submits the payment, then waits up to 30 seconds for a confirming
+block. In `interval` and `mempool` modes the background task usually produces
+that block within the wait; in `manual` mode no block is produced automatically,
+so the wait expires and the command exits with status 1 and a pending-payment
+message that includes the idempotency key. Running the same command again with
+the same arguments resumes the retained payment identity and waits for another
+30 seconds; `ths mine` in a separate terminal produces the confirming block.
+Pass `--json` for machine-readable output.
 
 ### `ths wallet balances`
 
@@ -694,6 +726,9 @@ account 1 to account 3, all without opening the dashboard.
 | `ths` | Start a fresh environment and open the dashboard |
 | `ths start --no-open` | Start without opening a browser |
 | `ths start --port-offset <N>` | Shift loopback host ports by a multiple of 10 for another instance |
+| `ths start --block-time <SECONDS>` | Interval mining: mine an empty block every `SECONDS` seconds |
+| `ths start --mine-on-mempool` | Mempool mining: mine when the mempool holds new transactions |
+| `ths start --no-auto-mine` | Manual mining: nothing is mined until `ths mine` |
 | `ths wait [--timeout]` | Wait for existing node/index/wallet settlement |
 | `ths run [--timeout] -- <command>` | Run a child in a fresh settled instance, then clean up |
 | `ths build [--dev]` | Build runtime images from source |

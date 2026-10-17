@@ -5,6 +5,7 @@ const baseStatus = {
   instance: 'default',
   node: null,
   account_count: 5,
+  mining_mode: 'auto' as const,
   auto_mine: true,
   network: 'Regtest',
 };
@@ -39,6 +40,26 @@ describe('statusSchema', () => {
 
     expect(status.settled).toBe(false);
     expect(status.settlement_blocker).toBe('wallet_behind');
+  });
+
+  it('accepts every mining mode and their fields', () => {
+    expect(statusSchema.parse(baseStatus).mining_mode).toBe('auto');
+    const interval = statusSchema.parse({
+      ...baseStatus,
+      mining_mode: 'interval',
+      block_time: 5,
+    });
+    expect(interval.block_time).toBe(5);
+    expect(statusSchema.parse({ ...baseStatus, mining_mode: 'mempool' }).mine_on_mempool).toBe(
+      undefined,
+    );
+    expect(statusSchema.parse({ ...baseStatus, mining_mode: 'manual' }).mining_mode).toBe('manual');
+  });
+
+  it('remains compatible with servers that predate mining modes', () => {
+    const legacy: Record<string, unknown> = { ...baseStatus };
+    delete legacy.mining_mode;
+    expect(statusSchema.parse(legacy).mining_mode).toBeUndefined();
   });
 });
 

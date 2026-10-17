@@ -1,19 +1,37 @@
 use crate::api::router;
+use crate::mining::{MiningConfig, MiningMode};
 use crate::{db::Store, state::AppState, wallet::RealWallet};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 pub(crate) fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+    state_with_mining(MiningConfig::default())
+}
+
+pub(crate) fn state_with_mining(mining: MiningConfig) -> (AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = Store::open(dir.path().join("server.db")).expect("open store");
     store.initialize().expect("initialize store");
     let wallet =
         RealWallet::open(dir.path(), &store.seed().expect("wallet seed")).expect("open wallet");
     (
-        AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
+        AppState::new_with_mining(
+            store,
+            wallet,
+            "http://127.0.0.1:1".into(),
+            "test".into(),
+            mining,
+        ),
         dir,
     )
+}
+
+pub(crate) fn state_with_mode(mode: MiningMode) -> (AppState, tempfile::TempDir) {
+    state_with_mining(MiningConfig {
+        mode,
+        block_time: matches!(mode, MiningMode::Interval).then_some(2),
+    })
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@ use std::{process::ExitCode, time::Duration};
 
 use crate::{
     args::{Cli, Command, Pool, SendArgs, WalletCommand},
-    runtime::{InstanceName, Runtime},
+    runtime::{InstanceName, MiningConfig, Runtime},
     updater,
 };
 use wallet::send;
@@ -33,11 +33,20 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command.unwrap_or(Command::Start {
         no_open: false,
         port_offset: 0,
+        block_time: None,
+        mine_on_mempool: false,
+        no_auto_mine: false,
     }) {
         Command::Start {
             no_open,
             port_offset,
-        } => runtime.start(&name, no_open, cli.json, port_offset),
+            block_time,
+            mine_on_mempool,
+            no_auto_mine,
+        } => {
+            let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
+            runtime.start(&name, no_open, cli.json, port_offset, mining)
+        }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run { timeout, command } => {
             return runtime

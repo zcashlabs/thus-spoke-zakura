@@ -234,6 +234,7 @@ fn uncertain_service_creates_record_every_mounted_dependency() {
                 &mut journal,
                 deadline,
                 dependencies,
+                MiningConfig::default(),
             )
             .map(|app| app.id),
         };

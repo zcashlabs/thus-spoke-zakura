@@ -7,6 +7,7 @@ impl Runtime {
         no_open: bool,
         json: bool,
         port_offset: u16,
+        mining: MiningConfig,
     ) -> Result<()> {
         host_ports(port_offset)?;
         let shutdown = Shutdown::install()?;
@@ -48,6 +49,7 @@ impl Runtime {
             no_open,
             json,
             port_offset,
+            mining,
             &DockerHost,
             &shutdown,
             &context,
@@ -270,12 +272,14 @@ pub(super) trait StartHost {
     ) -> Result<CleanupReport> {
         self.delete(runtime, name, context, deadline)
     }
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: u16,
+        mining: MiningConfig,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance>;
@@ -389,12 +393,14 @@ impl StartHost for DockerHost {
         runtime.cleanup_core(name, &docker, true, deadline, context)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: u16,
+        mining: MiningConfig,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
@@ -553,6 +559,7 @@ impl StartHost for DockerHost {
             journal,
             app_budget,
             vec![network],
+            mining,
         )?;
         shutdown.check()?;
         let app_start = context.startup_deadline(context.policy.startup_docker);
@@ -660,6 +667,7 @@ impl Runtime {
         let context = LifecycleContext::new(LifecyclePolicy::default());
         self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
     }
+
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub(super) fn start_with_policy(
@@ -679,6 +687,7 @@ impl Runtime {
             no_open,
             json,
             port_offset,
+            MiningConfig::default(),
             host,
             shutdown,
             context,
@@ -709,6 +718,7 @@ impl Runtime {
         no_open: bool,
         json: bool,
         port_offset: u16,
+        mining: MiningConfig,
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
@@ -732,8 +742,15 @@ impl Runtime {
         let primary = (|| {
             fs::create_dir_all(self.instance_dir(name))?;
             let mut journal = recovery::RecoveryJournal::create(self.recovery_path(name), name)?;
-            let allocated =
-                host.allocate(self, name, shutdown, port_offset, context, &mut journal)?;
+            let allocated = host.allocate(
+                self,
+                name,
+                shutdown,
+                port_offset,
+                mining,
+                context,
+                &mut journal,
+            )?;
             if allocated.zakura_container_id.is_empty()
                 || allocated
                     .resources

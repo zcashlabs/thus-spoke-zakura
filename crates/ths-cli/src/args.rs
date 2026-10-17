@@ -34,6 +34,20 @@ pub(crate) enum Command {
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
         port_offset: u16,
+        /// Mine a block every SECS seconds, even when there are no transactions.
+        #[arg(
+            long,
+            value_name = "SECS",
+            value_parser = clap::value_parser!(u64).range(1..),
+            conflicts_with_all = ["mine_on_mempool", "no_auto_mine"]
+        )]
+        block_time: Option<u64>,
+        /// Mine a block whenever the mempool holds new transactions.
+        #[arg(long, conflicts_with = "no_auto_mine")]
+        mine_on_mempool: bool,
+        /// Never mine automatically; confirmed work waits for `ths mine`.
+        #[arg(long)]
+        no_auto_mine: bool,
     },
     /// Wait until an existing environment is settled.
     Wait {

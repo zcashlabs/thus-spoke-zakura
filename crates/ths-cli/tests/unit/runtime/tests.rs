@@ -312,12 +312,14 @@ impl StartHost for RecordingHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         _runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         _port_offset: u16,
+        _mining: MiningConfig,
         _context: &LifecycleContext,
         _journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {

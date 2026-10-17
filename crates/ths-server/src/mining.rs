@@ -1,7 +1,9 @@
+use crate::rpc::{ChainCheckpoint, RpcError};
 use crate::state::{AppState, notify};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -14,6 +16,97 @@ pub enum MiningState {
     Syncing,
     Completed,
     Failed,
+}
+
+/// How an instance produces automatic blocks. One mode is active for the whole
+/// server lifetime; it is chosen at startup and never changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MiningMode {
+    /// Every payment, faucet, and treasury operation mines its own confirming block.
+    Auto,
+    /// A background task mines an empty block every `block_time` seconds.
+    Interval,
+    /// A background task mines when the mempool has a new, nonempty transaction set.
+    Mempool,
+    /// No automatic blocks; unresolved work waits for an explicit `ths mine`.
+    Manual,
+}
+
+impl MiningMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Interval => "interval",
+            Self::Mempool => "mempool",
+            Self::Manual => "manual",
+        }
+    }
+
+    /// Whether the mode mines a block as part of a payment operation. Interval
+    /// and mempool modes still produce blocks, but from a background task.
+    pub fn auto_mine(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+/// The instance's mining configuration, decoded from the launcher's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MiningConfig {
+    pub mode: MiningMode,
+    pub block_time: Option<u64>,
+}
+
+impl Default for MiningConfig {
+    fn default() -> Self {
+        Self {
+            mode: MiningMode::Auto,
+            block_time: None,
+        }
+    }
+}
+
+impl MiningConfig {
+    /// Decodes `THS_MINING_MODE` and `THS_BLOCK_TIME`. An absent mode is
+    /// `auto`, preserving the pre-existing behavior for older launchers.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_values(
+            std::env::var("THS_MINING_MODE").ok().as_deref(),
+            std::env::var("THS_BLOCK_TIME").ok().as_deref(),
+        )
+    }
+
+    fn from_values(mode: Option<&str>, block_time: Option<&str>) -> anyhow::Result<Self> {
+        let mode = match mode {
+            None | Some("") | Some("auto") => MiningMode::Auto,
+            Some("interval") => MiningMode::Interval,
+            Some("mempool") => MiningMode::Mempool,
+            Some("manual") => MiningMode::Manual,
+            Some(other) => anyhow::bail!("unsupported THS_MINING_MODE {other:?}"),
+        };
+        let block_time = match block_time {
+            Some(value) => Some(
+                value
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid THS_BLOCK_TIME {value:?}"))?,
+            ),
+            None => None,
+        };
+        Self { mode, block_time }.validate()
+    }
+
+    fn validate(self) -> anyhow::Result<Self> {
+        match (self.mode, self.block_time) {
+            (MiningMode::Interval, Some(seconds)) if seconds > 0 => Ok(self),
+            (MiningMode::Interval, _) => {
+                anyhow::bail!("interval mining requires a positive THS_BLOCK_TIME")
+            }
+            (_, Some(_)) => {
+                anyhow::bail!("THS_BLOCK_TIME is only valid with interval mining")
+            }
+            _ => Ok(self),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -224,6 +317,12 @@ impl MiningCoordinator {
         self.state.lock().await.jobs.get(id).cloned()
     }
 
+    /// A manual job is admitted but not yet terminal. Background mining skips
+    /// while one is active so its blocks never interleave with a manual count.
+    pub async fn is_active(&self) -> bool {
+        self.state.lock().await.active_id.is_some()
+    }
+
     async fn publish(&self, update: MiningUpdate) {
         let sender = {
             let mut state = self.state.lock().await;
@@ -349,5 +448,264 @@ impl AppState {
         #[cfg(test)]
         let runtime = self.0.mining_runtime.clone().unwrap_or(runtime);
         self.0.mining.start(runtime, blocks, key).await
+    }
+
+    /// Mines one block outside the manual coordinator and synchronizes the
+    /// wallet. Used by the interval and mempool background loops, so it never
+    /// counts toward a manual mining job.
+    ///
+    /// Returns `Err(BackgroundMineError::Generation(_))` when no block was
+    /// produced: either the pre-generate checkpoint was unavailable (generate
+    /// was not called), or `generate` failed with an explicit JSON-RPC error.
+    /// Returns `Err(BackgroundMineError::Unknown { before, .. })` when the
+    /// outcome is uncertain; `before` is the chain tip read inside the chain
+    /// lock immediately before `generate` and is always valid. Returns
+    /// `Err(BackgroundMineError::Sync(_))` when a block was produced but a
+    /// subsequent step failed (do not retry generation with the same set).
+    pub(crate) async fn mine_and_sync_background(&self) -> Result<(), BackgroundMineError> {
+        // Hold the chain operations read lock across the checkpoint read,
+        // generation, and sync so that reorg/rollback (which holds the write
+        // lock) cannot change the chain tip between this function's checkpoint
+        // read and the generate call.
+        let _chain = self.0.mining.chain_operations.read().await;
+        // Read the pre-generate checkpoint while holding the lock. If this
+        // fails, skip the attempt entirely: without a valid baseline we cannot
+        // reconcile a lost generate reply, so it is safer to retry on the next
+        // tick than to call generate with no way to detect duplication.
+        let before = self
+            .0
+            .rpc
+            .checkpoint()
+            .await
+            .map_err(BackgroundMineError::Generation)?;
+        let mut hashes = match self.0.rpc.generate(1).await {
+            Ok(hashes) => hashes,
+            Err(error) => {
+                // Only an explicit JSON-RPC error from the node proves the
+                // request was rejected before execution. Any HTTP status from a
+                // proxy (including 429, 502, 503, 504) does not: proxies can
+                // return these codes after forwarding the request and failing to
+                // read or receive the upstream response.
+                return Err(if error.downcast_ref::<RpcError>().is_some() {
+                    BackgroundMineError::Generation(error)
+                } else {
+                    BackgroundMineError::Unknown { error, before }
+                });
+            }
+        };
+        if hashes.len() != 1 || hashes[0].is_empty() {
+            // A success response with an unusable hash does not prove no block
+            // was produced; the node may have generated before returning it.
+            return Err(BackgroundMineError::Unknown {
+                error: anyhow::anyhow!("Zakura returned an unusable generation acknowledgment"),
+                before,
+            });
+        }
+        let tip_hash = hashes.remove(0);
+        let height = self
+            .0
+            .rpc
+            .block(&tip_hash)
+            .await
+            .and_then(|b| {
+                b.get("height")
+                    .and_then(Value::as_u64)
+                    .context("Zakura mined block omitted its height")
+            })
+            .map_err(BackgroundMineError::Sync)?;
+        self.synchronize_wallet(Some(height))
+            .await
+            .map_err(BackgroundMineError::Sync)?;
+        notify(self, "chain");
+        Ok(())
+    }
+}
+
+/// Error from a background mine attempt, distinguishing whether a block was
+/// produced. Used by the interval and mempool loops to decide whether the
+/// same transaction set may be retried.
+#[derive(Debug)]
+pub(crate) enum BackgroundMineError {
+    /// `generate` was not called, or failed with an explicit JSON-RPC error
+    /// from the node. No block was produced. Safe to retry with the same set.
+    ///
+    /// Also returned when the pre-generate checkpoint read fails: without a
+    /// valid baseline the outcome of a lost generate reply cannot be
+    /// reconciled, so the attempt is skipped entirely.
+    Generation(anyhow::Error),
+    /// `generate` was called but its reply was lost or unusable. The node may
+    /// or may not have produced a block. `before` is the chain tip captured
+    /// inside the chain lock immediately before `generate`; compare it against
+    /// the current tip to decide whether to retry the same set.
+    Unknown {
+        error: anyhow::Error,
+        before: ChainCheckpoint,
+    },
+    /// A block was produced but a subsequent step (block-metadata fetch or
+    /// wallet sync) failed. Do not retry generation with the same transaction set.
+    Sync(anyhow::Error),
+}
+
+/// Mines an empty block every `block_time` once startup has finished. Interval
+/// mining is intentional block production, not a reaction to pending work.
+pub(crate) async fn interval_mining_loop(state: AppState, block_time: Duration) {
+    let mut interval = tokio::time::interval(block_time);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if !state.started() || state.0.mining.is_active().await {
+            continue;
+        }
+        match state.mine_and_sync_background().await {
+            Ok(()) => {}
+            Err(BackgroundMineError::Generation(error)) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background interval mining failed to generate a block"
+                );
+            }
+            Err(BackgroundMineError::Unknown { error, .. }) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background interval mining lost a generate reply; outcome unknown"
+                );
+            }
+            Err(BackgroundMineError::Sync(error)) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background interval mining produced a block but wallet sync failed"
+                );
+            }
+        }
+    }
+}
+
+/// The sorted transaction set to mine, or `None` when there is nothing new.
+/// An empty mempool is nothing to do; a nonempty set identical to `attempted`
+/// is skipped so a transaction the node cannot include does not produce
+/// repeated empty blocks. This does not record the set: the caller records it
+/// only once it commits to mining, so an in-flight manual job cannot swallow it.
+fn new_mempool_set(attempted: Option<&[String]>, mempool: &mut [String]) -> Option<Vec<String>> {
+    if mempool.is_empty() {
+        return None;
+    }
+    mempool.sort_unstable();
+    if attempted == Some(mempool) {
+        return None;
+    }
+    Some(mempool.to_vec())
+}
+
+/// Mines a block when the mempool holds a transaction set it has not yet tried
+/// to include. An unchanged, still-nonempty mempool is left alone.
+pub(crate) async fn mempool_mining_loop(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut attempted: Option<Vec<String>> = None;
+    // An Unknown outcome waiting for reconciliation. Holds the pre-generate
+    // chain checkpoint (always valid, captured inside the chain lock) and the
+    // transaction set. On the next tick the current tip is compared against
+    // `before`: if they differ the attempt produced a block and the set is
+    // suppressed; if they match no block was produced and the set is retried.
+    let mut unresolved: Option<(ChainCheckpoint, Vec<String>)> = None;
+    loop {
+        interval.tick().await;
+        if !state.started() {
+            continue;
+        }
+
+        // Reconcile any Unknown outcome from the previous tick before mining.
+        if let Some((before, set)) = unresolved.take() {
+            match state.0.rpc.checkpoint().await {
+                Ok(current) => {
+                    if before != current {
+                        // Chain advanced from the pre-generate baseline: the
+                        // attempt produced a block. Suppress retry for this set.
+                        attempted = Some(set);
+                        tracing::warn!(
+                            "background mempool mining reconciled a lost generate \
+                             reply as produced; suppressing retry"
+                        );
+                    } else {
+                        // Tip unchanged since before generate: no block was
+                        // produced; safe to retry.
+                        tracing::warn!(
+                            "background mempool mining reconciled a lost generate \
+                             reply as not produced; retrying"
+                        );
+                    }
+                }
+                Err(error) => {
+                    // Checkpoint still unavailable; carry the attempt forward.
+                    unresolved = Some((before, set));
+                    tracing::warn!(
+                        error = %format_args!("{error:#}"),
+                        "background mempool mining could not reconcile a lost \
+                         generate reply; deferring to next tick"
+                    );
+                }
+            }
+            continue;
+        }
+
+        let mut mempool = match state.0.rpc.mempool().await {
+            Ok(mempool) => mempool,
+            Err(error) => {
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background mempool mining could not read the mempool"
+                );
+                continue;
+            }
+        };
+        if mempool.is_empty() {
+            attempted = None;
+            continue;
+        }
+        let Some(set) = new_mempool_set(attempted.as_deref(), &mut mempool) else {
+            continue;
+        };
+        if state.0.mining.is_active().await {
+            continue;
+        }
+        // mine_and_sync_background acquires the chain lock, reads the pre-
+        // generate checkpoint inside that lock, and embeds it in any Unknown
+        // outcome. The checkpoint is always valid when Unknown is returned.
+        match state.mine_and_sync_background().await {
+            Ok(()) => {
+                // Block produced and synced; record the set so an unchanged
+                // mempool is skipped until a new transaction arrives.
+                attempted = Some(set);
+            }
+            Err(BackgroundMineError::Generation(error)) => {
+                // No block was produced (checkpoint unavailable or explicit
+                // node rejection); do not record the set so the same
+                // transactions are retried on the next poll.
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background mempool mining failed to generate a block"
+                );
+            }
+            Err(BackgroundMineError::Unknown { error, before }) => {
+                // Generate reply was lost; the node may have produced a block.
+                // Store the pre-generate checkpoint alongside the set and
+                // defer reconciliation to the next tick.
+                unresolved = Some((before, set));
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background mempool mining lost a generate reply; \
+                     deferring reconciliation to next tick"
+                );
+            }
+            Err(BackgroundMineError::Sync(error)) => {
+                // A block was produced; record the set to avoid re-mining the
+                // same transactions while sync is retried separately.
+                attempted = Some(set);
+                tracing::warn!(
+                    error = %format_args!("{error:#}"),
+                    "background mempool mining produced a block but wallet sync failed"
+                );
+            }
+        }
     }
 }

@@ -1,9 +1,10 @@
 use super::*;
+use crate::mining::MiningMode;
 use crate::payments::confirmation::tests::lifecycle_claim;
 use crate::payments::submission::PaymentSubmitter;
 use crate::payments::treasury::FaucetRuntime;
 use crate::rpc::NodeRpc;
-use crate::state::tests::state_with_local_wallet;
+use crate::state::tests::{state_with_local_wallet, state_with_mode};
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
 use std::sync::{
@@ -147,6 +148,76 @@ async fn startup_confirmation_keeps_its_stage_limit_while_dispatch_uses_remainin
         startup_result.unwrap().is_some(),
         "startup confirmation inherited the periodic two-second limit"
     );
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn payment_mining_is_skipped_after_startup_in_non_auto_modes() {
+    for mode in [
+        MiningMode::Interval,
+        MiningMode::Mempool,
+        MiningMode::Manual,
+    ] {
+        let (mut state, _dir) = state_with_mode(mode);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rpc_calls = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(_request): Json<Value>| {
+                let rpc_calls = rpc_calls.clone();
+                async move {
+                    rpc_calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"result":["mined-block"],"error":null}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Arc::get_mut(&mut state.0).unwrap().rpc =
+            NodeRpc::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        state.mark_started();
+        let attempt = PaymentAttempt {
+            state: &state,
+            dispatch_deadline: None,
+        };
+        let result = attempt.mine_and_sync(1).await.unwrap();
+        assert!(result.is_empty(), "{mode:?} mined as part of a payment");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{mode:?} contacted Zakura");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn startup_funding_mining_ignores_the_mode() {
+    let (mut state, _dir) = state_with_mode(MiningMode::Manual);
+    let generated = Arc::new(AtomicUsize::new(0));
+    let generated_rpc = generated.clone();
+    let app = Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let generated = generated_rpc.clone();
+            async move {
+                if request["method"] == "generate" {
+                    generated.fetch_add(1, Ordering::SeqCst);
+                }
+                Json(json!({"result":["mined-block"],"error":null}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    Arc::get_mut(&mut state.0).unwrap().rpc =
+        NodeRpc::new(format!("http://{}", listener.local_addr().unwrap()));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let attempt = PaymentAttempt {
+        state: &state,
+        dispatch_deadline: None,
+    };
+    // Not started yet: startup funding mines even though the mode is manual.
+    let result = attempt.mine_and_sync(1).await;
+    assert_eq!(generated.load(Ordering::SeqCst), 1);
+    assert!(!matches!(&result, Ok(hashes) if hashes.is_empty()));
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }

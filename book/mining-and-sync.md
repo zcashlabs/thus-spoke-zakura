@@ -1,8 +1,8 @@
 # 5. Mining and wallet sync
 
-You have funded Account 2 and sent a payment. Both operations normally mine
-a confirming block for you. This chapter mines explicitly and follows a
-block from the node to the wallet and browser.
+You have funded Account 2 and sent a payment. In the default `auto` mode both
+operations mine a confirming block for you. This chapter mines explicitly and
+follows a block from the node to the wallet and browser.
 
 **Mining** asks Zakura to generate Regtest blocks on demand. A transaction is
 **confirmed** when the node reports it in a block on its current chain with
@@ -25,6 +25,37 @@ and reconcile it.
    synchronization, the CLI returns `blocks` and `hashes`; the dashboard job
    becomes `completed`. If a step after generation fails, the CLI returns an
    error and the job becomes `failed`, even though blocks may already exist.
+
+## Mining modes
+
+An instance is started in exactly one mining mode, chosen by a [`ths start`
+flag](cli.md#ths-ths-start). The mode never changes for the server's lifetime.
+
+| Mode | Who produces the block |
+| --- | --- |
+| `auto` (default) | The payment, faucet, or treasury operation itself. |
+| `interval` | A background task, one empty block every `--block-time` seconds. |
+| `mempool` | A background task, when the mempool holds a new, nonempty transaction set. |
+| `manual` | Nobody, until you run `ths mine`. |
+
+Funding the development accounts during startup mines regardless of mode, so an
+instance is always ready to use. What changes is the chain's progress after
+startup:
+
+- In `interval` and `mempool`, the background task produces blocks directly, not
+  through the manual mining coordinator. Those blocks therefore **do not count**
+  toward a `ths mine` job's requested block count, and a manual job is never
+  interleaved with them.
+- `mempool` remembers the last transaction set it tried to mine. It only mines
+  a new block when that set changes, so a transaction the node cannot include
+  does not make the server generate a stream of empty blocks.
+- In `manual`, a payment is submitted and left pending. It confirms once a block
+  that includes it arrives, normally from `ths mine`.
+
+`GET /api/v1/status` reports the exact mode as `mining_mode`. It also keeps the
+legacy boolean `auto_mine` (true only in `auto` mode), plus `block_time` in
+`interval` mode and `mine_on_mempool` in `mempool` mode. The dashboard's Network
+page reads `mining_mode` and names the rule in words.
 
 ## Mine and inspect one result
 

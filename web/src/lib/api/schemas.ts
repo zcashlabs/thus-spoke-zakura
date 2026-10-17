@@ -97,11 +97,19 @@ export const walletSyncSchema = z.object({
 });
 export type WalletSync = z.infer<typeof walletSyncSchema>;
 
+export const miningModeSchema = z.enum(['auto', 'interval', 'mempool', 'manual']);
+export type MiningMode = z.infer<typeof miningModeSchema>;
+
 export const statusSchema = z.object({
   instance: z.string(),
   node: chainInfoSchema.nullable().default(null),
   account_count: z.number().int().nonnegative(),
+  /** `true` only when each payment mines its own confirming block. */
   auto_mine: z.boolean(),
+  // Optional so a dashboard built before the server grew these fields still loads.
+  mining_mode: miningModeSchema.optional(),
+  block_time: z.number().int().positive().nullable().optional(),
+  mine_on_mempool: z.boolean().optional(),
   network: z.string(),
   settled: z.boolean().optional(),
   settlement_blocker: z.string().nullable().optional(),
