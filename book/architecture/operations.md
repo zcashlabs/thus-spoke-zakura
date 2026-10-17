@@ -106,7 +106,7 @@ The POST response is one activity object, and the same object is what
 | `txid` | The prepared transaction's ID; empty while status is `preparing`. |
 | `block_hash` | The confirming block's hash, or `null` before confirmation. |
 | `status` | `preparing`, `prepared`, `broadcast`, `confirmed`, `unconfirmed` after a deliberate reorg/rollback, or a stored terminal `failed` result. |
-| `created_at` | When the row was inserted, as `YYYY-MM-DD HH:MM:SS` UTC. |
+| `created_at` | When the row was inserted, as `YYYY-MM-DD HH:MM:SS` UTC, including in the initial accepted response. |
 | `last_error` | Stored diagnostic, or `null`. |
 
 Read `txid`, `status`, and `block_hash` first; do not infer confirmation

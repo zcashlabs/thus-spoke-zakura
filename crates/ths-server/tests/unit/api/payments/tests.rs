@@ -1608,10 +1608,12 @@ async fn all_payment_posts_admit_without_execution_while_payments_are_busy() {
             response
         } else {
             let saved = state.0.store.activity_for_key(key).unwrap().unwrap();
-            let mut admitted = response;
-            admitted["created_at"] = json!(saved.created_at);
+            assert!(!saved.created_at.is_empty());
             let durable = serde_json::to_value(saved).unwrap();
-            assert_eq!(admitted, durable);
+            assert_eq!(response, durable);
+            let (read_status, read) = api_get(&state, &location).await;
+            assert_eq!(read_status, StatusCode::OK);
+            assert_eq!(read, json!([durable]));
             durable
         };
         assert_eq!(
