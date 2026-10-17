@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { accountSchema, miningJobSchema, miningJobResponseSchema, statusSchema } from './schemas';
+import {
+  accountSchema,
+  miningJobSchema,
+  miningJobResponseSchema,
+  statusSchema,
+  addressSchema,
+} from './schemas';
 
 const baseStatus = {
   instance: 'default',
@@ -94,4 +100,30 @@ describe('miningJobSchema', () => {
   ])('rejects malformed snapshots: %j', (change) => {
     expect(miningJobSchema.safeParse({ ...job, ...change }).success).toBe(false);
   });
+});
+
+describe('addressSchema', () => {
+  it('accepts integer balances and fills missing fields with zero', () => {
+    expect(
+      addressSchema.parse({
+        address: 'tmAddress',
+        balance: { balance: 100_000_000, received: 250_000_000 },
+      }).balance,
+    ).toEqual({ balance: 100_000_000, received: 250_000_000 });
+    expect(addressSchema.parse({ address: 'tmAddress', balance: {} }).balance).toEqual({
+      balance: 0,
+      received: 0,
+    });
+  });
+  it.each([{ balance: 1.5 }, { received: 100.25 }, { balance: -1 }, { received: -5 }])(
+    'rejects non-integer balances: %j',
+    (balance) => {
+      expect(
+        addressSchema.safeParse({
+          address: 'tmAddress',
+          balance: { balance: 0, received: 0, ...balance },
+        }).success,
+      ).toBe(false);
+    },
+  );
 });
