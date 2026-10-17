@@ -59,6 +59,8 @@ under NU6.3. Ironwood is this chain's shielded pool;
    A send between users spends the selected **source** account and pool and
    pays to the selected **destination** account and pool. The accounts may
    match when the pools differ; same-account/same-pool sends are rejected.
+   An Ironwood send uses only Ironwood inputs; Sapling or legacy Orchard
+   funds cannot cover a shortfall in the selected source pool.
 
 ## ZEC, zatoshi, and spendability
 
