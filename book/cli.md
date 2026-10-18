@@ -94,7 +94,8 @@ supports non-interactive commands: it creates a separate process group without
 transferring control of the terminal. Commands that read from the controlling
 terminal are unsupported. No persistent environment is provided. Seeds and
 spending keys are not exported. `--json` is rejected
-because the child owns stdout. The child receives:
+because the child owns stdout; launcher progress, Docker output, and the
+disposable setup banner go to stderr. The child receives:
 
 | Variable | Value |
 | --- | --- |
