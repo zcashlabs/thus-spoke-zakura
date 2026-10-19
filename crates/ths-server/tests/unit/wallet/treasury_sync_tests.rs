@@ -287,3 +287,103 @@ async fn database_work_does_not_block_the_async_executor() {
         "database work blocked the async executor for {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn refresh_records_each_unspent_transparent_output_only_once_per_height() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("server.db")).unwrap();
+    store.initialize().unwrap();
+    let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
+    let account_id = wallet.account_ids[1];
+    let script = wallet
+        .with_db(move |db| {
+            let address = *db
+                .get_transparent_receivers(account_id, true, true)?
+                .keys()
+                .next()
+                .context("account has no transparent receiver")?;
+            Ok(Script::from(address.script()).0.0)
+        })
+        .await
+        .unwrap();
+    let outputs = (0..3)
+        .map(|index| TransparentOutputData {
+            txid: [7; 32],
+            index,
+            value_zatoshi: 100_000,
+            script: script.clone(),
+            height: 5,
+            account_id,
+        })
+        .collect::<Vec<_>>();
+    let path = dir.path().join("wallet.db");
+
+    assert!(
+        known_unspent_transparent_outputs(&path, &outputs)
+            .unwrap()
+            .is_empty()
+    );
+    wallet
+        .insert_transparent_outputs(outputs.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        known_unspent_transparent_outputs(&path, &outputs)
+            .unwrap()
+            .len(),
+        3
+    );
+    let observed = || {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT MIN(max_observed_unspent_height), MAX(max_observed_unspent_height)
+                 FROM transparent_received_outputs",
+                [],
+                |row| Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, Option<u32>>(1)?)),
+            )
+            .unwrap()
+    };
+    let recorded = observed();
+    assert!(recorded.0.is_some(), "recording stamps the chain tip");
+
+    // Re-streaming the same outputs after the tip advances must not record them again; doing so
+    // repeats the SDK's gap-limit address derivation for every held output on every sync.
+    let tip = recorded.0.unwrap() + 10;
+    wallet.update_chain_tip(u64::from(tip)).await.unwrap();
+    wallet
+        .insert_transparent_outputs(outputs.clone())
+        .await
+        .unwrap();
+    assert_eq!(observed(), recorded);
+    assert_eq!(
+        known_unspent_transparent_outputs(&path, &outputs)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // An output reported at another height, as after a reorg, is recorded again.
+    let moved = outputs
+        .into_iter()
+        .map(|output| TransparentOutputData {
+            height: 6,
+            ..output
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        known_unspent_transparent_outputs(&path, &moved)
+            .unwrap()
+            .is_empty()
+    );
+    wallet
+        .insert_transparent_outputs(moved.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        known_unspent_transparent_outputs(&path, &moved)
+            .unwrap()
+            .len(),
+        3
+    );
+}

@@ -96,6 +96,37 @@ pub(crate) struct TransparentQuery {
     pub start_height: u64,
 }
 
+fn known_unspent_transparent_outputs(
+    path: &std::path::Path,
+    outputs: &[TransparentOutputData],
+) -> Result<HashSet<([u8; 32], u32, u32)>> {
+    let db = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let mut query = db.prepare(
+        "SELECT t.mined_height
+         FROM transparent_received_outputs tro
+         JOIN transactions t ON t.id_tx = tro.transaction_id
+         WHERE t.txid = ?1 AND tro.output_index = ?2
+           AND tro.id NOT IN (
+               SELECT transparent_received_output_id FROM transparent_received_output_spends
+           )",
+    )?;
+    let mut known = HashSet::new();
+    for output in outputs {
+        let mined_height: Option<Option<u32>> = query
+            .query_row(rusqlite::params![&output.txid[..], output.index], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if mined_height == Some(Some(output.height)) {
+            known.insert((output.txid, output.index, output.height));
+        }
+    }
+    Ok(known)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TransparentOutputData {
     pub txid: [u8; 32],
@@ -287,8 +318,19 @@ impl RealWallet {
         &self,
         outputs: Vec<TransparentOutputData>,
     ) -> Result<()> {
+        let path = self.wallet_path.clone();
         self.with_db(move |db| {
-            for output in outputs {
+            // Every sync re-streams each UTXO an account still holds. Recording one again repeats
+            // the SDK's gap-limit address derivation for it, so a pass cost time per held UTXO and
+            // a wallet with a few thousand outputs could no longer sync within a payment's budget.
+            // Only outputs the wallet does not already hold unspent at the same height need it.
+            // Skipped outputs keep their earlier `max_observed_unspent_height`; THS uses that
+            // neither for ephemeral receivers nor for transaction data requests.
+            let known = known_unspent_transparent_outputs(&path, &outputs)?;
+            for output in outputs
+                .into_iter()
+                .filter(|output| !known.contains(&(output.txid, output.index, output.height)))
+            {
                 let output = WalletTransparentOutput::from_parts(
                     OutPoint::new(output.txid, output.index),
                     TxOut::new(
