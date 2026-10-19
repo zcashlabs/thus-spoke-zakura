@@ -528,3 +528,47 @@ async fn shielding_stale_replacement_authorization_returns_the_newer_journal() {
     assert_eq!(retained.raw_transaction, prepared.raw_transaction);
     assert_eq!(retained.expiry_height, prepared.expiry_height);
 }
+
+// A fixed send gathers at most 1,333 transparent inputs. With one more 100,000-zatoshi UTXO
+// than that, the quoted maximum must still be an amount Send can propose.
+#[test]
+fn transparent_quote_max_is_sendable_when_utxos_exceed_the_input_cap() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 100_000);
+    st.wallet()
+        .conn()
+        .execute(
+            "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM n WHERE value < 1333)
+             INSERT INTO transparent_received_outputs(
+                transaction_id, output_index, account_id, address, script, value_zat, address_id)
+             SELECT transaction_id, n.value, account_id, address, script, value_zat, address_id
+             FROM transparent_received_outputs, n
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+    let quote = quote(&mut st, "transparent", "ironwood").unwrap();
+    assert_eq!(MAX_TRANSPARENT_INPUTS, 1_333);
+    // 1,333 transparent + 2 Ironwood logical actions at 5,000 zatoshis.
+    assert_eq!(quote.fee_zatoshi, 6_675_000);
+    assert_eq!(quote.available_zatoshi, 133_300_000);
+    assert_eq!(quote.max_zatoshi, 126_625_000);
+
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let params = *st.network();
+    let mut propose = |amount| {
+        RealWallet::propose_send(
+            st.wallet_mut(),
+            &params,
+            account_id,
+            "transparent",
+            &recipient,
+            Zatoshis::from_u64(amount).unwrap(),
+            None,
+        )
+    };
+    propose(quote.max_zatoshi).unwrap();
+    assert!(propose(quote.max_zatoshi + 1).is_err());
+}

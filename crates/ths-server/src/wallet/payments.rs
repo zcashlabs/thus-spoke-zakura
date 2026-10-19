@@ -59,6 +59,17 @@ where
 {
 }
 
+/// Share of a block one fixed transparent send may fill with inputs (the selector's default).
+const TRANSPARENT_BLOCK_SPACE_PERCENT: u32 = 10;
+
+/// The most transparent inputs that share allows at the standard P2PKH input size (1,333). Fixed
+/// sends and the Max quote use the same bound, so a fragmented balance never quotes more than a
+/// Send can spend.
+const MAX_TRANSPARENT_INPUTS: usize = zcash_protocol::constants::MAX_BLOCK_BYTES
+    * TRANSPARENT_BLOCK_SPACE_PERCENT as usize
+    / 100
+    / zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_INPUT_SIZE;
+
 impl RealWallet {
     /// Builds the proposal a send would use, without signing or broadcasting.
     fn propose_send<DbT>(
@@ -82,7 +93,8 @@ impl RealWallet {
                 None,
                 vec![],
             )?])?;
-            let selector = GreedyInputSelector::<DbT>::new();
+            let selector = GreedyInputSelector::<DbT>::new()
+                .with_shielding_block_space_percent(TRANSPARENT_BLOCK_SPACE_PERCENT);
             let change = SingleOutputChangeStrategy::<DbT>::new(
                 StandardFeeRule::Zip317,
                 None,
@@ -406,7 +418,7 @@ impl RealWallet {
                     CoinbaseFilter::NonCoinbaseOnly,
                     None,
                     TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-                    usize::MAX,
+                    MAX_TRANSPARENT_INPUTS,
                     &StandardFeeRule::Zip317,
                     LockFilter::Policy(&LockedInputPolicy::Exclude),
                 )?
