@@ -475,13 +475,57 @@ async fn non_loopback_host_cannot_access_the_seed_endpoint() {
 
 use crate::wallet::WALLET_BIRTHDAY_HEIGHT;
 
+fn host(value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, value.parse().unwrap());
+    headers
+}
+
 #[test]
 fn public_dashboard_endpoint_uses_configured_port_or_loopback_default() {
     assert_eq!(
-        public_dashboard_endpoint(Some("http://127.0.0.1:32805")),
+        public_dashboard_endpoint(Some("http://127.0.0.1:32805"), &host("127.0.0.1:41234")),
         "http://127.0.0.1:32805"
     );
-    assert_eq!(public_dashboard_endpoint(None), "http://127.0.0.1:8080");
+    assert_eq!(
+        public_dashboard_endpoint(None, &HeaderMap::new()),
+        "http://127.0.0.1:8080"
+    );
+    assert_eq!(
+        public_dashboard_endpoint(None, &host("127.0.0.1:41234")),
+        "http://127.0.0.1:8080"
+    );
+}
+
+#[test]
+fn public_dashboard_endpoint_reports_the_reached_port_when_run_assigned_none() {
+    let unassigned = Some("http://127.0.0.1:0");
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &host("127.0.0.1:41234")),
+        "http://127.0.0.1:41234"
+    );
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &host("localhost:41234")),
+        "http://localhost:41234"
+    );
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &host("[::1]:41234")),
+        "http://[::1]:41234"
+    );
+    // Without a usable Host (an HTTP/1.0 client), keep the configured value.
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &HeaderMap::new()),
+        "http://127.0.0.1:0"
+    );
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &host("not a host")),
+        "http://127.0.0.1:0"
+    );
+    // Only the host and port are reported, never other authority parts.
+    assert_eq!(
+        public_dashboard_endpoint(unassigned, &host("user@127.0.0.1:41234")),
+        "http://127.0.0.1:41234"
+    );
 }
 
 fn wallet_status(

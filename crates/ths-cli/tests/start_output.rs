@@ -383,6 +383,12 @@ fn run_advertises_allocated_service_ports_to_the_app() {
         assert!(app.contains(&expected), "missing {expected}: {app}");
     }
     assert!(app.contains("-p 127.0.0.1::8080"));
+    // Docker assigns the dashboard port only when the app starts, so the app is told port 0 and
+    // the server reports the port a caller actually reached (see `public_dashboard_endpoint`).
+    assert!(
+        app.contains("THS_PUBLIC_DASHBOARD=http://127.0.0.1:0"),
+        "dashboard port is unassigned at create time: {app}"
+    );
 }
 
 #[test]

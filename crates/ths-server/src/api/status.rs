@@ -10,7 +10,7 @@ use crate::{
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, Uri, header::HOST, uri::Authority},
     response::{IntoResponse, Response},
 };
 use futures_util::{StreamExt, stream};
@@ -108,11 +108,28 @@ pub(crate) struct PublicEndpoints {
     p2p: String,
 }
 
-fn public_dashboard_endpoint(configured: Option<&str>) -> String {
-    configured.unwrap_or("http://127.0.0.1:8080").to_owned()
+/// `ths run` lets Docker choose the dashboard's host port when the app container starts, so the
+/// launcher can only configure port 0. The request's Host, already restricted to loopback by the
+/// router, then names the port the caller actually reached.
+fn public_dashboard_endpoint(configured: Option<&str>, request: &HeaderMap) -> String {
+    let configured = configured.unwrap_or("http://127.0.0.1:8080");
+    let unassigned = configured
+        .parse::<Uri>()
+        .is_ok_and(|uri| uri.port_u16() == Some(0));
+    let request_host = request.get(HOST).and_then(|host| host.to_str().ok());
+    match request_host.and_then(|host| host.parse::<Authority>().ok()) {
+        Some(host) if unassigned => match host.port_u16() {
+            Some(port) => format!("http://{}:{port}", host.host()),
+            None => format!("http://{}", host.host()),
+        },
+        _ => configured.to_owned(),
+    }
 }
 
-pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<Json<Status>> {
+pub(crate) async fn status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Status>> {
     let (node, lightwalletd) =
         tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_checkpoint());
     let node = node.ok();
@@ -141,6 +158,7 @@ pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<Json<Stat
         endpoints: PublicEndpoints {
             dashboard: public_dashboard_endpoint(
                 std::env::var("THS_PUBLIC_DASHBOARD").ok().as_deref(),
+                &headers,
             ),
             zakura_rpc: std::env::var("THS_PUBLIC_ZAKURA_RPC")
                 .unwrap_or_else(|_| "http://127.0.0.1:18232".into()),
