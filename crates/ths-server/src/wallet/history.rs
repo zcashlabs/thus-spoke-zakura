@@ -222,7 +222,7 @@ fn value_effects_for(
 fn read_canonical_activity(
     db: &Connection,
     account_ids: &[Uuid],
-    limit: u32,
+    limit: Option<u32>,
 ) -> Result<Vec<CanonicalActivity>> {
     let tip: Option<u32> = db.query_row("SELECT MAX(height) FROM blocks", [], |row| row.get(0))?;
     let mut query = db.prepare(
@@ -240,7 +240,7 @@ fn read_canonical_activity(
         account_ids[2],
         account_ids[3],
         account_ids[4],
-        limit.min(100),
+        limit.map(i64::from).unwrap_or(-1),
     ])?;
     let mut summaries = Vec::new();
     while let Some(row) = rows.next()? {
@@ -290,7 +290,7 @@ fn read_canonical_activity(
 impl RealWallet {
     pub(crate) async fn canonical_activity(
         &self,
-        limit: u32,
+        limit: Option<u32>,
         journal_ids: Vec<String>,
     ) -> Result<(Vec<CanonicalActivity>, HashMap<String, String>)> {
         let path = self.wallet_path.clone();
@@ -306,7 +306,7 @@ impl RealWallet {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             Ok((
-                read_canonical_activity(&db, &account_ids, limit)?,
+                read_canonical_activity(&db, &account_ids, limit.map(|limit| limit.min(100)))?,
                 prepared_txids,
             ))
         })

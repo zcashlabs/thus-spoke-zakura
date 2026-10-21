@@ -10,7 +10,7 @@ use crate::{
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::{StreamExt, stream};
@@ -182,6 +182,10 @@ pub(crate) mod tests;
 pub(crate) struct Page {
     limit: Option<u32>,
     idempotency_key: Option<String>,
+    account: Option<u8>,
+    kind: Option<String>,
+    status: Option<String>,
+    before: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -435,14 +439,15 @@ fn unified_activity(
     canonical: Vec<CanonicalActivity>,
     limit: u32,
 ) -> Vec<ActivityEntry> {
-    unified_activity_with_prepared(journal, canonical, &HashMap::new(), limit)
+    let mut activity = unified_activity_with_prepared(journal, canonical, &HashMap::new());
+    activity.truncate(limit.min(100) as usize);
+    activity
 }
 
 fn unified_activity_with_prepared(
     journal: Vec<Activity>,
     canonical: Vec<CanonicalActivity>,
     prepared_txids: &HashMap<String, String>,
-    limit: u32,
 ) -> Vec<ActivityEntry> {
     let mut transaction_ids = HashSet::new();
     let mut canonical = canonical
@@ -498,8 +503,81 @@ fn unified_activity_with_prepared(
             order => order,
         }
     });
-    activity.truncate(limit.min(100) as usize);
     activity
+}
+
+const ACTIVITY_KINDS: [&str; 3] = ["send", "faucet", "transaction"];
+const ACTIVITY_STATUSES: [&str; 7] = [
+    "preparing",
+    "prepared",
+    "broadcast",
+    "pending",
+    "confirmed",
+    "unconfirmed",
+    "failed",
+];
+
+fn activity_page(
+    mut activity: Vec<ActivityEntry>,
+    page: &Page,
+) -> ApiResult<(Vec<ActivityEntry>, bool)> {
+    if let Some(account) = page.account
+        && !(1..=USER_ACCOUNT_COUNT).contains(&account)
+    {
+        return Err(ApiError::bad_request("account must be between 1 and 5"));
+    }
+    if let Some(kind) = page.kind.as_deref()
+        && !ACTIVITY_KINDS.contains(&kind)
+    {
+        return Err(ApiError::bad_request(
+            "kind must be send, faucet, or transaction",
+        ));
+    }
+    if let Some(status) = page.status.as_deref()
+        && !ACTIVITY_STATUSES.contains(&status)
+    {
+        return Err(ApiError::bad_request(
+            "status must be preparing, prepared, broadcast, pending, confirmed, unconfirmed, or failed",
+        ));
+    }
+    if page.before.as_deref() == Some("") {
+        return Err(ApiError::bad_request("before must not be empty"));
+    }
+
+    activity.retain(|entry| {
+        page.account.is_none_or(|account| {
+            entry.from_accounts.contains(&account) || entry.to_accounts.contains(&account)
+        }) && page.kind.as_deref().is_none_or(|kind| entry.kind == kind)
+            && page
+                .status
+                .as_deref()
+                .is_none_or(|status| entry.status == status)
+    });
+
+    let start = match page.before.as_deref() {
+        Some(before) => activity
+            .iter()
+            .position(|entry| entry.id == before)
+            .map(|position| position + 1)
+            .ok_or_else(|| {
+                ApiError::conflict("activity cursor is stale; reload from the first page")
+            })?,
+        None => 0,
+    };
+    let limit = page.limit.unwrap_or(30).min(100) as usize;
+    let mut entries = activity
+        .into_iter()
+        .skip(start)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok((entries, has_more))
+}
+
+#[cfg(test)]
+fn page_activity(activity: Vec<ActivityEntry>, page: &Page) -> ApiResult<Vec<ActivityEntry>> {
+    activity_page(activity, page).map(|(entries, _)| entries)
 }
 
 pub(crate) async fn activity(
@@ -518,17 +596,19 @@ pub(crate) async fn activity(
         )
         .into_response());
     }
-    let limit = page.limit.unwrap_or(30).min(100);
-    let journal = state.0.store.activities(100)?;
+    let journal = state.0.store.all_activities()?;
     let journal_ids = journal.iter().map(|entry| entry.id.clone()).collect();
     let (mut canonical, prepared_txids) =
-        state.0.wallet.canonical_activity(100, journal_ids).await?;
+        state.0.wallet.canonical_activity(None, journal_ids).await?;
     enrich_external_source_pools(&state, &mut canonical).await;
-    Ok(Json(unified_activity_with_prepared(
-        journal,
-        canonical,
-        &prepared_txids,
-        limit,
-    ))
-    .into_response())
+    let (entries, has_more) = activity_page(
+        unified_activity_with_prepared(journal, canonical, &prepared_txids),
+        &page,
+    )?;
+    let mut response = Json(entries).into_response();
+    response.headers_mut().insert(
+        "x-ths-has-more",
+        HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+    Ok(response)
 }

@@ -1,6 +1,12 @@
 import { useId } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { AlertTriangle, ArrowDownToLine, ArrowRight } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowDownToLine,
+  ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+} from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { absoluteTime, shortHash, timeAgo } from '@/lib/format';
 import { formatZecAmount } from '@/lib/money';
@@ -11,6 +17,14 @@ import { Badge } from '@/components/ui/Badge';
 import { statusTone } from '@/components/ui/status-tone';
 import { DataTable, NumCell, Row, type Column } from '@/components/ui/DataTable';
 import { Panel } from '@/components/ui/Panel';
+import { Button } from '@/components/ui/Button';
+import { Select, type SelectOption } from '@/components/ui/Select';
+import type { ReactNode } from 'react';
+
+const PAGE_SIZES: ReadonlyArray<SelectOption<string>> = ['10', '25', '50', '100'].map((value) => ({
+  value,
+  label: value,
+}));
 
 const COLUMNS: Column[] = [
   { key: 'transfer', header: 'Transfer', width: '196px' },
@@ -179,6 +193,18 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
 
 export function ActivityList({
   activity,
+  filters,
+  page = 1,
+  hasPreviousPage = false,
+  hasNextPage = false,
+  isFetchingNextPage = false,
+  isFetchingLastPage = false,
+  onFirstPage,
+  onPreviousPage,
+  onNextPage,
+  onLastPage,
+  pageSize,
+  onPageSizeChange,
 }: {
   activity: {
     data?: Activity[] | undefined;
@@ -186,6 +212,18 @@ export function ActivityList({
     isError: boolean;
     error: unknown;
   };
+  filters?: ReactNode;
+  page?: number;
+  hasPreviousPage?: boolean;
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+  isFetchingLastPage?: boolean;
+  onFirstPage?: () => void;
+  onPreviousPage?: () => void;
+  onNextPage?: () => void;
+  onLastPage?: () => void;
+  pageSize?: number;
+  onPageSizeChange?: (pageSize: number) => void;
 }) {
   const count = activity.data?.length ?? 0;
 
@@ -199,6 +237,11 @@ export function ActivityList({
         </Badge>
       }
     >
+      {filters && (
+        <div className="border-line bg-raised grid gap-3 border-b px-4 py-3 sm:grid-cols-3">
+          {filters}
+        </div>
+      )}
       {activity.isPending && <SkeletonRows rows={4} />}
       {activity.isError && <ErrorState message={errorMessage(activity.error)} />}
       {activity.data &&
@@ -211,6 +254,61 @@ export function ActivityList({
             ))}
           </DataTable>
         ))}
+      {pageSize !== undefined && onPageSizeChange && (
+        <div className="border-line bg-raised flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
+          <label
+            className="text-ink-muted flex items-center gap-2 text-[12px]"
+            htmlFor="activity-page-size"
+          >
+            Show
+            <span className="w-20">
+              <Select
+                id="activity-page-size"
+                value={String(pageSize)}
+                options={PAGE_SIZES}
+                onValueChange={(value) => onPageSizeChange(Number(value))}
+              />
+            </span>
+            entries
+          </label>
+          <nav aria-label="Activity pages" className="flex items-center gap-1.5">
+            <Button variant="subtle" size="sm" disabled={!hasPreviousPage} onClick={onFirstPage}>
+              First
+            </Button>
+            <Button
+              variant="subtle"
+              size="sm"
+              aria-label="Previous page"
+              disabled={!hasPreviousPage}
+              onClick={onPreviousPage}
+            >
+              <ChevronLeft />
+            </Button>
+            <span className="xp-face text-ink-muted rounded-xs px-3 py-2 text-[12px] font-medium">
+              Page {page}
+            </span>
+            <Button
+              variant="subtle"
+              size="sm"
+              aria-label="Next page"
+              loading={isFetchingNextPage}
+              disabled={!hasNextPage || isFetchingNextPage || isFetchingLastPage}
+              onClick={onNextPage}
+            >
+              <ChevronRight />
+            </Button>
+            <Button
+              variant="subtle"
+              size="sm"
+              loading={isFetchingLastPage}
+              disabled={!hasNextPage || isFetchingNextPage || isFetchingLastPage}
+              onClick={onLastPage}
+            >
+              Last
+            </Button>
+          </nav>
+        </div>
+      )}
     </Panel>
   );
 }

@@ -141,6 +141,17 @@ array contains exactly one account. A transaction appears once even when it
 affects multiple development accounts. Outputs to the hidden treasury account
 are excluded from the user-facing amount, recipients, and account lists.
 
+The unkeyed list accepts `limit` (default 30, maximum 100), `account` (1–5),
+`kind` (`send`, `faucet`, or `transaction`), and `status` filters. Filters
+combine and are applied before the limit. To read the next older page, pass the
+last returned activity's `id` as `before`; for example,
+`GET /api/v1/activity?account=2&limit=30&before=<activity-id>`. The response
+remains a JSON array. `X-THS-Has-More` is `true` only when an older matching row
+exists after the returned page. If the cursor activity no longer belongs to the
+filtered list, the server returns 409 with `activity cursor is stale; reload
+from the first page`. Start again without `before`. The keyed `idempotency_key`
+lookup remains a separate exact journal lookup and ignores list filters.
+
 `amount_zatoshi` remains the value paid to the relevant user or external
 recipient. Canonical wallet entries additionally expose the aggregate effects
 across development accounts 1–5 as `received_zatoshi`, `spent_zatoshi`, and the

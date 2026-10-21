@@ -62,6 +62,31 @@ fn canonical_activity(direction: &'static str, txid: &str) -> CanonicalActivity 
     }
 }
 
+fn journal_entry(id: &str, status: &str, created_at: &str) -> Activity {
+    let mut activity = journal_send("");
+    activity.id = id.to_owned();
+    activity.status = status.to_owned();
+    activity.created_at = created_at.to_owned();
+    activity
+}
+
+fn page(
+    limit: Option<u32>,
+    account: Option<u8>,
+    kind: Option<&str>,
+    status: Option<&str>,
+    before: Option<&str>,
+) -> Page {
+    Page {
+        limit,
+        idempotency_key: None,
+        account,
+        kind: kind.map(str::to_owned),
+        status: status.map(str::to_owned),
+        before: before.map(str::to_owned),
+    }
+}
+
 fn transparent_receive(receiver: &str) -> Transaction {
     let Address::Transparent(receiver) = Address::decode(&regtest_network(), receiver).unwrap()
     else {
@@ -355,6 +380,147 @@ fn confirmed_journal_outside_the_canonical_window_does_not_displace_recent_histo
     assert_eq!(activity.len(), 1);
     assert_eq!(activity[0].txid, "canonical-200");
     assert_eq!(activity[0].mined_height, Some(200));
+}
+
+#[test]
+fn activity_filters_combine_before_the_limit() {
+    let mut matching = canonical_activity("internal", "matching");
+    matching.to_account = None;
+    matching.to_accounts = vec![2, 3];
+    let wrong_account = canonical_activity("internal", "wrong-account");
+    let wrong_kind = journal_entry("wrong-kind", "confirmed", "2026-10-15 10:00:00");
+    let mut wrong_status = canonical_activity("internal", "wrong-status");
+    wrong_status.to_accounts = vec![2, 3];
+    wrong_status.mined_height = None;
+
+    let activity = unified_activity_with_prepared(
+        vec![wrong_kind],
+        vec![wrong_account, matching, wrong_status],
+        &HashMap::new(),
+    );
+    let filtered = page_activity(
+        activity,
+        &page(
+            Some(1),
+            Some(3),
+            Some("transaction"),
+            Some("confirmed"),
+            None,
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].txid, "matching");
+}
+
+#[test]
+fn activity_id_cursor_is_stable_when_newer_activity_arrives() {
+    let original = vec![
+        journal_entry("a", "preparing", "2026-10-15 10:03:00"),
+        journal_entry("b", "preparing", "2026-10-15 10:02:00"),
+        journal_entry("c", "preparing", "2026-10-15 10:01:00"),
+        journal_entry("d", "preparing", "2026-10-15 10:00:00"),
+    ];
+    let first = page_activity(
+        unified_activity_with_prepared(original.clone(), Vec::new(), &HashMap::new()),
+        &page(Some(2), None, None, None, None),
+    )
+    .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+
+    let mut with_newer = original;
+    with_newer.push(journal_entry("new", "preparing", "2026-10-15 10:04:00"));
+    let second = page_activity(
+        unified_activity_with_prepared(with_newer, Vec::new(), &HashMap::new()),
+        &page(Some(2), None, None, None, Some("b")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        second
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "d"]
+    );
+}
+
+#[test]
+fn activity_page_reports_more_only_when_an_older_row_exists() {
+    let rows = (0..11)
+        .map(|index| {
+            journal_entry(
+                &format!("row-{index}"),
+                "preparing",
+                &format!("2026-10-15 10:{:02}:00", 59 - index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let activity = unified_activity_with_prepared(rows, Vec::new(), &HashMap::new());
+
+    let (full_page, has_more) =
+        activity_page(activity.clone(), &page(Some(10), None, None, None, None)).unwrap();
+    assert_eq!(full_page.len(), 10);
+    assert!(has_more);
+
+    let (exact_page, has_more) = activity_page(
+        activity[..10].to_vec(),
+        &page(Some(10), None, None, None, None),
+    )
+    .unwrap();
+    assert_eq!(exact_page.len(), 10);
+    assert!(!has_more);
+}
+
+#[test]
+fn changed_cursor_outside_the_filter_is_stale() {
+    let cursor = journal_entry("cursor", "confirmed", "2026-10-15 10:00:00");
+    let pending = journal_entry("pending", "preparing", "2026-10-15 09:59:00");
+
+    let error = page_activity(
+        unified_activity_with_prepared(vec![cursor, pending], Vec::new(), &HashMap::new()),
+        &page(None, None, None, Some("preparing"), Some("cursor")),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(
+        error.message,
+        "activity cursor is stale; reload from the first page"
+    );
+}
+
+#[test]
+fn activity_rejects_invalid_filters_and_empty_cursors() {
+    for (page, expected) in [
+        (
+            page(None, Some(6), None, None, None),
+            "account must be between 1 and 5",
+        ),
+        (
+            page(None, None, Some("unknown"), None, None),
+            "kind must be send, faucet, or transaction",
+        ),
+        (
+            page(None, None, None, Some("unknown"), None),
+            "status must be preparing, prepared, broadcast, pending, confirmed, unconfirmed, or failed",
+        ),
+        (
+            page(None, None, None, None, Some("")),
+            "before must not be empty",
+        ),
+    ] {
+        let error = page_activity(Vec::new(), &page).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, expected);
+    }
 }
 
 #[tokio::test]
@@ -863,8 +1029,36 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
         ]
     );
 
+    let (code, filtered) = api_get(
+        &state,
+        "/api/v1/activity?account=3&kind=faucet&status=confirmed",
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(filtered.as_array().unwrap().len(), 1);
+    assert_eq!(filtered[0]["id"], confirmed.id);
+
+    let (code, invalid_account) = api_get(&state, "/api/v1/activity?account=6").await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_account["error"]["message"],
+        "account must be between 1 and 5"
+    );
+
+    let (code, stale) = api_get(
+        &state,
+        &format!("/api/v1/activity?status=preparing&before={}", failed.id),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        stale["error"]["message"],
+        "activity cursor is stale; reload from the first page"
+    );
+
+    let mut oldest_filler_id = None;
     for index in 0..101 {
-        store
+        let filler = store
             .claim_transfer(
                 1,
                 crate::db::Recipient::Account(3),
@@ -875,6 +1069,9 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
                 None,
             )
             .unwrap();
+        if index == 0 {
+            oldest_filler_id = Some(filler.id);
+        }
     }
     let (_, listed) = api_get(&state, "/api/v1/activity?limit=100").await;
     assert_eq!(listed.as_array().unwrap().len(), 100);
@@ -885,6 +1082,16 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
             .iter()
             .all(|row| row["id"] != json!(preparing.id))
     );
+    let (code, older) = api_get(
+        &state,
+        &format!(
+            "/api/v1/activity?limit=1&before={}",
+            oldest_filler_id.unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(older.as_array().unwrap().len(), 1);
 
     for (key, id, status, txid, last_error) in [
         (
@@ -918,7 +1125,9 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
     ] {
         let (code, found) = api_get(
             &state,
-            &format!("/api/v1/activity?limit=1&idempotency_key={key}"),
+            &format!(
+                "/api/v1/activity?limit=1&account=6&kind=unknown&status=unknown&before=&idempotency_key={key}"
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{key}");

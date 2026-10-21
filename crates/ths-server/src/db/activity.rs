@@ -73,13 +73,22 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn activities(&self, limit: u32) -> Result<Vec<Activity>> {
+        self.activities_with_limit(i64::from(limit.min(100)))
+    }
+
+    pub(crate) fn all_activities(&self) -> Result<Vec<Activity>> {
+        self.activities_with_limit(-1)
+    }
+
+    fn activities_with_limit(&self, limit: i64) -> Result<Vec<Activity>> {
         let db = self.0.lock().unwrap();
         let mut query = db.prepare(&format!(
             "SELECT {ACTIVITY_COLUMNS} FROM activity a ORDER BY a.rowid DESC LIMIT ?1"
         ))?;
         Ok(query
-            .query_map([limit.min(100)], row_activity)?
+            .query_map([limit], row_activity)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
