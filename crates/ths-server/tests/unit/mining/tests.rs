@@ -389,7 +389,7 @@ use crate::rpc::NodeRpc;
 use crate::state::tests::state_with_local_wallet;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse};
 use serde_json::{Value, json};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 #[tokio::test]
 async fn mining_adapter_rejects_missing_empty_and_multiple_rpc_hashes() {
     for hashes in [json!([]), json!([""]), json!(["hash-one", "hash-two"])] {
@@ -790,10 +790,14 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
     // have already produced a block. The loop must reconcile against the chain
     // tip and suppress re-mining the same transaction set.
     //
-    // The pre-generate checkpoint returns the genesis tip; the reconciliation
-    // checkpoint returns a new tip — confirming the block was produced.
+    // The fake node reports the genesis tip until it has served a generate
+    // call, and a new tip afterwards — confirming the block was produced.
+    // The switch is keyed on the generate call rather than on a checkpoint
+    // call count: under a paused clock a real socket reply can arrive after
+    // the request timeout fires, and a timed-out checkpoint call would
+    // otherwise consume the genesis reply.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    let generated = Arc::new(AtomicBool::new(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn({
@@ -805,7 +809,7 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
                     "/",
                     post(move |Json(req): Json<Value>| {
                         let tx = tx.clone();
-                        let checkpoint_calls = checkpoint_calls.clone();
+                        let generated = generated.clone();
                         async move {
                             match req["method"].as_str() {
                                 Some("getrawmempool") => {
@@ -813,19 +817,19 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
                                         .into_response()
                                 }
                                 Some("generate") => {
-                                    // Signal the test, then return a malformed body.
-                                    // The block was produced but the reply is lost.
+                                    // The block is produced, then the reply is lost:
+                                    // signal the test and return a malformed body.
+                                    generated.store(true, Ordering::SeqCst);
                                     let _ = tx.send(());
                                     (StatusCode::OK, "not-a-valid-rpc-response").into_response()
                                 }
                                 Some("getblockchaininfo") => {
-                                    let n = checkpoint_calls.fetch_add(1, Ordering::SeqCst);
-                                    let (blocks, hash) = if n == 0 {
-                                        // Before generate: chain at genesis.
-                                        (0u64, "0000000000000000000000000000000000000000000000000000000000000000")
-                                    } else {
+                                    let (blocks, hash) = if generated.load(Ordering::SeqCst) {
                                         // Reconciliation: chain has advanced.
                                         (1u64, FAKE_HASH)
+                                    } else {
+                                        // Before generate: chain at genesis.
+                                        (0u64, "0000000000000000000000000000000000000000000000000000000000000000")
                                     };
                                     Json(json!({
                                         "result": {
