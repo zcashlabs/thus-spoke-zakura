@@ -78,6 +78,28 @@ jobs:
           python3 diagrams/build.py
           git diff --exit-code -- book/images
 
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          url="https://github.com/rhysd/actionlint/releases/download/v${version}"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "${url}/actionlint_${version}_linux_amd64.tar.gz" \
+            -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" \
+            | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin"
+          tar -xz -C "$HOME/.local/bin" -f "$RUNNER_TEMP/actionlint.tar.gz" actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check the workflow files
+        run: actionlint -shellcheck="$(command -v shellcheck)"
+      - name: Check the pull request preview policy
+        run: python3 tests/preview_workflow.py
+
   web:
     runs-on: ubuntu-latest
     defaults:

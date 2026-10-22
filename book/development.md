@@ -121,6 +121,13 @@ npm test --prefix web
 npm run build --prefix web
 ```
 
+After changing the pull request preview policy in `tools/preview/` or the
+preview workflow:
+
+```console
+python3 tests/preview_workflow.py
+```
+
 The normal `cargo test --workspace` run needs no Docker. Ignored live
 regressions use the [Docker lifecycle](#docker-lifecycle-regressions) and
 [activity-recovery](#activity-recovery-integration-test) setups below.
@@ -131,6 +138,8 @@ For release images and publication, see
 [`RELEASING.md`](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/RELEASING.md).
 For operational symptoms, turn to [Appendix C:
 Troubleshooting](troubleshooting.md).
+For a disposable environment of a pull request, see [Appendix D:
+Pull request previews](preview-deployments.md).
 
 ## Docker lifecycle regressions
 

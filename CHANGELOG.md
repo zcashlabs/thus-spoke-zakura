@@ -4,6 +4,14 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
+- **Pull request previews:** A pull request can be deployed as a throwaway
+  Regtest environment that a reviewer opens in a browser. A maintainer
+  approves the exact commit with a `/preview approve` comment, the preview
+  gets its own instance, volumes, network, and loopback ports on a preview
+  host, and it is removed when the pull request closes. Pull request code
+  never runs with a deployment secret, and the removal can be run again by
+  hand.
+  [#112](https://github.com/zcashlabs/thus-spoke-zakura/issues/112)
 - **Docker failures name the failed command:** A Docker invocation that exited
   nonzero without printing anything produced an empty error message, so a
   launcher read that goes through Docker could report a blank reason with no

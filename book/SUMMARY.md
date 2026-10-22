@@ -16,3 +16,4 @@
 * [Appendix A: `ths` CLI](cli.md)
 * [Appendix B: Develop from source](development.md)
 * [Appendix C: Troubleshooting](troubleshooting.md)
+* [Appendix D: Pull request previews](preview-deployments.md)
