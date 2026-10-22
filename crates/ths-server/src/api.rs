@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use axum::{
     Router,
-    extract::Request,
+    extract::{DefaultBodyLimit, Request},
     http::{StatusCode, header::HOST, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
 mod chain;
 mod dashboard;
+mod decode;
 pub(crate) mod error;
 mod events;
 pub(crate) mod explorer;
@@ -31,6 +32,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/zip321/parse", post(payments::parse_payment_uri))
         .route("/api/v1/zip321/request", post(payments::payment_request))
         .route("/api/v1/send/quote", post(payments::send_quote))
+        .route(
+            "/api/v1/transactions/decode",
+            post(decode::decode).layer(DefaultBodyLimit::max(decode::MAX_REQUEST_BYTES)),
+        )
         .route("/api/v1/faucet", post(payments::faucet))
         .route(
             "/api/v1/faucet/address",

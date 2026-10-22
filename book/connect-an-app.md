@@ -205,6 +205,7 @@ These are every route the server serves today, from
 | `GET /api/v1/mining/jobs`, `/mining/jobs/{id}` | Read the latest job or a specific job; see [Chapter 5](mining-and-sync.md). |
 | `POST /api/v1/zip321/parse` | Parse one Regtest payment URI into its address, pool, optional amount, and memo; moves no funds. |
 | `POST /api/v1/zip321/request` | Generate a payment URI from `{account_id}` and an optional amount and memo; moves no funds. |
+| `POST /api/v1/transactions/decode` | Decode one raw transaction from `{hex}` into its txid, version, branch ID, expiry height, transparent inputs and outputs, and shielded counts and value balances; broadcasts nothing. |
 | `POST /api/v1/dev/seed` | Returns the raw seed hex. Refuses unless the body carries `"confirmation": "I understand this seed is for regtest only"`. |
 | `GET /api/v1/blocks`, `/blocks/{id}`, `/transactions/{txid}`, `/mempool`, `/addresses/{address}`, `/search` | Read-only explorer views of public chain data. |
 | `GET /api/v1/events` | The server-sent stream described above. |
