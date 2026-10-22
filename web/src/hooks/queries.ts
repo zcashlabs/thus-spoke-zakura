@@ -13,6 +13,7 @@ import {
   type SendQuoteInput,
   type Status,
   type Transaction,
+  type WalletTransaction,
 } from '@/lib/api';
 
 /**
@@ -29,6 +30,7 @@ export const queryKeys = {
   mempool: ['mempool'] as const,
   block: (id: string) => ['block', id] as const,
   transaction: (txid: string) => ['transaction', txid] as const,
+  walletTransaction: (txid: string) => ['wallet-transaction', txid] as const,
   address: (address: string) => ['address', address] as const,
   sendQuote: (params: SendQuoteInput) => ['send-quote', params] as const,
 };
@@ -94,6 +96,16 @@ export function useTransaction(txid: string): UseQueryResult<Transaction> {
     queryKey: queryKeys.transaction(txid),
     queryFn: () => api.transaction(txid),
     enabled: txid.length > 0,
+  });
+}
+
+export function useWalletTransaction(txid: string): UseQueryResult<WalletTransaction> {
+  return useQuery({
+    queryKey: queryKeys.walletTransaction(txid),
+    queryFn: () => api.walletTransaction(txid),
+    enabled: txid.length > 0,
+    // Fetching the full transaction does not always emit a server event.
+    refetchInterval: (query) => (query.state.data?.details === 'pending' ? 5_000 : false),
   });
 }
 

@@ -1,9 +1,16 @@
 use super::{RealWallet, journal::prepared_payment_txids};
 use crate::db::{TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde::{Serialize, Serializer};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
+use zcash_client_backend::data_api::{
+    WalletRead,
+    enhance_pir::{
+        EnhancePirRead, EnhancePirSuspension, EnhancePirWork, TransactionEnhancementWork,
+    },
+};
 use zcash_protocol::{
     TxId,
     memo::{Memo, MemoBytes},
@@ -52,11 +59,34 @@ fn pool_name(code: i64) -> Option<String> {
     }
 }
 
-fn text_memo(bytes: Option<Vec<u8>>) -> Option<String> {
+/// A memo as the wallet stored it: UTF-8 text, or the stored bytes as hex.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StoredMemo {
+    Text(String),
+    Hex(String),
+}
+
+/// Decodes the SDK's unpadded memo bytes. An empty memo (`0xF6`) and a
+/// transparent output's missing memo are both `None`.
+fn stored_memo(bytes: Option<Vec<u8>>) -> Option<StoredMemo> {
     let bytes = bytes?;
-    match Memo::try_from(MemoBytes::from_bytes(&bytes).ok()?).ok()? {
-        Memo::Text(text) => Some(String::from(&*text)),
-        Memo::Empty | Memo::Arbitrary(_) | Memo::Future(_) => None,
+    let memo = MemoBytes::from_bytes(&bytes)
+        .ok()
+        .and_then(|memo| Memo::try_from(memo).ok());
+    match memo {
+        Some(Memo::Empty) => None,
+        Some(Memo::Text(text)) => Some(StoredMemo::Text(String::from(&*text))),
+        Some(Memo::Arbitrary(_) | Memo::Future(_)) | None => {
+            Some(StoredMemo::Hex(hex::encode(&bytes)))
+        }
+    }
+}
+
+fn text_memo(bytes: Option<Vec<u8>>) -> Option<String> {
+    match stored_memo(bytes)? {
+        StoredMemo::Text(text) => Some(text),
+        StoredMemo::Hex(_) => None,
     }
 }
 
@@ -287,7 +317,269 @@ fn read_canonical_activity(
     Ok(summaries)
 }
 
+/// Who sent or received one output, as the wallet transaction view reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Party {
+    Account(u8),
+    Faucet,
+}
+
+impl Serialize for Party {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Account(account) => serializer.serialize_u8(*account),
+            Self::Faucet => serializer.serialize_str("faucet"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct WalletOutput {
+    pub(crate) pool: String,
+    pub(crate) index: u32,
+    pub(crate) value_zatoshi: u64,
+    pub(crate) from: Option<Party>,
+    pub(crate) to: Option<Party>,
+    pub(crate) to_address: Option<String>,
+    pub(crate) change: bool,
+    pub(crate) memo: Option<StoredMemo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct WalletSpend {
+    pub(crate) account: u8,
+    pub(crate) pool: String,
+    pub(crate) value_zatoshi: u64,
+}
+
+/// Whether the wallet has the full transaction, so memos and change flags are final.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TransactionDetails {
+    Pending,
+    Complete,
+    Unavailable,
+}
+
+/// One transaction as the local wallet recorded it for development accounts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WalletTransaction {
+    pub(crate) fee_zatoshi: Option<u64>,
+    pub(crate) details: TransactionDetails,
+    pub(crate) outputs: Vec<WalletOutput>,
+    pub(crate) spends: Vec<WalletSpend>,
+}
+
+impl WalletTransaction {
+    /// Keeps only the outputs and spends that `account` sent or received.
+    pub(crate) fn for_account(mut self, account: u8) -> Self {
+        let party = Some(Party::Account(account));
+        self.outputs
+            .retain(|output| output.from == party || output.to == party);
+        self.spends.retain(|spend| spend.account == account);
+        self
+    }
+}
+
+fn output_pool_name(code: i64) -> Result<String> {
+    Ok(match code {
+        0 => "transparent",
+        2 => "sapling",
+        3 => "orchard",
+        4 => "ironwood",
+        _ => anyhow::bail!("wallet recorded an output in unknown pool {code}"),
+    }
+    .to_owned())
+}
+
+fn party(account_ids: &[Uuid], uuid: Option<Uuid>) -> Option<Party> {
+    match account_number(account_ids, uuid)? {
+        TREASURY_ACCOUNT_ID => Some(Party::Faucet),
+        account if account <= USER_ACCOUNT_COUNT => Some(Party::Account(account)),
+        _ => None,
+    }
+}
+
+fn is_user(party: Option<Party>) -> bool {
+    matches!(party, Some(Party::Account(_)))
+}
+
+fn wallet_outputs(
+    db: &Connection,
+    txid: &[u8; 32],
+    account_ids: &[Uuid],
+) -> Result<Vec<WalletOutput>> {
+    let mut query = db.prepare(
+        "SELECT output_pool,output_index,from_account_uuid,to_account_uuid,to_address,
+                is_change,value,memo
+         FROM v_tx_outputs WHERE txid=?1 ORDER BY output_pool,output_index",
+    )?;
+    let mut rows = query.query([txid])?;
+    let mut outputs = Vec::new();
+    while let Some(row) = rows.next()? {
+        let from = party(account_ids, row.get(2)?);
+        let to_address: Option<String> = row.get(4)?;
+        // The SDK links a payment to the receiving account only once it scans
+        // the block, so until then a payment to another local account names
+        // only the address it was sent to.
+        let to_uuid = match (row.get::<_, Option<Uuid>>(3)?, &to_address) {
+            (None, Some(address)) => address_owner(db, address)?,
+            (to_uuid, _) => to_uuid,
+        };
+        let to = party(account_ids, to_uuid);
+        // Only outputs a development account sent or received are reported.
+        // The faucet's own change and its payments to other addresses are not.
+        if !is_user(from) && !is_user(to) {
+            continue;
+        }
+        let is_change: bool = row.get(5)?;
+        outputs.push(WalletOutput {
+            pool: output_pool_name(row.get(0)?)?,
+            index: row.get(1)?,
+            value_zatoshi: row.get(6)?,
+            from,
+            // A development account paying the faucet's address is a payment
+            // to an address outside the development accounts.
+            to: to.filter(|party| *party != Party::Faucet),
+            to_address,
+            // The same rule as `summarize_outputs`: wallet change paid to a
+            // different account is a transfer.
+            change: is_change && is_user(from) && from == to,
+            memo: stored_memo(row.get(7)?),
+        });
+    }
+    Ok(outputs)
+}
+
+/// The wallet account that generated `address`, if any.
+fn address_owner(db: &Connection, address: &str) -> Result<Option<Uuid>> {
+    Ok(db
+        .query_row(
+            "SELECT ac.uuid FROM addresses a JOIN accounts ac ON ac.id=a.account_id
+             WHERE a.address=?1 OR a.cached_transparent_receiver_address=?1 LIMIT 1",
+            [address],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn wallet_spends(
+    db: &Connection,
+    txid: &[u8; 32],
+    account_ids: &[Uuid],
+) -> Result<Vec<WalletSpend>> {
+    let mut query = db.prepare(
+        "SELECT ro.pool,a.uuid,ro.value
+         FROM v_received_output_spends ros
+         JOIN v_received_outputs ro
+           ON ro.pool=ros.pool AND ro.id_within_pool_table=ros.received_output_id
+         JOIN transactions t ON t.id_tx=ros.transaction_id
+         JOIN accounts a ON a.id=ros.account_id
+         WHERE t.txid=?1 ORDER BY ro.pool,ro.id_within_pool_table",
+    )?;
+    let mut rows = query.query([txid])?;
+    let mut spends = Vec::new();
+    while let Some(row) = rows.next()? {
+        let Some(account) = user_account(account_ids, row.get(1)?) else {
+            continue;
+        };
+        spends.push(WalletSpend {
+            account,
+            pool: output_pool_name(row.get(0)?)?,
+            value_zatoshi: row.get(2)?,
+        });
+    }
+    Ok(spends)
+}
+
+/// Whether the wallet recorded the transaction for a development account, and
+/// the fee it stored then. The fee is never computed here.
+fn user_record(
+    db: &Connection,
+    txid: &[u8; 32],
+    account_ids: &[Uuid],
+) -> Result<(bool, Option<u64>)> {
+    let mut query = db.prepare("SELECT account_uuid,fee_paid FROM v_transactions WHERE txid=?1")?;
+    let mut rows = query.query([txid])?;
+    let (mut recorded, mut fee) = (false, None);
+    while let Some(row) = rows.next()? {
+        if user_account(account_ids, row.get(0)?).is_some() {
+            recorded = true;
+            fee = fee.max(row.get::<_, Option<u64>>(1)?);
+        }
+    }
+    Ok((recorded, fee))
+}
+
+/// Every transaction the wallet still has enhancement work for, through the
+/// public or the private route.
+fn enhancement_txids(work: Vec<TransactionEnhancementWork>) -> BTreeSet<TxId> {
+    work.into_iter()
+        .filter_map(|work| match work {
+            TransactionEnhancementWork::Public(request) => Some(request.txid()),
+            TransactionEnhancementWork::Private(EnhancePirWork::Query(request))
+            | TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                EnhancePirSuspension::OutgoingNotRecoverable(request),
+            )) => Some(request.request_id().txid()),
+            TransactionEnhancementWork::Private(EnhancePirWork::Suspended(
+                EnhancePirSuspension::Discovery(failure),
+            )) => Some(failure.txid),
+            // Rediscovery names a block, not a transaction.
+            TransactionEnhancementWork::Private(EnhancePirWork::Rediscover(_)) => None,
+        })
+        .collect()
+}
+
+fn details(pending: bool, stored: bool, recorded: bool, shielded: bool) -> TransactionDetails {
+    if pending {
+        TransactionDetails::Pending
+    } else if stored || !recorded || !shielded {
+        // A transaction the wallet never recorded has nothing left to recover,
+        // and transparent outputs carry no memo or change to wait for.
+        TransactionDetails::Complete
+    } else {
+        TransactionDetails::Unavailable
+    }
+}
+
 impl RealWallet {
+    /// Reads what the local wallet recorded about one transaction for the
+    /// development accounts. Nothing is decrypted or fetched here.
+    pub(crate) async fn wallet_transaction(&self, txid: TxId) -> Result<WalletTransaction> {
+        let path = self.wallet_path.clone();
+        let account_ids = self
+            .account_ids
+            .iter()
+            .map(|id| id.expose_uuid())
+            .collect::<Vec<_>>();
+        self.with_db(move |wallet| {
+            let pending = enhancement_txids(wallet.transaction_enhancement_work()?).contains(&txid);
+            // A stored transaction that no longer parses is an error, not a
+            // transaction whose details are unavailable.
+            let stored = wallet
+                .get_transaction(txid)
+                .context("reading the stored transaction")?
+                .is_some();
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let bytes = *txid.as_ref();
+            let (recorded, fee_zatoshi) = user_record(&db, &bytes, &account_ids)?;
+            let outputs = wallet_outputs(&db, &bytes, &account_ids)?;
+            let spends = wallet_spends(&db, &bytes, &account_ids)?;
+            let shielded = outputs.iter().any(|output| output.pool != "transparent")
+                || spends.iter().any(|spend| spend.pool != "transparent");
+            Ok(WalletTransaction {
+                fee_zatoshi,
+                details: details(pending, stored, recorded, shielded),
+                outputs,
+                spends,
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn canonical_activity(
         &self,
         limit: u32,
@@ -367,5 +659,166 @@ mod tests {
     #[test]
     fn text_memo_decodes_the_sdks_unpadded_storage_representation() {
         assert_eq!(text_memo(Some(b"hello".to_vec())).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_non_text_memo_is_the_stored_bytes_as_hex() {
+        assert_eq!(
+            stored_memo(Some(vec![0xff, 0x01])),
+            Some(StoredMemo::Hex("ff01".to_owned()))
+        );
+        assert_eq!(text_memo(Some(vec![0xff, 0x01])), None);
+    }
+
+    #[test]
+    fn an_empty_or_missing_memo_is_none() {
+        assert_eq!(stored_memo(Some(vec![0xf6])), None);
+        assert_eq!(stored_memo(None), None);
+    }
+
+    /// Accounts 1-5, then the treasury, as the server orders them.
+    fn accounts() -> Vec<Uuid> {
+        let mut ids = (1..=5).map(Uuid::from_u128).collect::<Vec<_>>();
+        ids.push(Uuid::from_u128(6));
+        ids
+    }
+
+    /// Pool, sender and recipient account numbers, change flag, and stored memo.
+    type OutputRow<'a> = (i64, Option<u128>, Option<u128>, bool, &'a [u8]);
+
+    fn outputs_table(rows: &[OutputRow]) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE v_tx_outputs (txid BLOB, output_pool INTEGER, output_index INTEGER,
+                 from_account_uuid BLOB, to_account_uuid BLOB, to_address TEXT,
+                 is_change INTEGER, value INTEGER, memo BLOB);
+             CREATE TABLE accounts (id INTEGER, uuid BLOB);
+             CREATE TABLE addresses (account_id INTEGER, address TEXT,
+                 cached_transparent_receiver_address TEXT);",
+        )
+        .unwrap();
+        for (index, (pool, from, to, is_change, memo)) in rows.iter().enumerate() {
+            db.execute(
+                "INSERT INTO v_tx_outputs VALUES (?1,?2,?3,?4,?5,NULL,?6,1000,?7)",
+                params![
+                    [7u8; 32],
+                    pool,
+                    index,
+                    from.map(Uuid::from_u128),
+                    to.map(Uuid::from_u128),
+                    is_change,
+                    (!memo.is_empty()).then(|| memo.to_vec()),
+                ],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn change_paid_to_another_account_is_a_transfer() {
+        let db = outputs_table(&[(4, Some(1), Some(2), true, b"\xf6")]);
+        let outputs = wallet_outputs(&db, &[7; 32], &accounts()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].from, Some(Party::Account(1)));
+        assert_eq!(outputs[0].to, Some(Party::Account(2)));
+        assert!(!outputs[0].change);
+        assert_eq!(outputs[0].memo, None);
+    }
+
+    #[test]
+    fn faucet_payments_show_the_faucet_and_hide_its_change() {
+        let db = outputs_table(&[
+            (4, Some(6), Some(2), false, b"hi"),
+            (4, Some(6), Some(6), true, b""),
+            (0, Some(6), None, false, b""),
+        ]);
+        let outputs = wallet_outputs(&db, &[7; 32], &accounts()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].from, Some(Party::Faucet));
+        assert_eq!(outputs[0].to, Some(Party::Account(2)));
+        assert_eq!(outputs[0].memo, Some(StoredMemo::Text("hi".to_owned())));
+        assert_eq!(
+            serde_json::to_value(&outputs[0]).unwrap()["from"],
+            serde_json::json!("faucet")
+        );
+    }
+
+    #[test]
+    fn a_payment_to_the_faucet_address_has_no_development_recipient() {
+        let db = outputs_table(&[(0, Some(1), Some(6), false, b"")]);
+        let outputs = wallet_outputs(&db, &[7; 32], &accounts()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].pool, "transparent");
+        assert_eq!(outputs[0].to, None);
+        assert!(!outputs[0].change);
+    }
+
+    #[test]
+    fn an_unscanned_payment_to_another_account_names_that_account() {
+        let db = outputs_table(&[]);
+        db.execute("INSERT INTO accounts VALUES (2, ?1)", [Uuid::from_u128(2)])
+            .unwrap();
+        db.execute_batch(
+            "INSERT INTO addresses VALUES (2, 'uregtest1two', 'tmTwo');
+             INSERT INTO v_tx_outputs VALUES
+                 (x'0707070707070707070707070707070707070707070707070707070707070707',
+                  4, 0, NULL, NULL, 'uregtest1two', 0, 1000, NULL),
+                 (x'0707070707070707070707070707070707070707070707070707070707070707',
+                  0, 0, NULL, NULL, 'tmTwo', 0, 1000, NULL),
+                 (x'0707070707070707070707070707070707070707070707070707070707070707',
+                  4, 1, NULL, NULL, 'uregtest1elsewhere', 0, 1000, NULL);",
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE v_tx_outputs SET from_account_uuid=?1",
+            [Uuid::from_u128(1)],
+        )
+        .unwrap();
+        let outputs = wallet_outputs(&db, &[7; 32], &accounts()).unwrap();
+        let recipients = outputs.iter().map(|output| output.to).collect::<Vec<_>>();
+        assert_eq!(
+            recipients,
+            [Some(Party::Account(2)), Some(Party::Account(2)), None]
+        );
+    }
+
+    #[test]
+    fn details_are_complete_only_when_the_wallet_stored_the_transaction() {
+        assert_eq!(details(true, true, true, true), TransactionDetails::Pending);
+        assert_eq!(
+            details(false, true, true, true),
+            TransactionDetails::Complete
+        );
+        assert_eq!(
+            details(false, false, true, true),
+            TransactionDetails::Unavailable
+        );
+        assert_eq!(
+            details(false, false, false, true),
+            TransactionDetails::Complete
+        );
+        // Transparent outputs have no memo or change flag left to recover.
+        assert_eq!(
+            details(false, false, true, false),
+            TransactionDetails::Complete
+        );
+    }
+
+    #[test]
+    fn oversized_or_invalid_memos_fall_back_to_hex() {
+        assert_eq!(
+            stored_memo(Some(vec![b'a'; 513])),
+            Some(StoredMemo::Hex("61".repeat(513)))
+        );
+        assert_eq!(
+            stored_memo(Some(vec![0xc3, 0x28])),
+            Some(StoredMemo::Hex("c328".to_owned()))
+        );
+        // An explicit empty text memo is stored as no bytes.
+        assert_eq!(
+            stored_memo(Some(vec![])),
+            Some(StoredMemo::Text(String::new()))
+        );
     }
 }

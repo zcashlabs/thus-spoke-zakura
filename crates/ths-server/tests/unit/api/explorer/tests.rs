@@ -225,3 +225,98 @@ async fn transaction_reports_incomplete_inputs_when_a_prevout_lookup_fails() {
     assert!(tx["vin"][0].get("valueZat").is_none());
     assert!(tx["vin"][0].get("scriptPubKey").is_none());
 }
+
+/// A node whose mempool holds one transaction and knows nothing else.
+async fn node_with_mempool_transaction(txid: String) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = format!("http://{}", listener.local_addr().unwrap());
+    let rpc = Router::new().route(
+        "/",
+        post(move |Json(req): Json<Value>| {
+            let txid = txid.clone();
+            async move {
+                Json(
+                    if req["method"] == "getrawtransaction" && req["params"][0] == txid {
+                        json!({"result": {"txid": txid}, "error": null, "id": req["id"]})
+                    } else {
+                        json!({"result": null, "error": {"code": -5, "message": "missing"}, "id": req["id"]})
+                    },
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, rpc).await });
+    node
+}
+
+#[tokio::test]
+async fn wallet_view_validates_the_account_and_transaction() {
+    let txid = "c".repeat(64);
+    let node = node_with_mempool_transaction(txid.clone()).await;
+    let (state, _dir) = state_with_local_wallet();
+    let state = AppState::new(
+        state.0.store.clone(),
+        state.0.wallet.clone(),
+        node,
+        "test".into(),
+    );
+    for query in [
+        "account=0",
+        "account=6",
+        "account=-1",
+        "account=300",
+        "account=two",
+        "acount=2",
+    ] {
+        let (status, body) = crate::state::tests::api_get(
+            &state,
+            &format!("/api/v1/transactions/{txid}/wallet?{query}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
+    for unknown in ["d".repeat(64), "not-a-txid".to_owned(), "c".repeat(63)] {
+        let (status, body) =
+            crate::state::tests::api_get(&state, &format!("/api/v1/transactions/{unknown}/wallet"))
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{unknown}");
+        assert_eq!(body["error"]["message"], NO_TRANSACTION);
+    }
+}
+
+#[tokio::test]
+async fn wallet_view_of_a_transaction_no_account_touched_is_empty() {
+    let txid = "c".repeat(64);
+    let node = node_with_mempool_transaction(txid.clone()).await;
+    let (state, _dir) = state_with_local_wallet();
+    let state = AppState::new(
+        state.0.store.clone(),
+        state.0.wallet.clone(),
+        node,
+        "test".into(),
+    );
+    // Uppercase hex names the same transaction, and the response echoes it
+    // the way Zakura does.
+    let (status, view) = crate::state::tests::api_get(
+        &state,
+        &format!(
+            "/api/v1/transactions/{}/wallet?account=2",
+            txid.to_uppercase()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(
+        view,
+        json!({
+            "txid": txid,
+            "status": "pending",
+            "mined_height": null,
+            "confirmations": 0,
+            "fee_zatoshi": null,
+            "details": "complete",
+            "outputs": [],
+            "spends": []
+        })
+    );
+}

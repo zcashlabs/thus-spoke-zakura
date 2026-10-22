@@ -276,3 +276,58 @@ describe('ActivityList clock', () => {
     }
   });
 });
+
+describe('ActivityList memos', () => {
+  it('shows the text memos a payment carried', () => {
+    renderWithProviders(
+      <MemoryRouter>
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'memo-send',
+                kind: 'send',
+                from_account: 1,
+                to_account: 2,
+                to_address: null,
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 10_000_000n,
+                txid: '0d'.repeat(32),
+                block_hash: 'cd'.repeat(32),
+                status: 'confirmed',
+                last_error: null,
+                created_at: '2026-10-20 12:00:00',
+                memos: ['order 42', ''],
+              },
+              {
+                id: 'plain-send',
+                kind: 'send',
+                from_account: 1,
+                to_account: 3,
+                to_address: null,
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 10_000_000n,
+                txid: '0e'.repeat(32),
+                block_hash: 'cd'.repeat(32),
+                status: 'confirmed',
+                last_error: null,
+                created_at: '2026-10-20 12:01:00',
+                memos: [],
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    const memoRow = screen.getByRole('link', { name: 'Account 1 → Account 2' }).closest('tr');
+    expect(within(memoRow!).getByText('Memo: order 42 · (empty text)')).toBeInTheDocument();
+    const plainRow = screen.getByRole('link', { name: 'Account 1 → Account 3' }).closest('tr');
+    expect(within(plainRow!).queryByText(/Memo:/)).not.toBeInTheDocument();
+  });
+});

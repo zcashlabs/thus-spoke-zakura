@@ -2328,3 +2328,113 @@ fn address_send_submits_the_address_and_its_pool() {
         "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ"
     );
 }
+
+#[test]
+fn wallet_transaction_forwards_only_an_explicit_account() {
+    let txid = "ab".repeat(32);
+    for (account, expected_request) in [
+        (
+            None,
+            format!("GET /api/v1/transactions/{txid}/wallet HTTP/1.1"),
+        ),
+        (
+            Some(2),
+            format!("GET /api/v1/transactions/{txid}/wallet?account=2 HTTP/1.1"),
+        ),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", r#"{"txid":"t"}"#)]);
+        let view = wallet_transaction(
+            &url,
+            &reqwest::blocking::Client::new(),
+            &name("alpha"),
+            &txid,
+            account,
+        )
+        .unwrap();
+
+        assert_eq!(view, serde_json::json!({"txid": "t"}));
+        assert_eq!(requests.recv().unwrap().0, expected_request);
+    }
+}
+
+#[test]
+fn wallet_transaction_output_shows_memos_change_and_spends() {
+    let view = serde_json::json!({
+        "txid": "send",
+        "status": "confirmed",
+        "mined_height": 107,
+        "confirmations": 1,
+        "fee_zatoshi": 10_000,
+        "details": "complete",
+        "outputs": [
+            {"pool": "ironwood", "index": 0, "value_zatoshi": 10_000_000, "from": 1, "to": 2,
+             "to_address": "uregtest1two", "change": false, "memo": {"text": "order 42"}},
+            {"pool": "ironwood", "index": 1, "value_zatoshi": 89_990_000, "from": 1, "to": 1,
+             "to_address": null, "change": true, "memo": null},
+            {"pool": "ironwood", "index": 2, "value_zatoshi": 1, "from": "faucet", "to": 3,
+             "to_address": "uregtest1three", "change": false, "memo": {"hex": "ff01"}},
+            {"pool": "ironwood", "index": 3, "value_zatoshi": 2, "from": 1, "to": null,
+             "to_address": "uregtest1external", "change": false, "memo": {"text": ""}}
+        ],
+        "spends": [{"account": 1, "pool": "ironwood", "value_zatoshi": 100_000_000}]
+    });
+
+    let output = wallet_transaction_lines(&view, None).unwrap();
+    for expected in [
+        "Transaction: send",
+        "Status: confirmed at height 107 (1 confirmation)",
+        "Fee: 0.0001 ZEC",
+        "Details: complete",
+        "ironwood #0  account 1 -> account 2  0.1 ZEC\n    To: uregtest1two\n    Memo: order 42",
+        "ironwood #1  account 1 -> account 1  0.8999 ZEC  (change)",
+        "ironwood #2  faucet -> account 3  0.00000001 ZEC",
+        "ironwood #3  account 1 -> external address  0.00000002 ZEC\n    To: uregtest1external\n    Memo: (empty text)",
+        "Memo (not text): 0xff01",
+        "Spent:\n  account 1  ironwood  1 ZEC",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing `{expected}` from {output}"
+        );
+    }
+}
+
+#[test]
+fn wallet_transaction_output_explains_uninvolved_accounts_and_pending_details() {
+    let view = serde_json::json!({
+        "txid": "elsewhere",
+        "status": "pending",
+        "mined_height": null,
+        "confirmations": 0,
+        "fee_zatoshi": null,
+        "details": "complete",
+        "outputs": [],
+        "spends": []
+    });
+
+    let output = wallet_transaction_lines(&view, None).unwrap();
+    assert!(output.contains("Status: pending"), "{output}");
+    assert!(!output.contains("Details"), "{output}");
+    assert!(
+        output.ends_with("No local account is involved in this transaction."),
+        "{output}"
+    );
+    let filtered = wallet_transaction_lines(&view, Some(3)).unwrap();
+    assert!(
+        filtered.ends_with("Account 3 is not involved in this transaction."),
+        "{filtered}"
+    );
+
+    let mut pending = view.clone();
+    pending["details"] = serde_json::json!("pending");
+    pending["outputs"] = serde_json::json!([{"pool": "ironwood", "index": 0,
+        "value_zatoshi": 1, "from": null, "to": 2, "to_address": null,
+        "change": false, "memo": null}]);
+    let output = wallet_transaction_lines(&pending, None).unwrap();
+    assert!(
+        output.contains("Fee: not recorded by the wallet"),
+        "{output}"
+    );
+    assert!(output.contains("Details: pending."), "{output}");
+    assert!(output.contains("external -> account 2"), "{output}");
+}

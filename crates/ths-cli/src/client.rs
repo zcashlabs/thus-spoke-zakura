@@ -1595,6 +1595,145 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
         .map(|entries| entries.join("\n\n"))
 }
 
+pub(crate) fn wallet_transaction(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    txid: &str,
+    account: Option<u8>,
+) -> Result<serde_json::Value> {
+    let mut request = client.get(format!("{dashboard}/api/v1/transactions/{txid}/wallet"));
+    if let Some(account) = account {
+        request = request.query(&[("account", account)]);
+    }
+    request
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| format!("asking environment {name} for wallet transaction {txid}"))
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionView {
+    txid: String,
+    status: String,
+    mined_height: Option<u64>,
+    confirmations: u64,
+    fee_zatoshi: Option<u64>,
+    details: String,
+    outputs: Vec<WalletTransactionOutput>,
+    spends: Vec<WalletTransactionSpend>,
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionOutput {
+    pool: String,
+    index: u32,
+    value_zatoshi: u64,
+    from: Option<serde_json::Value>,
+    to: Option<serde_json::Value>,
+    to_address: Option<String>,
+    change: bool,
+    memo: Option<WalletTransactionMemo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WalletTransactionMemo {
+    Text(String),
+    Hex(String),
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionSpend {
+    account: u8,
+    pool: String,
+    value_zatoshi: u64,
+}
+
+fn wallet_party(party: Option<&serde_json::Value>, unknown: &str) -> String {
+    match party {
+        Some(serde_json::Value::Number(account)) => format!("account {account}"),
+        Some(serde_json::Value::String(name)) => name.clone(),
+        _ => unknown.to_owned(),
+    }
+}
+
+/// `account` is the `--account` filter the view was read with, if any.
+pub(crate) fn wallet_transaction_lines(
+    value: &serde_json::Value,
+    account: Option<u8>,
+) -> Result<String> {
+    let view: WalletTransactionView =
+        serde_json::from_value(value.clone()).context("decoding wallet transaction")?;
+    let mut lines = vec![format!("Transaction: {}", view.txid)];
+    lines.push(match view.mined_height {
+        Some(height) => format!(
+            "  Status: {} at height {height} ({} confirmation{})",
+            view.status,
+            view.confirmations,
+            if view.confirmations == 1 { "" } else { "s" }
+        ),
+        None => format!("  Status: {}", view.status),
+    });
+    if view.outputs.is_empty() && view.spends.is_empty() {
+        lines.push(match account {
+            Some(account) => format!("Account {account} is not involved in this transaction."),
+            None => "No local account is involved in this transaction.".to_owned(),
+        });
+        return Ok(lines.join("\n"));
+    }
+    lines.push(match view.fee_zatoshi {
+        Some(fee) => format!("  Fee: {} ZEC", format_zec(fee)),
+        None => "  Fee: not recorded by the wallet".to_owned(),
+    });
+    lines.push(match view.details.as_str() {
+        "complete" => "  Details: complete".to_owned(),
+        "pending" => "  Details: pending. The wallet has not fetched the full transaction yet, so memos and change flags may still change.".to_owned(),
+        "unavailable" => "  Details: unavailable. The wallet could not fetch the full transaction, so memos and change flags may be missing.".to_owned(),
+        other => format!("  Details: {other}"),
+    });
+    if !view.outputs.is_empty() {
+        lines.push("Outputs:".to_owned());
+    }
+    for output in &view.outputs {
+        lines.push(format!(
+            "  {} #{}  {} -> {}  {} ZEC{}",
+            output.pool,
+            output.index,
+            wallet_party(output.from.as_ref(), "external"),
+            wallet_party(output.to.as_ref(), "external address"),
+            format_zec(output.value_zatoshi),
+            if output.change { "  (change)" } else { "" }
+        ));
+        if let Some(address) = &output.to_address {
+            lines.push(format!("    To: {address}"));
+        }
+        match &output.memo {
+            Some(WalletTransactionMemo::Text(text)) if text.is_empty() => {
+                lines.push("    Memo: (empty text)".to_owned())
+            }
+            Some(WalletTransactionMemo::Text(text)) => lines.push(format!("    Memo: {text}")),
+            Some(WalletTransactionMemo::Hex(hex)) => {
+                lines.push(format!("    Memo (not text): 0x{hex}"))
+            }
+            None => {}
+        }
+    }
+    if !view.spends.is_empty() {
+        lines.push("Spent:".to_owned());
+    }
+    for spend in &view.spends {
+        lines.push(format!(
+            "  account {}  {}  {} ZEC",
+            spend.account,
+            spend.pool,
+            format_zec(spend.value_zatoshi)
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
 pub(crate) fn render_activity_history(
     activity: &[serde_json::Value],
     json: bool,
@@ -1635,6 +1774,23 @@ impl Runtime {
     ) -> Result<()> {
         let activity = activity_history(dashboard, client, name, limit)?;
         writeln!(out, "{}", render_activity_history(&activity, json)?)?;
+        Ok(())
+    }
+
+    pub fn wallet_transaction(
+        &self,
+        name: &InstanceName,
+        txid: &str,
+        account: Option<u8>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let view = wallet_transaction(&dashboard, &client, name, txid, account)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        } else {
+            println!("{}", wallet_transaction_lines(&view, account)?);
+        }
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { renderWithProviders, requestUrl } from '@/test/utils';
 import { TransactionDetail } from './TransactionDetail';
@@ -21,9 +21,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderTx(body: unknown, extras: Record<string, unknown> = {}) {
+function walletView(overrides: Record<string, unknown> = {}) {
+  return {
+    txid: TXID,
+    status: 'confirmed',
+    mined_height: 107,
+    confirmations: 1,
+    fee_zatoshi: null,
+    details: 'complete',
+    outputs: [],
+    spends: [],
+    ...overrides,
+  };
+}
+
+function renderTx(
+  body: unknown,
+  extras: Record<string, unknown> = {},
+  wallet: unknown = walletView(),
+) {
   const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = requestUrl(input);
+    if (url.endsWith('/wallet')) return json(wallet);
     if (url.includes(`/transactions/${TXID}`)) return json(body);
     for (const [id, payload] of Object.entries(extras)) {
       if (url.includes(`/transactions/${id}`)) return json(payload);
@@ -282,5 +301,151 @@ describe('TransactionDetail', () => {
     renderTx({ txid: TXID, vin: [{ coinbase: '03' }], vout: [{ n: 0, valueZat: 100_000_000 }] });
     expect(await screen.findByText('Fee')).toBeInTheDocument();
     expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent('No fee (coinbase)');
+  });
+});
+
+describe('TransactionDetail local accounts', () => {
+  const tx = {
+    txid: TXID,
+    vin: [],
+    vout: [],
+    vShieldedSpend: [],
+    vShieldedOutput: [],
+    orchard: { actions: [{}, {}] },
+  };
+
+  it('shows the outputs, memos, change and spends the wallet recorded', async () => {
+    const fetchSpy = renderTx(
+      tx,
+      {},
+      walletView({
+        fee_zatoshi: 10_000,
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 10_000_000,
+            from: 1,
+            to: 2,
+            to_address: 'uregtest1accounttwoaddress000000',
+            change: false,
+            memo: { text: 'order 42' },
+          },
+          {
+            pool: 'ironwood',
+            index: 1,
+            value_zatoshi: 89_990_000,
+            from: 1,
+            to: 1,
+            to_address: null,
+            change: true,
+            memo: null,
+          },
+          {
+            pool: 'ironwood',
+            index: 2,
+            value_zatoshi: 1,
+            from: 'faucet',
+            to: 3,
+            to_address: null,
+            change: false,
+            memo: { hex: 'ff01' },
+          },
+          {
+            pool: 'ironwood',
+            index: 3,
+            value_zatoshi: 2,
+            from: 1,
+            to: null,
+            to_address: 'uregtest1external',
+            change: false,
+            memo: { text: '' },
+          },
+        ],
+        spends: [{ account: 1, pool: 'ironwood', value_zatoshi: 100_000_000 }],
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText('order 42')).toBeInTheDocument());
+    const payment = screen.getByText('order 42').closest('tr')!;
+    expect(within(payment).getByText('Account 1 → Account 2')).toBeInTheDocument();
+    expect(within(payment).queryByText('Change')).not.toBeInTheDocument();
+    const change = screen.getByText('Account 1 → Account 1').closest('tr')!;
+    expect(within(change).getByText('Change')).toBeInTheDocument();
+    const faucet = screen.getByText('Faucet → Account 3').closest('tr')!;
+    expect(within(faucet).getByText('Not text:')).toBeInTheDocument();
+    expect(within(faucet).getByText('0xff01')).toBeInTheDocument();
+    const external = screen.getByText('Account 1 → External').closest('tr')!;
+    expect(within(external).getByText('Empty text')).toBeInTheDocument();
+    expect(screen.getByText(/Account 1 spent 1 ZEC from/)).toBeInTheDocument();
+    expect(screen.getByText('4 outputs')).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.map(([input]) => requestUrl(input))).toContainEqual(
+      expect.stringContaining(`/api/v1/transactions/${TXID}/wallet`),
+    );
+  });
+
+  it('says when no local account is involved', async () => {
+    renderTx(tx);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('No local account is involved in this transaction.'),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Memos and change are not final yet')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['pending', 'Memos and change are not final yet'],
+    ['unavailable', 'Memos and change may be missing'],
+  ])('warns when details are %s', async (details, warning) => {
+    renderTx(
+      tx,
+      {},
+      walletView({
+        details,
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 10_000_000,
+            from: null,
+            to: 2,
+            to_address: null,
+            change: false,
+            memo: null,
+          },
+        ],
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(warning)).toBeInTheDocument());
+    expect(screen.getByText('External → Account 2')).toBeInTheDocument();
+  });
+
+  it('shows a wallet read failure inside the panel', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+      requestUrl(input).endsWith('/wallet')
+        ? Promise.resolve(
+            new Response(JSON.stringify({ error: { message: 'wallet is busy', status: 500 } }), {
+              status: 500,
+              headers: { 'content-type': 'application/json' },
+            }),
+          )
+        : json(tx),
+    );
+    renderWithProviders(
+      <MemoryRouter initialEntries={[`/explorer/tx/${TXID}`]}>
+        <Routes>
+          <Route path="/explorer/tx/:txid" element={<TransactionDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // A 500's server text is replaced by the dashboard's generic message.
+    await waitFor(() =>
+      expect(screen.getByText(/The environment hit an unexpected error/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText('What this transaction reveals')).toBeInTheDocument();
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   accountSchema,
   activitySchema,
+  walletTransactionSchema,
   addressSchema,
   miningJobSchema,
   miningJobResponseSchema,
@@ -133,6 +134,25 @@ describe('activitySchema', () => {
     });
 
     expect(activity.recipient_addresses).toEqual(['uregtest1external1', 'uregtest1external2']);
+  });
+
+  it('keeps the text memos the wallet decoded', () => {
+    const activity = activitySchema.parse({
+      id: 'wallet:memo',
+      kind: 'transaction',
+      direction: 'internal',
+      from_account: 1,
+      to_account: 2,
+      source_pool: 'ironwood',
+      destination_pool: 'ironwood',
+      amount_zatoshi: 10_000_000,
+      txid: 'ab'.repeat(32),
+      status: 'confirmed',
+      created_at: null,
+      memos: ['order 42'],
+    });
+
+    expect(activity.memos).toEqual(['order 42']);
   });
 
   it('preserves every known source and destination pool', () => {
@@ -322,4 +342,47 @@ describe('addressSchema', () => {
       ).toBe(false);
     },
   );
+});
+
+describe('walletTransactionSchema', () => {
+  const view = {
+    txid: 'ab'.repeat(32),
+    status: 'confirmed',
+    mined_height: 107,
+    confirmations: 1,
+    fee_zatoshi: 10_000,
+    details: 'complete',
+    outputs: [
+      {
+        pool: 'ironwood',
+        index: 0,
+        value_zatoshi: 10_000_000,
+        from: 'faucet',
+        to: 2,
+        to_address: 'uregtest1two',
+        change: false,
+        memo: { text: 'order 42' },
+      },
+    ],
+    spends: [{ account: 1, pool: 'ironwood', value_zatoshi: 100_000_000 }],
+  };
+
+  it('parses values as bigint and keeps the faucet as a sender', () => {
+    const parsed = walletTransactionSchema.parse(view);
+    expect(parsed.fee_zatoshi).toBe(10_000n);
+    expect(parsed.outputs[0]?.from).toBe('faucet');
+    expect(parsed.outputs[0]?.value_zatoshi).toBe(10_000_000n);
+  });
+
+  it.each([
+    ['an unknown details state', { details: 'partial' }],
+    ['the faucet as a recipient', { outputs: [{ ...view.outputs[0], to: 'faucet' }] }],
+    ['the treasury account', { spends: [{ account: 6, pool: 'ironwood', value_zatoshi: 1 }] }],
+    [
+      'a memo with both forms',
+      { outputs: [{ ...view.outputs[0], memo: { text: 'a', hex: '61' } }] },
+    ],
+  ])('rejects %s', (_, change) => {
+    expect(walletTransactionSchema.safeParse({ ...view, ...change }).success).toBe(false);
+  });
 });

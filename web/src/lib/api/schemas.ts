@@ -63,8 +63,52 @@ export const activitySchema = z.object({
   status: z.string(),
   last_error: z.string().nullable().default(null),
   created_at: z.string().nullable(),
+  /** Decoded text memos the wallet can read; non-text memos are omitted. */
+  memos: z.array(z.string()).optional(),
 });
 export type Activity = z.infer<typeof activitySchema>;
+
+const developmentAccount = z.number().int().min(1).max(5);
+
+/** A memo as the wallet stored it: UTF-8 text, or any other memo's bytes as hex. */
+export const storedMemoSchema = z.union([
+  z.strictObject({ text: z.string() }),
+  z.strictObject({ hex: z.string().regex(/^[0-9a-f]*$/) }),
+]);
+export type StoredMemo = z.infer<typeof storedMemoSchema>;
+
+/** One output a development account sent or received, as the local wallet recorded it. */
+export const walletOutputSchema = z.object({
+  pool: z.enum(['transparent', 'sapling', 'orchard', 'ironwood']),
+  index: z.number().int().nonnegative(),
+  value_zatoshi: zatoshi,
+  /** `faucet` for an output the treasury paid; null for an address outside accounts 1-5. */
+  from: z.union([developmentAccount, z.literal('faucet')]).nullable(),
+  to: developmentAccount.nullable(),
+  to_address: z.string().nullable(),
+  change: z.boolean(),
+  memo: storedMemoSchema.nullable(),
+});
+export type WalletOutput = z.infer<typeof walletOutputSchema>;
+
+export const walletTransactionSchema = z.object({
+  txid: z.string(),
+  status: z.enum(['pending', 'confirmed']),
+  mined_height: z.number().int().nonnegative().nullable(),
+  confirmations: z.number().int().nonnegative(),
+  fee_zatoshi: zatoshi.nullable(),
+  /** Whether memos and change flags are final. */
+  details: z.enum(['pending', 'complete', 'unavailable']),
+  outputs: z.array(walletOutputSchema),
+  spends: z.array(
+    z.object({
+      account: developmentAccount,
+      pool: z.enum(['transparent', 'sapling', 'orchard', 'ironwood']),
+      value_zatoshi: zatoshi,
+    }),
+  ),
+});
+export type WalletTransaction = z.infer<typeof walletTransactionSchema>;
 
 export const addressFaucetSchema = z.object({
   address: z.string(),

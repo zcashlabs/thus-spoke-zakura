@@ -48,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/blocks", get(explorer::blocks))
         .route("/api/v1/blocks/{id}", get(explorer::block))
         .route("/api/v1/transactions/{txid}", get(explorer::transaction))
+        .route(
+            "/api/v1/transactions/{txid}/wallet",
+            get(explorer::wallet_transaction),
+        )
         .route("/api/v1/mempool", get(explorer::mempool))
         .route("/api/v1/addresses/{address}", get(explorer::address))
         .route("/api/v1/search", get(explorer::search))

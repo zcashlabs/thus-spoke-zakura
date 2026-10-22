@@ -1,10 +1,12 @@
 use super::error::{ApiError, ApiPath, ApiQuery, ApiResult, not_found};
+use crate::db::USER_ACCOUNT_COUNT;
 use crate::network::regtest_network;
 use crate::state::AppState;
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zcash_keys::address::Address;
+use zcash_protocol::TxId;
 pub(crate) async fn block(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -156,6 +158,74 @@ pub(crate) async fn transaction(
     }
     Ok(Json(tx))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WalletTransactionQuery {
+    account: Option<i64>,
+}
+
+/// Parses a transaction ID in the byte-reversed hex form Zakura and the
+/// dashboard display.
+fn parse_txid(txid: &str) -> Option<TxId> {
+    let mut bytes: [u8; 32] = hex::decode(txid).ok()?.try_into().ok()?;
+    bytes.reverse();
+    Some(TxId::from_bytes(bytes))
+}
+
+/// What the local wallet recorded about one transaction for the development
+/// accounts: outputs, change, memos, spends and fee. Public chain data comes
+/// from `transaction`.
+pub(crate) async fn wallet_transaction(
+    State(state): State<AppState>,
+    ApiPath(txid): ApiPath<String>,
+    ApiQuery(query): ApiQuery<WalletTransactionQuery>,
+) -> ApiResult<Json<Value>> {
+    let account = query
+        .account
+        .map(|account| {
+            u8::try_from(account)
+                .ok()
+                .filter(|account| (1..=USER_ACCOUNT_COUNT).contains(account))
+                .ok_or_else(|| {
+                    ApiError::bad_request("account must be a development account from 1 to 5")
+                })
+        })
+        .transpose()?;
+    let not_found_error = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: NO_TRANSACTION.into(),
+    };
+    let id = parse_txid(&txid).ok_or_else(not_found_error)?;
+    // Zakura answers with lowercase hex, whatever case the caller used.
+    let txid = id.to_string();
+    let tx = state
+        .0
+        .rpc
+        .lookup_transaction(&txid)
+        .await?
+        .ok_or_else(not_found_error)?;
+    // Zakura omits confirmations for a mempool transaction.
+    let confirmations = tx
+        .get("confirmations")
+        .and_then(Value::as_i64)
+        .filter(|confirmations| *confirmations > 0);
+    let mined_height = confirmations.and_then(|_| tx.get("height").and_then(Value::as_u64));
+    let mut view = state.0.wallet.wallet_transaction(id).await?;
+    if let Some(account) = account {
+        view = view.for_account(account);
+    }
+    Ok(Json(json!({
+        "txid": txid,
+        "status": if mined_height.is_some() { "confirmed" } else { "pending" },
+        "mined_height": mined_height,
+        "confirmations": confirmations.unwrap_or(0),
+        "fee_zatoshi": view.fee_zatoshi,
+        "details": view.details,
+        "outputs": view.outputs,
+        "spends": view.spends,
+    })))
+}
+
 pub(crate) async fn mempool(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({"transactions":state.0.rpc.mempool().await?})))
 }

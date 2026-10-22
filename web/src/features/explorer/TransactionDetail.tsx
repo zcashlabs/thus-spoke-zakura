@@ -15,6 +15,7 @@ import { actionSummary, summariseShielding, transactionFee } from './shielding';
 import { resolveTransparentInput } from './resolve-input';
 import { Stat } from '@/components/ui/Stat';
 import { BACK_LINK } from './back-link';
+import { LocalAccountsPanel } from './LocalAccountsPanel';
 
 const IO_COLUMNS: Column[] = [
   { key: 'n', header: '#', width: '72px' },
@@ -258,6 +259,8 @@ export function TransactionDetail() {
           </PanelNote>
         )}
       </Panel>
+
+      <LocalAccountsPanel txid={tx.txid} />
 
       {tx.vin.length > 0 && <PublicInputs vin={tx.vin} accounts={accounts.data} />}
 

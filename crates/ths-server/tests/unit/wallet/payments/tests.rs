@@ -658,3 +658,327 @@ fn transparent_quote_max_is_sendable_when_utxos_exceed_the_input_cap() {
     propose(quote.max_zatoshi).unwrap();
     assert!(propose(quote.max_zatoshi + 1).is_err());
 }
+
+/// Copies the harness wallet into a file, as the server opens it, for the
+/// accounts given in development-account order.
+fn file_wallet(
+    st: &TestState,
+    dir: &std::path::Path,
+    name: &str,
+    account_ids: Vec<<TestDb as WalletRead>::AccountId>,
+) -> RealWallet {
+    let path = dir.join(name);
+    st.wallet()
+        .conn()
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    RealWallet {
+        db: Arc::new(Mutex::new(
+            WalletDb::for_path(&path, *st.network(), SystemClock, UnwrapErr(SysRng))
+                .unwrap()
+                .with_enhancement_mode(EnhancementMode::Standard),
+        )),
+        account_ids,
+        lightwalletd: String::new(),
+        wallet_path: path,
+    }
+}
+
+/// Account 1 sends 0.1 ZEC with `memo` to a second account under the same
+/// seed. Returns the second account and the unmined transaction.
+fn send_to_second_account(
+    st: &mut TestState,
+    memo: &str,
+) -> (<TestDb as WalletRead>::AccountId, Transaction) {
+    let second = st.create_account_from_test_seed("second").0;
+    fund_ironwood(st, 100_000_000);
+    let address = st
+        .wallet()
+        .get_last_generated_address_matching(second, UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap()
+        .unwrap();
+    let account_id = st.test_account().unwrap().id();
+    let usk = st.test_account().unwrap().usk().clone();
+    let params = *st.network();
+    let proposal = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "ironwood",
+        &Address::Unified(address),
+        Zatoshis::const_from_u64(10_000_000),
+        Some(MemoBytes::from_bytes(memo.as_bytes()).unwrap()),
+    )
+    .unwrap();
+    let txid = *st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            &usk,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap()
+        .first();
+    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
+    (second, tx)
+}
+
+/// A node that knows one transaction, mined at `height`.
+async fn node_knowing(txid: String, height: u32) -> String {
+    use axum::{Json, Router, routing::post};
+    use serde_json::{Value, json};
+    let rpc = Router::new().route(
+        "/",
+        post(move |Json(req): Json<Value>| {
+            let txid = txid.clone();
+            async move {
+                Json(
+                    if req["method"] == "getrawtransaction" && req["params"][0] == txid {
+                        json!({
+                            "result": {"txid": txid, "height": height, "confirmations": 1},
+                            "error": null,
+                            "id": req["id"]
+                        })
+                    } else {
+                        json!({
+                            "result": null,
+                            "error": {"code": -5, "message": "No such transaction"},
+                            "id": req["id"]
+                        })
+                    },
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, rpc).await });
+    url
+}
+
+#[tokio::test]
+async fn wallet_view_shows_the_memo_change_and_fee_of_a_wallet_built_send() {
+    let mut st = test_state();
+    let (second, tx) = send_to_second_account(&mut st, "order 42");
+    let first = st.test_account().unwrap().id();
+    let dir = tempfile::tempdir().unwrap();
+
+    // Before the block is scanned the SDK has not linked the payment to the
+    // second account; the recorded address still names it.
+    let unmined = file_wallet(&st, dir.path(), "unmined.db", vec![first, second]);
+    let view = unmined.wallet_transaction(tx.txid()).await.unwrap();
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Complete
+    );
+    let payment = view.outputs.iter().find(|output| !output.change).unwrap();
+    assert_eq!(payment.to, Some(crate::wallet::history::Party::Account(2)));
+    assert_eq!(
+        payment.memo,
+        Some(crate::wallet::history::StoredMemo::Text(
+            "order 42".to_owned()
+        ))
+    );
+
+    let (height, _) = st.generate_next_block_including(tx.txid());
+    st.scan_cached_blocks(height, 1);
+    let wallet = file_wallet(&st, dir.path(), "wallet.db", vec![first, second]);
+    let store = crate::db::Store::open(dir.path().join("ths.db")).unwrap();
+    store.initialize().unwrap();
+    let txid = tx.txid().to_string();
+    let node = node_knowing(txid.clone(), u32::from(height)).await;
+    let state = crate::state::AppState::new(store, wallet, node, "test".into());
+
+    let (status, view) =
+        crate::state::tests::api_get(&state, &format!("/api/v1/transactions/{txid}/wallet")).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["txid"], txid);
+    assert_eq!(view["status"], "confirmed");
+    assert_eq!(view["mined_height"], u32::from(height));
+    assert_eq!(view["confirmations"], 1);
+    assert_eq!(view["details"], "complete");
+    assert_eq!(view["fee_zatoshi"], 10_000);
+    let outputs = view["outputs"].as_array().unwrap();
+    let payment = outputs.iter().find(|output| output["to"] == 2).unwrap();
+    assert_eq!(payment["from"], 1);
+    assert_eq!(payment["pool"], "ironwood");
+    assert_eq!(payment["value_zatoshi"], 10_000_000);
+    assert_eq!(payment["change"], false);
+    assert_eq!(payment["memo"], serde_json::json!({"text": "order 42"}));
+    assert!(
+        payment["to_address"]
+            .as_str()
+            .unwrap()
+            .starts_with("uregtest1")
+    );
+    let change = outputs.iter().find(|output| output["to"] == 1).unwrap();
+    assert_eq!(change["from"], 1);
+    assert_eq!(change["change"], true);
+    assert_eq!(change["value_zatoshi"], 89_990_000);
+    assert_eq!(change["memo"], serde_json::Value::Null);
+    assert_eq!(change["to_address"], serde_json::Value::Null);
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(
+        view["spends"],
+        serde_json::json!([{"account": 1, "pool": "ironwood", "value_zatoshi": 100_000_000}])
+    );
+
+    let (status, receiver) = crate::state::tests::api_get(
+        &state,
+        &format!("/api/v1/transactions/{txid}/wallet?account=2"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(receiver["outputs"].as_array().unwrap().len(), 1);
+    assert_eq!(receiver["outputs"][0]["to"], 2);
+    assert_eq!(receiver["spends"], serde_json::json!([]));
+
+    let (status, uninvolved) = crate::state::tests::api_get(
+        &state,
+        &format!("/api/v1/transactions/{txid}/wallet?account=3"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(uninvolved["outputs"], serde_json::json!([]));
+    assert_eq!(uninvolved["spends"], serde_json::json!([]));
+
+    let (status, _) = crate::state::tests::api_get(
+        &state,
+        &format!("/api/v1/transactions/{txid}/wallet?account=6"),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let (status, _) = crate::state::tests::api_get(
+        &state,
+        &format!("/api/v1/transactions/{}/wallet", "ab".repeat(32)),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn wallet_view_details_follow_transaction_enhancement() {
+    let mut sender = test_state();
+    let (_, tx) = send_to_second_account(&mut sender, "order 42");
+
+    // A second wallet under the same seed finds the payment only by scanning
+    // a compact block, which carries no memo.
+    let mut st = test_state();
+    let second = st.create_account_from_test_seed("second").0;
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(height, 1);
+    let first = st.test_account().unwrap().id();
+    let dir = tempfile::tempdir().unwrap();
+    let txid = tx.txid();
+    let received =
+        |view: &crate::wallet::history::WalletTransaction| view.clone().for_account(2).outputs;
+
+    let enhanced = file_wallet(&st, dir.path(), "enhanced.db", vec![first, second]);
+    let view = enhanced.wallet_transaction(txid).await.unwrap();
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Pending
+    );
+    let outputs = received(&view);
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].value_zatoshi, 10_000_000);
+    assert_eq!(outputs[0].memo, None);
+
+    let mut raw = Vec::new();
+    tx.write(&mut raw).unwrap();
+    enhanced
+        .enhance_transaction(txid, raw, u32::from(height))
+        .await
+        .unwrap();
+    let view = enhanced.wallet_transaction(txid).await.unwrap();
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Complete
+    );
+    assert_eq!(
+        received(&view)[0].memo,
+        Some(crate::wallet::history::StoredMemo::Text(
+            "order 42".to_owned()
+        ))
+    );
+
+    // The SDK keeps an Ironwood transaction's request when lightwalletd cannot
+    // supply it, so its details stay pending rather than unavailable.
+    let missing = file_wallet(&st, dir.path(), "missing.db", vec![first, second]);
+    missing
+        .transaction_enhancement_not_found(txid)
+        .await
+        .unwrap();
+    let view = missing.wallet_transaction(txid).await.unwrap();
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Pending
+    );
+    assert_eq!(received(&view)[0].memo, None);
+}
+
+#[tokio::test]
+async fn wallet_view_details_are_unavailable_once_enhancement_is_abandoned() {
+    // A Sapling payment has no Ironwood routing, so "not found" retires its
+    // request and the memo is never recovered.
+    let mut sender = test_state();
+    let second = sender.create_account_from_test_seed("second").0;
+    fund_sapling(&mut sender, 100_000_000);
+    let address = sender
+        .wallet()
+        .get_last_generated_address_matching(second, UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap()
+        .unwrap();
+    let account_id = sender.test_account().unwrap().id();
+    let usk = sender.test_account().unwrap().usk().clone();
+    let proposal = sender
+        .propose_standard_transfer::<Infallible>(
+            account_id,
+            StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+            &Address::Sapling(*address.sapling().unwrap()),
+            Zatoshis::const_from_u64(10_000_000),
+            Some(MemoBytes::from_bytes(b"order 42").unwrap()),
+            None,
+            ShieldedPool::Sapling,
+        )
+        .unwrap();
+    let txid = *sender
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            &usk,
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap()
+        .first();
+    let tx = sender.wallet().get_transaction(txid).unwrap().unwrap();
+
+    let mut st = test_state();
+    let second = st.create_account_from_test_seed("second").0;
+    let (height, _) = st.generate_next_block_from_tx(1, &tx);
+    st.scan_cached_blocks(height, 1);
+    let first = st.test_account().unwrap().id();
+    let dir = tempfile::tempdir().unwrap();
+    let wallet = file_wallet(&st, dir.path(), "wallet.db", vec![first, second]);
+    let view = wallet.wallet_transaction(txid).await.unwrap();
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Pending
+    );
+
+    wallet
+        .transaction_enhancement_not_found(txid)
+        .await
+        .unwrap();
+    let view = wallet
+        .wallet_transaction(txid)
+        .await
+        .unwrap()
+        .for_account(2);
+    assert_eq!(
+        view.details,
+        crate::wallet::history::TransactionDetails::Unavailable
+    );
+    assert_eq!(view.outputs.len(), 1);
+    assert_eq!(view.outputs[0].pool, "sapling");
+    assert_eq!(view.outputs[0].memo, None);
+}

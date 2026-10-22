@@ -147,11 +147,13 @@ describe('useServerEvents', () => {
       [{ queryKey: ['accounts'] }],
       [{ queryKey: ['activity'] }],
       [{ queryKey: ['send-quote'] }],
+      [{ queryKey: ['wallet-transaction'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['blocks'] }],
       [{ queryKey: ['mempool'] }],
       [{ queryKey: ['block'] }],
       [{ queryKey: ['transaction'] }],
+      [{ queryKey: ['wallet-transaction'] }],
       [{ queryKey: ['address'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['mining'] }],
@@ -249,15 +251,47 @@ describe('useServerEvents', () => {
     expect(await screen.findByText('4 conf')).toBeInTheDocument();
   });
 
-  it('leaves detail pages alone on wallet and sync updates', async () => {
-    routes = { [`/transactions/${TXID}`]: () => ({ txid: TXID, height: 106, confirmations: 1 }) };
+  it('leaves public detail data alone on wallet and sync updates', async () => {
+    let memo = 'order 4';
+    routes = {
+      [`/transactions/${TXID}/wallet`]: () => ({
+        txid: TXID,
+        status: 'confirmed',
+        mined_height: 106,
+        confirmations: 1,
+        fee_zatoshi: null,
+        details: 'complete',
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 1,
+            from: 1,
+            to: 2,
+            to_address: null,
+            change: false,
+            memo: { text: memo },
+          },
+        ],
+        spends: [],
+      }),
+      [`/transactions/${TXID}`]: () => ({ txid: TXID, height: 106, confirmations: 1 }),
+    };
     renderPage(`/explorer/tx/${TXID}`, '/explorer/tx/:txid', <TransactionDetail />);
     await screen.findByText('1 conf');
+    await screen.findByText('order 4');
 
+    // The local wallet view follows wallet updates; public chain data does not.
+    memo = 'order 42';
     FakeEventSource.current?.emit('wallet');
     FakeEventSource.current?.emit('sync');
+    expect(await screen.findByText('order 42')).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(requestsTo(`/transactions/${TXID}`)).toBe(1);
+    const publicReads = vi
+      .mocked(fetch)
+      .mock.calls.map(([input]) => requestUrl(input))
+      .filter((url) => url.includes(`/transactions/${TXID}`) && !url.endsWith('/wallet'));
+    expect(publicReads).toHaveLength(1);
   });
 });

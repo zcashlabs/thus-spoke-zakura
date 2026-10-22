@@ -61,6 +61,8 @@ function ActivityRow({ activity, index, now }: { activity: Activity; index: numb
   const isFaucet = activity.kind === 'faucet';
   const isIncoming = activity.direction === 'incoming';
   const transactionPath = activity.txid ? `/explorer/tx/${activity.txid}` : null;
+  // An explicit empty text memo would otherwise render as nothing.
+  const memos = (activity.memos ?? []).map((memo) => (memo === '' ? '(empty text)' : memo));
   const source = accountLabel(activity.from_accounts, activity.from_account) ?? 'External';
   const transfer = isFaucet
     ? `Faucet → ${recipientLabel(activity)}`
@@ -108,6 +110,14 @@ function ActivityRow({ activity, index, now }: { activity: Activity; index: numb
               <span className="min-w-0 truncate font-semibold">{transfer}</span>
             )}
           </div>
+          {memos.length > 0 && (
+            <p
+              className="text-ink-muted mt-1 truncate pl-[34px] text-[11px]"
+              title={memos.join('\n')}
+            >
+              Memo: {memos.join(' · ')}
+            </p>
+          )}
         </td>
 
         <td className="max-sm:hidden">
