@@ -194,7 +194,7 @@ fn transaction_missing(error: &anyhow::Error) -> bool {
 fn classify_response<T: DeserializeOwned>(
     status: reqwest::StatusCode,
     method: &str,
-    envelope: Value,
+    mut envelope: Value,
 ) -> Result<T> {
     if let Some(error) = envelope.get("error").filter(|error| !error.is_null()) {
         let error: RpcError =
@@ -205,9 +205,10 @@ fn classify_response<T: DeserializeOwned>(
         bail!("Zakura {method} returned HTTP {status} without a JSON-RPC error");
     }
     let result = envelope
-        .get("result")
+        .as_object_mut()
+        .and_then(|object| object.remove("result"))
         .with_context(|| format!("Zakura {method} response did not contain a result"))?;
-    serde_json::from_value(result.clone()).context("decoding Zakura result")
+    serde_json::from_value(result).context("decoding Zakura result")
 }
 
 #[cfg(test)]
