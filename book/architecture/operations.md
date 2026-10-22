@@ -1,9 +1,10 @@
 # 6. Uncertain operations
 
 The previous chapter showed that a block can be generated before the wallet
-publishes a new snapshot. A payment has a similar boundary: it can be
-broadcast before its caller receives a response. This chapter names each
-state and tells you what an HTTP response can and cannot prove.
+publishes a new snapshot. A payment has a similar boundary: accepting the
+POST records a claim, and background work later prepares, broadcasts, and
+confirms it. This chapter names each state and tells you what an HTTP
+response can and cannot prove.
 
 The terms are deliberately narrow:
 
@@ -19,7 +20,7 @@ The terms are deliberately narrow:
 
 ## Payment submission and confirmation
 
-![A validated payment is durably claimed as preparing. The wallet and server save prepared transaction bytes before broadcast, then the server checks confirmation. Identical keys resume the saved payment; changed details or memo conflict.](../images/payment-flow.svg)
+![A validated payment is durably claimed as preparing, and the POST returns that stored claim. Background work saves prepared transaction bytes before broadcast, then checks confirmation. An identical key returns the recorded outcome and leaves confirmation to background work; changed details or memo conflict.](../images/payment-flow.svg)
 
 1. `POST /api/v1/send` validates user account IDs (1–5), source
    and destination pools, amount, memo rules, and an `idempotency_key` of
@@ -29,35 +30,45 @@ The terms are deliberately narrow:
 2. `POST /api/v1/faucet` validates its user account, pool,
    amount greater than zero and at most 5 ZEC, and key. Validation happens
    before the recorded-key lookup.
-3. If SQLite already has a claim for the key, the server resumes **that
-   recorded payment**. It compares the replay's details, including the memo,
-   with the original intent; changed valid details return **HTTP 409**.
-   A new intent and key are recorded as `preparing` before wallet work.
-4. With a new key, the server synchronizes its wallet. The SDK chooses
-   spendable funds and a fee, constructs the transaction, and saves it in the
-   wallet. The server saves its txid and transaction bytes as `prepared` before
-   broadcast. For faucet payments, the source is hidden treasury
-   Account 6; it may replenish itself first.
-5. The server submits the saved transaction through lightwalletd and marks
-   it `broadcast`. If the node already knows the txid, the server continues
-   with that transaction. A lost response can be recovered using the saved
-   payment rather than constructing another one.
-6. The server asks Zakura whether the transaction is confirmed. If needed,
-   it mines one block, waits for wallet reconciliation, and asks again. It
-   returns `confirmed` activity with a block hash if successful. If
-   auto-mining fails, it can return `broadcast` activity with the txid
-   and no block hash. Background confirmation checks can later confirm
-   recorded account activity independently of wallet synchronization.
+3. The handler then returns the stored claim. If SQLite already has one for
+   the key, that recorded payment is the body. The handler compares the
+   replay's details, including the memo, with the original intent; changed
+   valid details return **HTTP 409**. A new intent and key are inserted as
+   `preparing` and returned in the same way. This response admits the claim.
+   Preparation, broadcast, and confirmation continue in the background.
+4. Pending statuses `preparing`, `prepared`, and `broadcast` return
+   **HTTP 202** with a relative `Location` header. For a send or account
+   faucet the header is `/api/v1/activity?idempotency_key=<key>`; for an
+   address faucet it is `/api/v1/faucet/address?idempotency_key=<key>`.
+   Resolve that path and query against the dashboard origin. A new claim is
+   `preparing`, so `txid` is empty. A later replay whose stored status is
+   `confirmed` or `failed` returns **HTTP 200**. That code covers both
+   outcomes; read `status`.
+5. Background work progresses an unresolved claim. It synchronizes the
+   wallet. The SDK chooses spendable funds and a fee, constructs the
+   transaction, and saves it in the wallet. The server saves its txid and
+   transaction bytes as `prepared` before broadcast. For faucet payments,
+   the source is hidden treasury Account 6; it may replenish itself first.
+6. Background work submits the saved transaction through lightwalletd and
+   marks it `broadcast`. If the node already knows the txid, it continues
+   with that transaction. It then asks Zakura whether the transaction is
+   confirmed. If needed, it mines one block, waits for wallet
+   reconciliation, and asks again. Success stores `confirmed` activity with
+   a block hash. If auto-mining fails, the activity can remain `broadcast`,
+   with the txid and no block hash. Later blocks and background checks can
+   confirm recorded account activity independently of wallet synchronization.
+   Background work moves the payment forward; another POST is not required.
 
 The important ordering is **record intent → save transaction → broadcast**.
+The POST returns after the intent is recorded.
 Send, account faucet, and address faucet reject transparent outputs below
 54 zatoshi with **HTTP 400** before recording a claim. Smaller positive
 shielded amounts remain valid.
-Concurrent requests with the same key share the recorded intent and serialized
-submission. Saved payments can be resumed across a server restart while the
-instance's databases remain intact. This is not an end-to-end exactly-once
-guarantee: a fresh key requests a new payment, and deleting the instance deletes
-its recovery records.
+Concurrent requests with the same key share the recorded intent. Background
+submission of unresolved payments is serialized. Saved payments continue
+across a server restart while the instance's databases remain intact. This
+is not an end-to-end exactly-once guarantee: a fresh key requests a new
+payment, and deleting the instance deletes its recovery records.
 
 ## HTTP admission and status
 
@@ -192,9 +203,9 @@ finishes that activity.
 
 ## Which caller are you retrying?
 
-| Caller | How to resume the payment |
+| Caller | How to recover the same payment |
 | --- | --- |
-| Direct API | Repeat the identical request with your saved key. A new key requests a new payment. |
+| Direct API | Repeat the identical request with the saved key and details. The replay returns the recorded outcome and leaves confirmation to background work. A new key requests a new payment. |
 | Dashboard Send or Faucet | Pending payments retain their key and exact details across dialog closure, refresh, and browser restart. Use **Resume** for the saved payment. A `broadcast` response does not clear it; terminal `confirmed` or `failed` results release the retained identity. |
 | CLI send, shield, unshield, or faucet | Rerun the same arguments against the same instance. The local payment journal retains keys across errors and pending results; an identical command after successful terminal-result output starts a new payment. |
 
@@ -213,28 +224,31 @@ keep the same account selection when retrying it.
 
 ## Decide what to do after a lost response
 
-![After a lost payment response, direct API callers reuse their saved key, dashboard callers resume retained payments, and CLI callers rerun the same command and instance. A new key requests a new payment. Activity omits keys and external faucet records; inspect txids and wallet snapshots separately.](../images/retry-decisions.svg)
+![After a lost payment response, direct API callers reuse their saved key and read the recorded outcome, dashboard callers resume retained payments, and CLI callers rerun the same command and instance. A new key requests a new payment. A replay returns that outcome. Activity omits keys and external faucet records; inspect txids and wallet snapshots separately.](../images/retry-decisions.svg)
 
 1. Save any transaction ID or response you did receive. Query Recent
    activity or `GET /api/v1/activity`, then inspect Zakura's transaction
    and chain state if you have a txid. With a saved key,
    `GET /api/v1/activity?idempotency_key=<key>` reads that payment's stored
    activity, returning a one-item array or `[]`.
-2. If the matching activity is recorded, use its status. A direct API caller
-   may repeat the same validated request with its **same key** to finish
-   confirmation. A `broadcast` activity may also become `confirmed` after
-   another block and background confirmation checks.
+2. If the matching activity is recorded, use its status. Background work
+   moves an unresolved payment through preparation, broadcast, and
+   confirmation. A `broadcast` activity may become `confirmed` after another
+   block and those checks. Repeating the same POST returns the outcome
+   already recorded. HTTP 200 on that terminal replay covers both
+   `confirmed` and `failed`; inspect `status`. The replay does not need to
+   drive confirmation.
 3. If no matching activity appears, you cannot conclude that nothing was
    broadcast. Confirm that you are querying the same instance and retain the
-   original key and details. The server can resume the saved payment even
-   when no transaction ID was returned to you; do not replace the key merely
-   because the response was lost.
+   original key and details. Background work can continue the saved payment
+   even when no transaction ID was returned to you; do not replace the key
+   merely because the response was lost.
 4. `ths faucet <ADDRESS>` calls `POST /api/v1/faucet/address` with a
    journaled idempotency key. A recognized user account appears in activity;
    an external destination has a separate stored faucet record. Read either
-   through `GET /api/v1/faucet/address?idempotency_key=<key>` before replaying
-   the original request. The lookup is read-only; a stored external faucet
-   does not appear in `/api/v1/activity`.
+   through `GET /api/v1/faucet/address?idempotency_key=<key>`. The lookup is
+   read-only; a stored external faucet does not appear in `/api/v1/activity`.
+   Replaying the original request returns that recorded result.
 
 The server validates key syntax and compares recorded payment intents;
 those checks are useful, but their boundary matters. Never reuse a key for
