@@ -52,6 +52,9 @@ function accountLabel(accounts: number[] | undefined, account: number | null): s
 function recipientLabel(activity: Activity): string {
   const accounts = accountLabel(activity.to_accounts, activity.to_account);
   if (accounts) return accounts;
+  // A batch to several external addresses has no single `to_address`.
+  const addresses = activity.recipient_addresses?.length ?? 0;
+  if (activity.to_address === null && addresses > 1) return `${addresses} recipients`;
   return shortHash(activity.to_address ?? '', 14, 6);
 }
 

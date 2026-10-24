@@ -2,7 +2,10 @@ use super::error::{ApiError, ApiJson, ApiQuery, ApiResult, require_started};
 use crate::state::AppState;
 use crate::wallet::PaymentError;
 use crate::{
-    db::{Activity, AddressFaucet, Recipient, Store, USER_ACCOUNT_COUNT, ZATOSHIS_PER_ZEC},
+    db::{
+        Activity, ActivityOutput, AddressFaucet, Recipient, Store, USER_ACCOUNT_COUNT,
+        ZATOSHIS_PER_ZEC,
+    },
     mining::validate_idempotency_key,
     network::regtest_network,
     wallet::SendQuote,
@@ -21,24 +24,47 @@ use zcash_protocol::{
 };
 use zip321::{Payment, TransactionRequest};
 #[derive(Deserialize)]
-/// Exactly one of `to_account` or `to_address` names the destination.
+/// Exactly one of `to_account` or `to_address` names the destination, or
+/// `uri` names every recipient, amount, pool and memo instead.
 pub(crate) struct SendRequest {
     from_account: u8,
     to_account: Option<u8>,
     to_address: Option<String>,
     source_pool: String,
-    destination_pool: String,
-    amount_zatoshi: u64,
+    destination_pool: Option<String>,
+    amount_zatoshi: Option<u64>,
     idempotency_key: String,
     #[serde(default)]
     memo: Option<String>,
+    #[serde(default)]
+    uri: Option<String>,
 }
+
+impl SendRequest {
+    /// The fields a send without a `uri` must name. They are optional in the
+    /// body only so a URI send can omit them.
+    fn explicit_payment(&self) -> ApiResult<(&str, u64)> {
+        let destination_pool = self
+            .destination_pool
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("destination_pool is required"))?;
+        let amount_zatoshi = self
+            .amount_zatoshi
+            .ok_or_else(|| ApiError::bad_request("amount_zatoshi is required"))?;
+        Ok((destination_pool, amount_zatoshi))
+    }
+}
+
 pub(crate) async fn send(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<SendRequest>,
 ) -> ApiResult<PaymentResponse<Activity>> {
     require_started(&state)?;
+    if let Some(uri) = req.uri.as_deref() {
+        return send_uri(&state.0.store, &req, uri);
+    }
     let (recipient, _) = validate_send(&req)?;
+    let (destination_pool, amount_zatoshi) = req.explicit_payment()?;
     // A pasted address that belongs to a development account is recorded as
     // that account, before the claim, so a replay resolves to the same payment.
     let recipient = match recipient {
@@ -50,8 +76,7 @@ pub(crate) async fn send(
             recipient
         }
     };
-    if recipient == Recipient::Account(req.from_account) && req.source_pool == req.destination_pool
-    {
+    if recipient == Recipient::Account(req.from_account) && req.source_pool == destination_pool {
         return Err(ApiError::bad_request(
             "choose a different account or a different destination pool",
         ));
@@ -60,11 +85,58 @@ pub(crate) async fn send(
         req.from_account,
         recipient,
         &req.source_pool,
-        &req.destination_pool,
-        req.amount_zatoshi,
+        destination_pool,
+        amount_zatoshi,
         &req.idempotency_key,
         req.memo.as_deref(),
     )?;
+    let status = pending.status.clone();
+    payment_response(&status, pending, "/api/v1/activity", &req.idempotency_key)
+}
+
+/// Pays every payment in a ZIP-321 URI. A single payment is claimed as an
+/// ordinary send, so it replays exactly like the same send made by field.
+fn send_uri(store: &Store, req: &SendRequest, uri: &str) -> ApiResult<PaymentResponse<Activity>> {
+    require_key(&req.idempotency_key)?;
+    require_user_account(req.from_account)?;
+    require_pool(&req.source_pool, "source_pool")?;
+    if req.to_account.is_some()
+        || req.to_address.is_some()
+        || req.destination_pool.is_some()
+        || req.amount_zatoshi.is_some()
+        || req.memo.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "uri sets the recipients; omit to_account, to_address, destination_pool, amount_zatoshi and memo",
+        ));
+    }
+    let outputs = send_uri_outputs(store, req.from_account, &req.source_pool, uri)?;
+    let pending = match outputs.as_slice() {
+        [output] => {
+            let recipient = match (output.to_account, output.to_address.as_deref()) {
+                (Some(id), _) => Recipient::Account(id),
+                (None, Some(address)) => Recipient::Address(address),
+                (None, None) => {
+                    return Err(anyhow::anyhow!("payment URI output has no recipient").into());
+                }
+            };
+            store.claim_transfer(
+                req.from_account,
+                recipient,
+                &req.source_pool,
+                &output.destination_pool,
+                output.amount_zatoshi,
+                &req.idempotency_key,
+                output.memo.as_deref(),
+            )?
+        }
+        _ => store.claim_batch_transfer(
+            req.from_account,
+            &req.source_pool,
+            &outputs,
+            &req.idempotency_key,
+        )?,
+    };
     let status = pending.status.clone();
     payment_response(&status, pending, "/api/v1/activity", &req.idempotency_key)
 }
@@ -93,16 +165,80 @@ pub(crate) async fn parse_payment_uri(
 }
 
 fn payment_uri(store: &Store, uri: &str) -> ApiResult<PaymentUri> {
-    let request = TransactionRequest::from_uri(uri.trim()).map_err(|error| {
-        tracing::debug!(%error, "rejected ZIP-321 URI");
-        ApiError::bad_request("Invalid payment URI")
-    })?;
+    let request = parse_transaction_request(uri)?;
     let mut payments = request.payments().values();
     let (Some(payment), None) = (payments.next(), payments.next()) else {
         return Err(ApiError::bad_request(
             "only single-payment URIs are supported",
         ));
     };
+    resolve_uri_payment(store, payment)
+}
+
+/// Resolves every payment of a ZIP-321 URI into validated send outputs. Any
+/// invalid payment rejects the whole request, so nothing is claimed for it.
+/// Outputs are sorted so a replay compares payments, not URI parameter order.
+fn send_uri_outputs(
+    store: &Store,
+    from_account: u8,
+    source_pool: &str,
+    uri: &str,
+) -> ApiResult<Vec<ActivityOutput>> {
+    let request = parse_transaction_request(uri)?;
+    // zip321 parses `zcash:` and `zcash:?` as a request with no payments.
+    if request.payments().is_empty() {
+        return Err(ApiError::bad_request(
+            "Payment URI must contain at least one recipient",
+        ));
+    }
+    let mut total = 0u64;
+    let mut outputs = request
+        .payments()
+        .values()
+        .map(|payment| {
+            let payment = resolve_uri_payment(store, payment)?;
+            // A Send form can supply one missing amount; a batch has no single
+            // field that could fill several, so each payment must set its own.
+            let amount_zatoshi = payment.amount_zatoshi.ok_or_else(|| {
+                ApiError::bad_request("every payment in the URI must set an amount")
+            })?;
+            require_non_dust_amount(amount_zatoshi, payment.destination_pool == "transparent")?;
+            parse_memo(payment.memo.as_deref(), payment.destination_pool)?;
+            if payment.to_account == Some(from_account) && payment.destination_pool == source_pool {
+                return Err(ApiError::bad_request(
+                    "choose a different account or a different destination pool",
+                ));
+            }
+            total = total
+                .checked_add(amount_zatoshi)
+                .filter(|total| *total <= MAX_MONEY)
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "the total amount must not exceed {} ZEC",
+                        MAX_MONEY / ZATOSHIS_PER_ZEC
+                    ))
+                })?;
+            Ok(ActivityOutput {
+                to_address: payment.to_account.is_none().then_some(payment.address),
+                to_account: payment.to_account,
+                destination_pool: payment.destination_pool.to_owned(),
+                amount_zatoshi,
+                memo: payment.memo,
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    outputs.sort();
+    Ok(outputs)
+}
+
+fn parse_transaction_request(uri: &str) -> ApiResult<TransactionRequest> {
+    TransactionRequest::from_uri(uri.trim()).map_err(|error| {
+        tracing::debug!(%error, "rejected ZIP-321 URI");
+        ApiError::bad_request("Invalid payment URI")
+    })
+}
+
+fn resolve_uri_payment(store: &Store, payment: &Payment) -> ApiResult<PaymentUri> {
     let address = payment.recipient_address().encode();
     let destination_pool = require_send_address(&address)?;
     let memo = match payment.memo().map(Memo::try_from).transpose() {
@@ -477,14 +613,16 @@ fn require_pool(pool: &str, field: &str) -> ApiResult<()> {
 /// Checks the whole send request without touching the store, wallet or node,
 /// and returns the encoded memo it carries.
 fn validate_send(req: &SendRequest) -> ApiResult<(Recipient<'_>, Option<MemoBytes>)> {
+    // Checked first, as a missing required body field is reported before any other error.
+    let (destination_pool, amount_zatoshi) = req.explicit_payment()?;
     require_key(&req.idempotency_key)?;
     require_user_account(req.from_account)?;
     require_pool(&req.source_pool, "source_pool")?;
-    require_pool(&req.destination_pool, "destination_pool")?;
+    require_pool(destination_pool, "destination_pool")?;
     let recipient = match (req.to_account, req.to_address.as_deref()) {
         (Some(to_account), None) => {
             require_user_account(to_account)?;
-            if req.from_account == to_account && req.source_pool == req.destination_pool {
+            if req.from_account == to_account && req.source_pool == destination_pool {
                 return Err(ApiError::bad_request(
                     "choose a different account or a different destination pool",
                 ));
@@ -492,7 +630,7 @@ fn validate_send(req: &SendRequest) -> ApiResult<(Recipient<'_>, Option<MemoByte
             Recipient::Account(to_account)
         }
         (None, Some(address)) => {
-            if require_send_address(address)? != req.destination_pool {
+            if require_send_address(address)? != destination_pool {
                 return Err(ApiError::bad_request(
                     "destination_pool does not match the destination address",
                 ));
@@ -505,13 +643,13 @@ fn validate_send(req: &SendRequest) -> ApiResult<(Recipient<'_>, Option<MemoByte
             ));
         }
     };
-    if req.amount_zatoshi == 0 || req.amount_zatoshi > MAX_MONEY {
+    if amount_zatoshi == 0 || amount_zatoshi > MAX_MONEY {
         return Err(ApiError::bad_request(format!(
             "amount_zatoshi must be between 1 and {MAX_MONEY}"
         )));
     }
-    require_non_dust_amount(req.amount_zatoshi, req.destination_pool == "transparent")?;
-    let memo = parse_memo(req.memo.as_deref(), &req.destination_pool)?;
+    require_non_dust_amount(amount_zatoshi, destination_pool == "transparent")?;
+    let memo = parse_memo(req.memo.as_deref(), destination_pool)?;
     Ok((recipient, memo))
 }
 

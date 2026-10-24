@@ -19,6 +19,7 @@ use crate::state::AppState;
 use crate::state::notify;
 use crate::wallet::PaymentError;
 use crate::wallet::PreparedPayment;
+use crate::wallet::SendPayment;
 use anyhow::Context;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -490,34 +491,44 @@ pub(crate) async fn prepare_activity_intent(
             let account_id = activity
                 .from_account
                 .context("send omitted source account")?;
-            let destination = if let Some(address) = &activity.to_address {
-                address.clone()
+            // A batch reloads every saved output, so a retry or a restart pays
+            // exactly the recipients that were claimed, in one transaction.
+            let outputs = state.0.store.activity_outputs(&activity.id)?;
+            let payments = if outputs.is_empty() {
+                vec![send_payment(
+                    &state.0.store,
+                    activity.to_account,
+                    activity.to_address.as_deref(),
+                    &activity.destination_pool,
+                    activity.amount_zatoshi,
+                    intent.memo.as_deref(),
+                )?]
             } else {
-                let account = state
-                    .0
-                    .store
-                    .account(activity.to_account.context("send omitted destination")?)?;
-                match activity.destination_pool.as_str() {
-                    "transparent" => account.transparent_address,
-                    "ironwood" => account.unified_address,
-                    pool => anyhow::bail!("send has unsupported destination pool {pool}"),
-                }
+                outputs
+                    .iter()
+                    .map(|output| {
+                        send_payment(
+                            &state.0.store,
+                            output.to_account,
+                            output.to_address.as_deref(),
+                            &output.destination_pool,
+                            output.amount_zatoshi,
+                            output.memo.as_deref(),
+                        )
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?
             };
-            let memo = parse_payment_memo(intent.memo.as_deref(), &activity.destination_pool)
-                .map_err(|error| anyhow::anyhow!(error))?;
             attempt.check_can_start()?;
             state
                 .0
                 .wallet
-                .prepare(
+                .prepare_payments(
                     Some(&activity.id),
                     replacement_txid,
                     &seed,
                     account_id,
                     &activity.source_pool,
-                    &destination,
-                    activity.amount_zatoshi,
-                    memo,
+                    payments,
                     record,
                 )
                 .await
@@ -549,6 +560,33 @@ pub(crate) async fn prepare_activity_intent(
         }
         kind => anyhow::bail!("unsupported accepted payment kind {kind}"),
     }
+}
+
+fn send_payment(
+    store: &Store,
+    to_account: Option<u8>,
+    to_address: Option<&str>,
+    destination_pool: &str,
+    amount_zatoshi: u64,
+    memo: Option<&str>,
+) -> anyhow::Result<SendPayment> {
+    let destination = if let Some(address) = to_address {
+        address.to_owned()
+    } else {
+        let account = store.account(to_account.context("send omitted destination")?)?;
+        match destination_pool {
+            "transparent" => account.transparent_address,
+            "ironwood" => account.unified_address,
+            pool => anyhow::bail!("send has unsupported destination pool {pool}"),
+        }
+    };
+    let memo =
+        parse_payment_memo(memo, destination_pool).map_err(|error| anyhow::anyhow!(error))?;
+    Ok(SendPayment {
+        destination,
+        amount_zatoshi,
+        memo,
+    })
 }
 
 pub(crate) async fn progress_address_faucet(

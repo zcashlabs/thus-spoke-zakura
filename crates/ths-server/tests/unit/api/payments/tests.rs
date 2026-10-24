@@ -1145,6 +1145,255 @@ fn payment_uri_rejects_unsupported_requests() {
     }
 }
 
+fn output(
+    to_account: Option<u8>,
+    to_address: Option<&str>,
+    destination_pool: &str,
+    amount_zatoshi: u64,
+    memo: Option<&str>,
+) -> ActivityOutput {
+    ActivityOutput {
+        to_account,
+        to_address: to_address.map(str::to_owned),
+        destination_pool: destination_pool.to_owned(),
+        amount_zatoshi,
+        memo: memo.map(str::to_owned),
+    }
+}
+
+#[test]
+fn send_uri_outputs_resolves_every_payment() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let ua = store.account(2).unwrap().unified_address;
+    let taddr = store.account(3).unwrap().transparent_address;
+    let external = foreign_unified_address(&regtest_network());
+    let uri = format!(
+        "zcash:?address={ua}&amount=0.1&memo={}&address.1={taddr}&amount.1=0.2&address.2={external}&amount.2=0.3",
+        text_memo_param("payroll")
+    );
+
+    let outputs = send_uri_outputs(&store, 1, "ironwood", &uri).unwrap();
+    let mut expected = vec![
+        output(Some(2), None, "ironwood", 10_000_000, Some("payroll")),
+        output(Some(3), None, "transparent", 20_000_000, None),
+        output(None, Some(&external), "ironwood", 30_000_000, None),
+    ];
+    expected.sort();
+    assert_eq!(outputs, expected);
+}
+
+#[test]
+fn send_uri_outputs_ignore_payment_order() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let ua = store.account(2).unwrap().unified_address;
+    let taddr = store.account(3).unwrap().transparent_address;
+    let forward = format!("zcash:?address={ua}&amount=0.1&address.1={taddr}&amount.1=0.2");
+    let reversed = format!("zcash:?amount.1=0.1&address.1={ua}&address={taddr}&amount=0.2");
+
+    assert_eq!(
+        send_uri_outputs(&store, 1, "ironwood", &forward).unwrap(),
+        send_uri_outputs(&store, 1, "ironwood", &reversed).unwrap()
+    );
+}
+
+#[test]
+fn send_uri_outputs_allow_the_source_account_in_another_pool() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let own = store.account(1).unwrap().transparent_address;
+    let other = store.account(2).unwrap().unified_address;
+    let uri = format!("zcash:?address={own}&amount=0.1&address.1={other}&amount.1=0.2");
+
+    let outputs = send_uri_outputs(&store, 1, "ironwood", &uri).unwrap();
+    assert!(outputs.contains(&output(Some(1), None, "transparent", 10_000_000, None)));
+}
+
+#[test]
+fn send_uri_outputs_reject_the_whole_request_for_any_invalid_payment() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let ua = store.account(2).unwrap().unified_address;
+    let own_ua = store.account(1).unwrap().unified_address;
+    let taddr = store.account(3).unwrap().transparent_address;
+    let testnet = foreign_unified_address(&zcash_protocol::consensus::TestNetwork);
+    let max_zec = MAX_MONEY / ZATOSHIS_PER_ZEC;
+    let first = format!("address={ua}&amount=0.1");
+    let cases = [
+        (
+            format!("zcash:?{first}&address.1={taddr}"),
+            Some("every payment in the URI must set an amount"),
+        ),
+        (
+            // zip321 itself rejects a zero transparent amount, so pay zero to a UA.
+            format!("zcash:?address={taddr}&amount=0.2&address.1={ua}&amount.1=0"),
+            Some("amount must be greater than zero"),
+        ),
+        (
+            format!("zcash:?{first}&address.1={taddr}&amount.1=0.0000005"),
+            Some("transparent outputs must be at least 54 zatoshi"),
+        ),
+        (
+            format!("zcash:?{first}&address.1={own_ua}&amount.1=0.2"),
+            Some("choose a different account or a different destination pool"),
+        ),
+        (
+            format!("zcash:?address={ua}&amount={max_zec}&address.1={taddr}&amount.1={max_zec}"),
+            Some("the total amount must not exceed 21000000 ZEC"),
+        ),
+        (
+            format!("zcash:?{first}&address.1={testnet}&amount.1=0.2"),
+            None,
+        ),
+        ("not a uri".to_owned(), Some("Invalid payment URI")),
+        (
+            "zcash:".to_owned(),
+            Some("Payment URI must contain at least one recipient"),
+        ),
+        (
+            "zcash:?".to_owned(),
+            Some("Payment URI must contain at least one recipient"),
+        ),
+    ];
+    for (uri, message) in cases {
+        let error = send_uri_outputs(&store, 1, "ironwood", &uri).expect_err(&uri);
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{uri}");
+        if let Some(message) = message {
+            assert_eq!(error.message, message, "{uri}");
+        }
+    }
+}
+
+fn uri_send(uri: &str) -> Value {
+    json!({
+        "from_account": 1,
+        "source_pool": "ironwood",
+        "uri": uri,
+        "idempotency_key": REPLAY_KEY,
+    })
+}
+
+#[tokio::test]
+async fn send_claims_a_multi_recipient_uri_as_one_payment() {
+    let (state, _dir) = offline_state();
+    let ua = state.0.store.account(2).unwrap().unified_address;
+    let taddr = state.0.store.account(3).unwrap().transparent_address;
+    let memo = text_memo_param("payroll");
+    let uri = format!("zcash:?address={ua}&amount=0.1&memo={memo}&address.1={taddr}&amount.1=0.2");
+
+    let (status, body) = post_send(&state, &uri_send(&uri)).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["kind"], "send");
+    assert_eq!(body["status"], "preparing");
+    assert_eq!(body["amount_zatoshi"], 30_000_000);
+    assert_eq!(body["to_account"], Value::Null);
+    assert_eq!(body["to_address"], Value::Null);
+    assert_eq!(body["destination_pool"], Value::Null);
+    assert_eq!(
+        body["outputs"],
+        json!([
+            {"to_account": 2, "to_address": null, "destination_pool": "ironwood", "amount_zatoshi": 10_000_000, "memo": "payroll"},
+            {"to_account": 3, "to_address": null, "destination_pool": "transparent", "amount_zatoshi": 20_000_000, "memo": null},
+        ])
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_eq!(state.0.store.activity_outputs(&id).unwrap().len(), 2);
+
+    let reordered =
+        format!("zcash:?address={taddr}&amount=0.2&address.1={ua}&amount.1=0.1&memo.1={memo}");
+    for replay in [uri.clone(), reordered] {
+        let (status, body) = post_send(&state, &uri_send(&replay)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["id"], id.as_str());
+    }
+    let changed =
+        format!("zcash:?address={ua}&amount=0.1&memo={memo}&address.1={taddr}&amount.1=0.3");
+    let (status, body) = post_send(&state, &uri_send(&changed)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(activity_ids(&state), [id]);
+}
+
+#[tokio::test]
+async fn single_payment_uri_send_is_an_ordinary_send() {
+    let (state, _dir) = offline_state();
+    let ua = state.0.store.account(2).unwrap().unified_address;
+    let uri = format!("zcash:{ua}?amount=0.1&memo={}", text_memo_param("rent"));
+
+    let (status, body) = post_send(&state, &uri_send(&uri)).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["to_account"], 2);
+    assert_eq!(body["destination_pool"], "ironwood");
+    assert_eq!(body["amount_zatoshi"], 10_000_000);
+    assert!(body.get("outputs").is_none(), "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert!(state.0.store.activity_outputs(&id).unwrap().is_empty());
+
+    let mut explicit = valid_send();
+    explicit["amount_zatoshi"] = json!(10_000_000);
+    explicit["memo"] = json!("rent");
+    let (status, body) = post_send(&state, &explicit).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["id"], id.as_str());
+}
+
+#[tokio::test]
+async fn uri_send_rejects_mixed_fields_and_invalid_payments_without_claiming() {
+    let (state, _dir) = offline_state();
+    let ua = state.0.store.account(2).unwrap().unified_address;
+    let taddr = state.0.store.account(3).unwrap().transparent_address;
+    let uri = format!("zcash:?address={ua}&amount=0.1&address.1={taddr}&amount.1=0.2");
+    let with = |field: &str, value: Value| {
+        let mut body = uri_send(&uri);
+        body[field] = value;
+        body
+    };
+    let cases = [
+        ("to_account", with("to_account", json!(2))),
+        ("to_address", with("to_address", json!(taddr))),
+        (
+            "destination_pool",
+            with("destination_pool", json!("ironwood")),
+        ),
+        ("amount_zatoshi", with("amount_zatoshi", json!(100_000))),
+        ("memo", with("memo", json!("hi"))),
+        ("source account", with("from_account", json!(0))),
+        ("source pool", with("source_pool", json!("sapling"))),
+        ("short key", with("idempotency_key", json!("short"))),
+        (
+            "missing amount",
+            with(
+                "uri",
+                json!(format!("zcash:?address={ua}&amount=0.1&address.1={taddr}")),
+            ),
+        ),
+        ("invalid uri", with("uri", json!("not a uri"))),
+    ];
+    for (name, body) in cases {
+        let (status, response) = post_send(&state, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {response}");
+    }
+    for empty in ["zcash:", "zcash:?"] {
+        let (status, response) = post_send(&state, &with("uri", json!(empty))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{empty}: {response}");
+        assert_eq!(
+            response["error"]["message"], "Payment URI must contain at least one recipient",
+            "{empty}"
+        );
+    }
+    assert!(activity_ids(&state).is_empty());
+
+    for field in ["amount_zatoshi", "destination_pool"] {
+        let mut body = valid_send();
+        body.as_object_mut().unwrap().remove(field);
+        let (status, response) = post_send(&state, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["error"]["message"], format!("{field} is required"));
+    }
+}
+
 #[test]
 fn send_addresses_map_to_their_pool() {
     let store = Store::open(":memory:").unwrap();

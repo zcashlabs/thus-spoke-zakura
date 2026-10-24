@@ -288,7 +288,8 @@ pub(crate) struct SendArgs {
     )]
     pub(crate) to_address: Option<String>,
     /// ZIP-321 payment URI to pay instead of --to. It sets the destination,
-    /// pool, and memo, and the amount unless it omits one.
+    /// pool, and memo, and the amount unless it omits one. A multi-recipient URI
+    /// pays every recipient in one transaction and must set each amount.
     #[arg(long, conflicts_with_all = ["destination_pool", "memo"])]
     pub(crate) uri: Option<String>,
     /// Amount of ZEC to send, up to 8 decimal places. With --uri, only for a

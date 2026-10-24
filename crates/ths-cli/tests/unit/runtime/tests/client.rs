@@ -2328,3 +2328,118 @@ fn address_send_submits_the_address_and_its_pool() {
         "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ"
     );
 }
+
+const BATCH_URI: &str = "zcash:?address=uregtest1a&amount=0.1&address.1=tmB&amount.1=0.2";
+const CONFIRMED_BATCH: &str = r#"{"id":"batch-send","kind":"send","from_account":1,"to_account":null,"to_address":null,"source_pool":"ironwood","destination_pool":null,"amount_zatoshi":30000000,"txid":"batch-txid","block_hash":"block","status":"confirmed","last_error":null,"outputs":[{"to_account":2,"to_address":null,"destination_pool":"ironwood","amount_zatoshi":10000000,"memo":"payroll"},{"to_account":null,"to_address":"tmB","destination_pool":"transparent","amount_zatoshi":20000000,"memo":null}]}"#;
+
+#[test]
+fn multi_recipient_uris_are_sent_whole_without_parsing() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![("200 OK", CONFIRMED_BATCH)]);
+
+    runtime
+        .wallet_send_uri_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            1,
+            "ironwood",
+            BATCH_URI,
+            None,
+            true,
+        )
+        .unwrap();
+
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].0.starts_with("POST /api/v1/send "),
+        "{}",
+        requests[0].0
+    );
+    let body: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+    assert_eq!(body["from_account"], 1);
+    assert_eq!(body["source_pool"], "ironwood");
+    assert_eq!(body["uri"], BATCH_URI);
+    assert!(body["idempotency_key"].is_string());
+    for field in [
+        "to_account",
+        "to_address",
+        "destination_pool",
+        "amount_zatoshi",
+        "memo",
+    ] {
+        assert!(body.get(field).is_none(), "{field}: {body}");
+    }
+}
+
+#[test]
+fn multi_recipient_uris_reject_amount_and_max_before_any_request() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    for amount in [TransferAmount::Exact(1), TransferAmount::Max] {
+        let (url, requests) = serve(Vec::<(&str, &str)>::new());
+        let error = runtime
+            .wallet_send_uri_with(
+                &alpha,
+                &url,
+                &reqwest::blocking::Client::new(),
+                1,
+                "ironwood",
+                BATCH_URI,
+                Some(amount),
+                false,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--amount and --max apply only to a single-payment URI; each payment in this URI sets its own amount"
+        );
+        assert_eq!(requests.try_iter().count(), 0);
+    }
+}
+
+#[test]
+fn batch_send_output_lists_every_recipient() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, _requests) = serve(vec![("200 OK", CONFIRMED_BATCH)]);
+    let mut out = Vec::new();
+
+    runtime
+        .submit_send(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            serde_json::json!({"from_account": 1, "source_pool": "ironwood", "uri": BATCH_URI}),
+            None,
+            false,
+        )
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "Sent 0.3 ZEC from account 1 (ironwood pool) to 2 recipients on alpha.\n\
+         \x20 0.1 ZEC to account 2 (ironwood pool). Memo: payroll\n\
+         \x20 0.2 ZEC to tmB (transparent pool)\n\
+         Transaction: batch-txid\n\
+         Confirmed in: block\n"
+    );
+}
+
+#[test]
+fn indexed_address_parameters_mark_a_multi_payment_uri() {
+    for (uri, multi) in [
+        ("zcash:uregtest1a?amount=1", false),
+        ("zcash:?address=uregtest1a&amount=1", false),
+        ("zcash:?address=a&amount=1&address.1=b&amount.1=2", true),
+        ("zcash:?amount.2=2&address.2=b&address=a", true),
+        ("zcash:?address=a&memo.1=bWVtbw", false),
+        ("zcash:?address.0=a", false),
+        ("zcash:?address.=a", false),
+        ("zcash:address.1", false),
+    ] {
+        assert_eq!(is_multi_payment_uri(uri), multi, "{uri}");
+    }
+}

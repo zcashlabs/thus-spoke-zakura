@@ -658,3 +658,74 @@ fn transparent_quote_max_is_sendable_when_utxos_exceed_the_input_cap() {
     propose(quote.max_zatoshi).unwrap();
     assert!(propose(quote.max_zatoshi + 1).is_err());
 }
+
+#[test]
+fn batch_proposal_pays_every_recipient_in_one_transaction() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 10_000_000);
+    let account_id = st.test_account().unwrap().id();
+    let params = *st.network();
+    let payments = vec![
+        (
+            recipient(&st, "ironwood"),
+            Zatoshis::const_from_u64(1_000_000),
+            Some(MemoBytes::from_bytes(b"payroll").unwrap()),
+        ),
+        (
+            recipient(&st, "transparent"),
+            Zatoshis::const_from_u64(2_000_000),
+            None,
+        ),
+    ];
+
+    let proposal =
+        RealWallet::propose_payments(st.wallet_mut(), &params, account_id, "ironwood", payments)
+            .unwrap();
+
+    assert_eq!(proposal.steps().len(), 1);
+    let request = proposal.steps().first().transaction_request();
+    let amounts: Vec<_> = request
+        .payments()
+        .values()
+        .map(|payment| payment.amount().map(u64::from))
+        .collect();
+    assert_eq!(amounts, [Some(1_000_000), Some(2_000_000)]);
+}
+
+#[test]
+fn batch_proposal_needs_funds_for_every_recipient() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 2_000_000);
+    let account_id = st.test_account().unwrap().id();
+    let params = *st.network();
+    let payment = |pool| {
+        (
+            recipient(&st, pool),
+            Zatoshis::const_from_u64(1_000_000),
+            None,
+        )
+    };
+    let payments = vec![payment("ironwood"), payment("transparent")];
+
+    RealWallet::propose_payments(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "ironwood",
+        vec![payments[0].clone()],
+    )
+    .expect("one payment fits the balance");
+    let error =
+        RealWallet::propose_payments(st.wallet_mut(), &params, account_id, "ironwood", payments)
+            .expect_err("both payments and the fee exceed the balance");
+    assert!(
+        matches!(
+            error.downcast_ref(),
+            Some(PaymentError::InsufficientFunds {
+                available: 2_000_000,
+                ..
+            })
+        ),
+        "{error:#}"
+    );
+}

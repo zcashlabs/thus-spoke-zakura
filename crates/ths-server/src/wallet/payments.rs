@@ -70,6 +70,14 @@ const MAX_TRANSPARENT_INPUTS: usize = zcash_protocol::constants::MAX_BLOCK_BYTES
     / 100
     / zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_INPUT_SIZE;
 
+/// One recipient of a prepared send.
+#[derive(Debug, Clone)]
+pub struct SendPayment {
+    pub destination: String,
+    pub amount_zatoshi: u64,
+    pub memo: Option<MemoBytes>,
+}
+
 impl RealWallet {
     /// Builds the proposal a send would use, without signing or broadcasting.
     fn propose_send<DbT>(
@@ -84,6 +92,26 @@ impl RealWallet {
     where
         DbT: ProposalDb,
     {
+        Self::propose_payments(
+            db,
+            params,
+            account_id,
+            source_pool,
+            vec![(recipient.clone(), amount, memo)],
+        )
+    }
+
+    /// Builds one proposal that pays every recipient in a single transaction.
+    fn propose_payments<DbT>(
+        db: &mut DbT,
+        params: &LocalNetwork,
+        account_id: <DbT as InputSource>::AccountId,
+        source_pool: &str,
+        payments: Vec<(Address, Zatoshis, Option<MemoBytes>)>,
+    ) -> Result<Proposal<StandardFeeRule, <DbT as InputSource>::NoteRef>>
+    where
+        DbT: ProposalDb,
+    {
         let policy = match source_pool {
             "transparent" => SpendPolicy::shielded_pools([])
                 .with_transparent(TransparentSpendPolicy::any_account_addr()),
@@ -92,14 +120,21 @@ impl RealWallet {
             "ironwood" => SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
             _ => bail!("source pool must be transparent or ironwood"),
         };
-        let request = TransactionRequest::new(vec![Payment::new(
-            recipient.to_zcash_address(params),
-            Some(amount),
-            memo,
-            None,
-            None,
-            vec![],
-        )?])?;
+        let request = TransactionRequest::new(
+            payments
+                .into_iter()
+                .map(|(recipient, amount, memo)| {
+                    Payment::new(
+                        recipient.to_zcash_address(params),
+                        Some(amount),
+                        memo,
+                        None,
+                        None,
+                        vec![],
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
         let selector = GreedyInputSelector::<DbT>::new()
             .with_shielding_block_space_percent(TRANSPARENT_BLOCK_SPACE_PERCENT);
         let change = SingleOutputChangeStrategy::<DbT>::new(
@@ -139,16 +174,23 @@ impl RealWallet {
         from_account: u8,
         destination: &str,
     ) -> Result<(u8, AccountUuid, LocalNetwork, Address)> {
+        let (account_index, account_id, params) = Self::source_account(account_ids, from_account)?;
+        let recipient =
+            Address::decode(&params, destination).context("invalid destination address")?;
+        Ok((account_index, account_id, params, recipient))
+    }
+
+    fn source_account(
+        account_ids: &[AccountUuid],
+        from_account: u8,
+    ) -> Result<(u8, AccountUuid, LocalNetwork)> {
         let account_index = from_account
             .checked_sub(1)
             .context("invalid source account")?;
         let account_id = *account_ids
             .get(account_index as usize)
             .context("source account does not exist")?;
-        let params = regtest_network();
-        let recipient =
-            Address::decode(&params, destination).context("invalid destination address")?;
-        Ok((account_index, account_id, params, recipient))
+        Ok((account_index, account_id, regtest_network()))
     }
 
     pub(super) fn serialize_transaction(
@@ -212,11 +254,43 @@ impl RealWallet {
         T: Send + 'static,
         F: FnOnce(PreparedPayment) -> Result<T> + Send + 'static,
     {
+        self.prepare_payments(
+            activity_id,
+            replacement_txid,
+            seed_hex,
+            from_account,
+            source_pool,
+            vec![SendPayment {
+                destination: destination.to_owned(),
+                amount_zatoshi: amount,
+                memo,
+            }],
+            record,
+        )
+        .await
+    }
+
+    /// Prepares one transaction that pays every recipient. A journal entry for
+    /// `activity_id` covers the whole transaction, as it does for one recipient.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_payments<T, F>(
+        &self,
+        activity_id: Option<&str>,
+        replacement_txid: Option<&str>,
+        seed_hex: &str,
+        from_account: u8,
+        source_pool: &str,
+        payments: Vec<SendPayment>,
+        record: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(PreparedPayment) -> Result<T> + Send + 'static,
+    {
         let activity_id = activity_id.map(str::to_owned);
         let replacement_txid = replacement_txid.map(str::to_owned);
         let seed_hex = seed_hex.to_owned();
         let source_pool = source_pool.to_owned();
-        let destination = destination.to_owned();
         let account_ids = self.account_ids.clone();
         self.with_db(move |db| {
             let prepared = Self::prepare_in(
@@ -227,9 +301,7 @@ impl RealWallet {
                 &seed_hex,
                 from_account,
                 &source_pool,
-                &destination,
-                amount,
-                memo,
+                payments,
             )?;
             record(prepared)
         })
@@ -245,9 +317,7 @@ impl RealWallet {
         seed_hex: &str,
         from_account: u8,
         source_pool: &str,
-        destination: &str,
-        amount: u64,
-        memo: Option<MemoBytes>,
+        payments: Vec<SendPayment>,
     ) -> Result<PreparedPayment> {
         let journal = activity_id
             .map(|id| prepared_payment(db, id))
@@ -263,21 +333,24 @@ impl RealWallet {
                 "replacement authorization has no journal"
             );
         }
-        let (account_index, account_id, params, recipient) =
-            Self::send_input(account_ids, from_account, destination)?;
-        if memo.is_some() && matches!(recipient, Address::Transparent(_) | Address::Tex(_)) {
-            return Err(PaymentError::TransparentMemo.into());
-        }
-        let amount = Zatoshis::from_u64(amount).map_err(|_| anyhow::anyhow!("invalid amount"))?;
-        let proposal = Self::propose_send(
-            &mut *db,
-            &params,
-            account_id,
-            source_pool,
-            &recipient,
-            amount,
-            memo,
-        )?;
+        let (account_index, account_id, params) = Self::source_account(account_ids, from_account)?;
+        let payments = payments
+            .into_iter()
+            .map(|payment| {
+                let recipient = Address::decode(&params, &payment.destination)
+                    .context("invalid destination address")?;
+                if payment.memo.is_some()
+                    && matches!(recipient, Address::Transparent(_) | Address::Tex(_))
+                {
+                    return Err(PaymentError::TransparentMemo.into());
+                }
+                let amount = Zatoshis::from_u64(payment.amount_zatoshi)
+                    .map_err(|_| anyhow::anyhow!("invalid amount"))?;
+                Ok((recipient, amount, payment.memo))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let proposal =
+            Self::propose_payments(&mut *db, &params, account_id, source_pool, payments)?;
         let seed = hex::decode(seed_hex)?;
         let usk = UnifiedSpendingKey::from_seed(
             &params,

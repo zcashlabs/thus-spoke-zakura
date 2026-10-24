@@ -712,18 +712,31 @@ see the [caller table](architecture/operations.md#which-caller-are-you-retrying)
 
 ### `ths wallet send --from <N> --uri <URI> [--amount <ZEC> | --max] [--source-pool <POOL>]`
 
-Pays a single-payment ZIP-321 `zcash:` URI, like the **Payment request** field
-in the dashboard's **Send ZEC** dialog. The URI sets the destination (any
-Regtest unified or transparent address), its pool, and any memo, so `--to`,
+Pays a ZIP-321 `zcash:` URI. The URI sets each destination (any Regtest unified
+or transparent address), its pool, and any memo, so `--to`,
 `--destination-pool`, and `--memo` can't be combined with `--uri`. The server
-parses the URI (`POST /api/v1/zip321/parse`), so the CLI and the dashboard
-accept exactly the same URIs: one payment to a supported Regtest address,
-with a text memo only for Ironwood. Multipayment, wrong-network, unsupported
-receiver, and nontext-memo requests are rejected.
+parses the URI, so the CLI and the API accept exactly the same URIs: payments
+to supported Regtest addresses, with a text memo only for Ironwood.
+Wrong-network, unsupported receiver, and nontext-memo requests are rejected.
+
+A single-payment URI works like the **Payment request** field in the
+dashboard's **Send ZEC** dialog (`POST /api/v1/zip321/parse`):
 
 - `--amount <ZEC>` or `--max`: required when the URI has no amount, and rejected
   when it sets one. `--max` quotes against the destination pool parsed from the
   URI.
+
+A multi-recipient URI (one with indexed parameters such as `address.1`) pays
+every recipient in **one transaction**, recorded as one payment with one
+idempotency key, txid, and status. The CLI submits the whole URI to
+`POST /api/v1/send`:
+
+- Every payment must set a positive amount, so `--amount` and `--max` are
+  rejected. Transparent outputs must be at least 54 zatoshi.
+- An invalid payment rejects the whole URI before anything is recorded; there
+  is no partial payout.
+- No payment may return to the source account in the source pool.
+- Output shows the total, then each recipient with its amount, pool, and memo.
 
 ```console
 DASHBOARD_URL="$(ths endpoints --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["dashboard"])')"
@@ -737,6 +750,9 @@ ths wallet send --from 1 --uri "zcash:tm..." --amount 0.5
 
 # Or send the maximum available after fees
 ths wallet send --from 1 --uri "zcash:tm..." --max
+
+# Pay two recipients in one transaction
+ths wallet send --from 1 --uri "zcash:?address=uregtest1...&amount=0.1&address.1=tm...&amount.1=0.2"
 ```
 
 ### `ths wallet shield --from <N> --to <N> (--amount <ZEC> | --max) [--memo <TEXT>]`
@@ -916,7 +932,7 @@ compinit
 | `ths wallet quote --from --source-pool --destination-pool [--json]` | Show an account's maximum send and fee for one pool route without sending |
 | `ths wallet faucet --accounts <LIST> [--amount] [--pool]` | Fund one or more of the five accounts by index |
 | `ths wallet send --from --to (--amount \| --max) [--source-pool] [--destination-pool] [--memo]` | Send between accounts or pools, optionally with an Ironwood memo |
-| `ths wallet send --from --uri [--amount \| --max] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest address |
+| `ths wallet send --from --uri [--amount \| --max] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest addresses, several recipients in one transaction |
 | `ths wallet shield --from --to (--amount \| --max) [--memo]` | Spend transparent funds into the same or another account's Ironwood balance |
 | `ths wallet unshield --from --to (--amount \| --max)` | Spend Ironwood funds into the same or another account's transparent balance |
 | `ths logs [service] [-f] [--tail N \| --head N]` | Stream or print service logs |

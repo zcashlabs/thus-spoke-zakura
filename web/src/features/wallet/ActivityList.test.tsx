@@ -143,6 +143,54 @@ describe('ActivityList incoming transactions', () => {
   });
 });
 
+describe('ActivityList multi-recipient batches', () => {
+  it.each([
+    ['preparing', ''],
+    ['broadcast', 'ba'.repeat(32)],
+    ['confirmed', 'bb'.repeat(32)],
+  ] as const)('labels a %s batch to several addresses by its recipient count', (status, txid) => {
+    renderWithProviders(
+      <MemoryRouter>
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'batch-external',
+                kind: 'send',
+                direction: 'outgoing',
+                from_account: 1,
+                to_account: null,
+                from_accounts: [1],
+                to_accounts: [],
+                to_address: null,
+                recipient_addresses: ['uregtest1first', 'uregtest1second'],
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 200_000_000n,
+                txid,
+                block_hash: status === 'confirmed' ? 'cd'.repeat(32) : null,
+                mined_height: status === 'confirmed' ? 121 : null,
+                status,
+                last_error: null,
+                created_at: '2026-10-02 12:00:00',
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    const transfer = screen.getByText('Account 1 → 2 recipients');
+    const row = transfer.closest('tr');
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText(status)).toBeInTheDocument();
+    expect(screen.queryByText(/Account 1 → —/)).not.toBeInTheDocument();
+  });
+});
+
 describe('ActivityList multi-pool transactions', () => {
   it('uses the known pool arrays when no singular pool is available', () => {
     const txid = 'bd'.repeat(32);
