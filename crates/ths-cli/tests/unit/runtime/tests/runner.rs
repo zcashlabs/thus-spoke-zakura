@@ -615,6 +615,35 @@ fn wait_reports_leftovers_of_a_launcher_that_exited() {
 }
 
 #[test]
+fn wait_settles_a_detached_environment_after_its_launcher_exited() {
+    let runtime = runtime_for_tests();
+    let alpha = name("alpha");
+    drop(owned_ready_environment(&runtime, &alpha));
+    fs::write(runtime.instance_dir(&alpha).join("detached"), "live").unwrap();
+
+    assert!(
+        settles_within(&runtime, &alpha, Duration::from_secs(3))
+            .unwrap()
+            .settled
+    );
+}
+
+#[test]
+fn wait_ignores_a_detached_marker_from_another_session() {
+    let runtime = runtime_for_tests();
+    let alpha = name("alpha");
+    drop(owned_ready_environment(&runtime, &alpha));
+    fs::write(runtime.instance_dir(&alpha).join("detached"), "earlier").unwrap();
+
+    let error = settles_within(&runtime, &alpha, Duration::from_secs(3)).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("has no running launcher"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn wait_does_not_settle_before_the_launcher_is_ready() {
     let runtime = runtime_for_tests();
     let alpha = name("alpha");

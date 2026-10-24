@@ -1002,3 +1002,112 @@ fn json_start_preflight_failures_keep_stdout_empty() {
         );
     }
 }
+
+fn fake_resources(fixture: &Fixture) -> usize {
+    ["container", "volume", "network"]
+        .iter()
+        .map(|kind| {
+            fs::read_dir(fixture.directory.path().join("state").join(kind))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+#[test]
+fn detached_start_exits_ready_and_stop_deletes() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args([
+            "--name",
+            &fixture.name,
+            "start",
+            "--detach",
+            "--port-offset",
+            &fixture.port_offset.to_string(),
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("is ready"), "{stdout}");
+    assert!(stdout.contains(&format!("ths --name {} stop", fixture.name)));
+    assert!(!stdout.contains("Press Ctrl+C"));
+    assert!(fake_resources(&fixture) > 0, "detach must leave resources");
+    let commands = fs::read_to_string(fixture.directory.path().join("commands")).unwrap();
+    assert!(!commands.contains("events --since"), "no deletion monitor");
+    assert!(!commands.contains("network rm"), "{commands}");
+
+    let stopped = fixture
+        .command()
+        .args(["--name", &fixture.name, "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert_eq!(fake_resources(&fixture), 0, "stop must delete everything");
+}
+
+#[test]
+fn detached_json_start_prints_one_document_and_exits() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args([
+            "--json",
+            "--name",
+            &fixture.name,
+            "start",
+            "-d",
+            "--port-offset",
+            &fixture.port_offset.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let endpoints: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        endpoints["dashboard"],
+        format!("http://127.0.0.1:{}", 32_805 + fixture.port_offset)
+    );
+    assert!(fake_resources(&fixture) > 0);
+    let stopped = fixture
+        .command()
+        .args(["--name", &fixture.name, "stop"])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success());
+    assert_eq!(fake_resources(&fixture), 0);
+}
+
+#[test]
+fn detached_start_failure_deletes_and_exits_nonzero() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .args([
+            "--name",
+            &fixture.name,
+            "start",
+            "--detach",
+            "--port-offset",
+            &fixture.port_offset.to_string(),
+        ])
+        .env("THS_TEST_FAIL_INIT", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fake_resources(&fixture), 0);
+}

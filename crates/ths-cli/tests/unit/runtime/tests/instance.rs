@@ -156,7 +156,7 @@ fn invalid_port_offset_is_rejected_before_any_deletion_or_allocation() {
     let (_sender, shutdown) = Shutdown::channel();
 
     let error = runtime_for_tests()
-        .start_with(&name("alpha"), false, false, 32740, &host, &shutdown)
+        .start_with(&name("alpha"), false, false, false, 32740, &host, &shutdown)
         .unwrap_err();
 
     assert!(error.to_string().contains("overflow"));

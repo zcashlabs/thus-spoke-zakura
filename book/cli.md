@@ -54,6 +54,22 @@ error and retains `lifecycle-recovery.json`; see [Chapter 1](getting-started.md)
 ths
 ths start --no-open      # don't open a browser tab
 ths --name alice start --port-offset 10  # start a second, independent environment
+ths --name ci start --detach             # return once ready; leave it running
+```
+
+`--detach` (`-d`) is for scripts and CI that need a chain for the length of a
+run. `start` does the same fresh setup and readiness wait, prints the same
+endpoints (`--json` prints the same document), then exits 0 and leaves the
+environment running; it implies `--no-open`. Nothing deletes a detached
+environment automatically: `ths stop` or `ths reset --force` does. A startup
+failure, or Ctrl+C before the environment is ready, still deletes it and exits
+non-zero. Environments stay ephemeral.
+
+```console
+ths --name ci start --detach --port-offset 100
+ths --name ci faucet <address> --amount 5
+ths --name ci wait
+ths --name ci stop
 ```
 
 The default loopback ports are dashboard `32805`, Zakura RPC `18232`, P2P
@@ -90,7 +106,7 @@ ths start --no-auto-mine        # mine only when you run `ths mine`
 
 Waits for an instance's node, lightwalletd index, and wallet to be settled at
 the same canonical tip, and for the `ths start` or `ths run` that owns it to
-report ready. It also waits for an instance that is still being created in
+report ready (a `start --detach` has reported ready once it returns). It also waits for an instance that is still being created in
 another shell, and fails after a few seconds if no command is creating it or
 if its launcher has exited and left only its containers behind. It creates
 no instance and makes no chain changes. The timeout defaults to **120 seconds**, and status reads are bounded
@@ -893,6 +909,7 @@ compinit
 | --- | --- |
 | `ths` | Start a fresh environment and open the dashboard |
 | `ths start --no-open` | Start without opening a browser |
+| `ths start --detach` | Return once ready and leave the environment running; `ths stop` deletes it |
 | `ths start --port-offset <N>` | Shift loopback host ports by a multiple of 10 for another instance |
 | `ths start --block-time <SECONDS>` | Interval mining: mine an empty block every `SECONDS` seconds |
 | `ths start --mine-on-mempool` | Mempool mining: mine when the mempool holds new transactions |
