@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { act, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { renderWithProviders } from '@/test/utils';
 import { ApiError } from '@/lib/api';
@@ -196,5 +196,83 @@ describe('ActivityList error state', () => {
   it('falls back to the shared message for an unrecognised error', () => {
     renderError('boom');
     expect(screen.getByText('Something went wrong.')).toBeInTheDocument();
+  });
+});
+
+describe('ActivityList clock', () => {
+  it('updates idle ages beside unknown timestamps without fetching and clears its timer on unmount', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    try {
+      const { container, unmount } = renderWithProviders(
+        <MemoryRouter>
+          <ActivityList
+            activity={{
+              isPending: false,
+              isError: false,
+              error: null,
+              data: [
+                {
+                  id: 'idle',
+                  kind: 'send',
+                  from_account: 1,
+                  to_account: 2,
+                  to_address: null,
+                  source_pool: 'ironwood',
+                  destination_pool: 'ironwood',
+                  amount_zatoshi: 100_000n,
+                  txid: '',
+                  block_hash: null,
+                  status: 'preparing',
+                  last_error: null,
+                  created_at: '2026-10-15 12:00:00',
+                },
+                ...[121, null].map((height) => ({
+                  id: `unknown-${height}`,
+                  kind: 'transaction' as const,
+                  direction: 'incoming' as const,
+                  from_account: null,
+                  to_account: 2,
+                  to_address: null,
+                  source_pool: null,
+                  destination_pool: 'ironwood' as const,
+                  amount_zatoshi: 100_000n,
+                  txid: '',
+                  block_hash: null,
+                  mined_height: height,
+                  status: 'confirmed' as const,
+                  last_error: null,
+                  created_at: null,
+                })),
+              ],
+            }}
+          />
+        </MemoryRouter>,
+      );
+      const time = container.querySelector('time')!;
+      const title = time.title;
+      expect(time).toHaveTextContent('just now');
+      expect(screen.getByText('Block 121')).toBeInTheDocument();
+      expect(screen.getByLabelText('Time unknown')).toBeInTheDocument();
+      expect(container.querySelectorAll('time')).toHaveLength(1);
+      await act(() => vi.advanceTimersByTime(10_000));
+      expect(time).toHaveTextContent('10 seconds ago');
+      await act(() => vi.advanceTimersByTime(60_000));
+      expect(time).toHaveTextContent('1 minute ago');
+      expect(time).toHaveAttribute('datetime', '2026-10-15 12:00:00');
+      expect(time.title).toBe(title);
+      expect(screen.getByText('Block 121')).toBeInTheDocument();
+      expect(screen.getByLabelText('Time unknown')).toBeInTheDocument();
+      expect(container.querySelectorAll('time')).toHaveLength(1);
+      expect(fetch).not.toHaveBeenCalled();
+      unmount();
+      // Flush unrelated provider cleanup before checking for a recurring timer.
+      vi.runOnlyPendingTimers();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      fetch.mockRestore();
+    }
   });
 });

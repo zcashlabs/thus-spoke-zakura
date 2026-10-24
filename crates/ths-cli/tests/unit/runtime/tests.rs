@@ -6,6 +6,8 @@ use std::{
 
 #[path = "tests/client.rs"]
 mod client;
+#[path = "tests/docker.rs"]
+mod docker;
 #[path = "tests/images.rs"]
 mod images;
 #[path = "tests/instance.rs"]
@@ -326,12 +328,14 @@ impl StartHost for RecordingHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         _runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: Option<u16>,
+        _mining: MiningConfig,
         _context: &LifecycleContext,
         _journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
@@ -523,12 +527,25 @@ use deletion::{ScriptedEvents, watched};
 thread_local! {
     /// Points this test thread's Docker commands at a daemon that does not exist.
     pub(super) static DOCKER_UNREACHABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Points this test thread's Docker commands at a stub program instead of
+    /// the real `docker`, so a failing invocation can be reproduced exactly.
+    pub(super) static DOCKER_PROGRAM: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn with_unreachable_docker<T>(test: impl FnOnce() -> T) -> T {
     DOCKER_UNREACHABLE.set(true);
     let result = test();
     DOCKER_UNREACHABLE.set(false);
+    result
+}
+
+/// Runs `test` with every Docker command in this thread replaced by `program`.
+#[cfg(unix)]
+fn with_docker_program<T>(program: PathBuf, test: impl FnOnce() -> T) -> T {
+    DOCKER_PROGRAM.with(|slot| *slot.borrow_mut() = Some(program));
+    let result = test();
+    DOCKER_PROGRAM.with(|slot| *slot.borrow_mut() = None);
     result
 }
 

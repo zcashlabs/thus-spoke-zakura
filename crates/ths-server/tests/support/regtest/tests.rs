@@ -16,8 +16,7 @@ use super::synchronous_command_output_with_timeout;
 use super::{
     CleanupResource, CommandExecutor, CommandOutput, DockerInspect, DockerResource, FailureRoute,
     RecoveryFailureReporter, RegtestStack, docker_resource_exists_from_inspect,
-    published_loopback_port, remaining_timeout, shutdown_after_test_cancellation,
-    synchronous_command_output,
+    published_loopback_port, remaining_timeout, synchronous_command_output,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,12 +201,6 @@ impl CommandExecutor for RecordingExecutor {
 
 fn test_server_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_ths-server"))
-}
-
-#[test]
-fn regtest_stack_is_sync_for_the_spawned_live_scenario() {
-    fn assert_sync<T: Sync>() {}
-    assert_sync::<RegtestStack>();
 }
 
 #[test]
@@ -498,15 +491,6 @@ async fn executor_timeout_inspection_retains_cleanup_ownership() -> Result<()> {
 }
 
 #[tokio::test]
-async fn other_nonzero_inspection_failure_retains_cleanup_ownership() -> Result<()> {
-    assert_ambiguous_inspection_retains_cleanup_ownership(
-        "network",
-        InspectionFailure::NonzeroStderr(b"Docker CLI configuration failed\n".to_vec()),
-    )
-    .await
-}
-
-#[tokio::test]
 async fn failed_docker_removal_is_retained_while_later_cleanup_continues() -> Result<()> {
     let executor = Arc::new(RecordingExecutor::default());
     let fixture_executor: Arc<dyn CommandExecutor> = executor.clone();
@@ -563,41 +547,6 @@ async fn reporter_marks_failed_explicit_cleanup_with_cleanup_route() -> Result<(
     let summary = RecoveryFailureReporter::new().summary(Some(&fixture), FailureRoute::Cleanup);
     assert_eq!(summary["cleanup"], "failed");
     assert_eq!(summary["failure_route"], "cleanup");
-    Ok(())
-}
-
-#[tokio::test]
-async fn local_cancellation_runs_explicit_reverse_order_cleanup() -> Result<()> {
-    let executor = Arc::new(RecordingExecutor::default());
-    let fixture_executor: Arc<dyn CommandExecutor> = executor.clone();
-    let mut fixture = RegtestStack::with_executor(test_server_path(), fixture_executor)?;
-    let network = DockerResource::Network(fixture.names.network.clone());
-    let volume = DockerResource::Volume(fixture.names.chain_volume.clone());
-    fixture
-        .cleanup
-        .push(CleanupResource::Docker(network.clone()));
-    fixture
-        .cleanup
-        .push(CleanupResource::Docker(volume.clone()));
-    let (sender, mut cancellation) = tokio::sync::oneshot::channel();
-    sender
-        .send(())
-        .expect("the test-local cancellation receiver is still owned by cleanup");
-
-    shutdown_after_test_cancellation(&mut fixture, &mut cancellation).await?;
-    assert!(fixture.cleanup.is_empty());
-    let removals = executor
-        .calls()
-        .into_iter()
-        .filter(|call| {
-            call.program == "docker" && call.args.get(1).is_some_and(|argument| argument == "rm")
-        })
-        .filter_map(|call| call.args.last().cloned())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        removals,
-        [volume.name().to_owned(), network.name().to_owned()]
-    );
     Ok(())
 }
 

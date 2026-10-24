@@ -100,6 +100,22 @@ describe('sendSchema', () => {
     }
   });
 
+  it('accepts the 21,000,000 ZEC supply and rejects anything above it', () => {
+    const atSupply = sendSchema.safeParse({ ...base, amount: '21000000' });
+    expect(atSupply.success).toBe(true);
+    if (atSupply.success) expect(atSupply.data.amount).toBe(2_100_000_000_000_000n);
+
+    for (const amount of ['21000000.00000001', '21000001']) {
+      const result = sendSchema.safeParse({ ...base, amount });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.find((issue) => issue.path[0] === 'amount')?.message).toBe(
+          'Amount must not exceed 21,000,000 ZEC.',
+        );
+      }
+    }
+  });
+
   it('accepts a memo to an ironwood destination', () => {
     expect(memoIssue({ ...base, memo: 'rent for October' })).toBeUndefined();
     expect(sendSchema.safeParse({ ...base, memo: 'rent for October' }).success).toBe(true);

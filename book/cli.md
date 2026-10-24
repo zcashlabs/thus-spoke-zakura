@@ -1,15 +1,18 @@
 # Appendix A: `ths` CLI reference
 
 `ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
-environment and, once an environment is running, talks to its dashboard API on
-your behalf. This page documents every command in detail, with examples.
+environment and, once an environment is running, talks to its dashboard API or
+Zakura JSON-RPC on your behalf. This page documents every command in detail,
+with examples.
 
 Read [Chapter 1](getting-started.md) for an instance's lifecycle, [Chapter
 3](accounts-and-balances.md) for accounts and pools, and [Chapter
 6](architecture/operations.md) before retrying a payment or mine request.
 The examples below demonstrate individual commands; they are not one script
-to run in order. For a worked dashboard flow, see [Chapter
-4](using-the-dashboard.md).
+to run in order. If a send or faucet command cannot write its result, fix the
+output destination and repeat the same arguments against the same instance.
+Its saved payment identity remains available for that retry. For a worked
+dashboard flow, see [Chapter 4](using-the-dashboard.md).
 
 ## Conventions used below
 
@@ -22,7 +25,8 @@ to run in order. For a worked dashboard flow, see [Chapter
     where the command supports it.
 - Use `-h` / `--help` or `ths help <command>` for help; `-V` /
   `--version` prints the launcher version. `--json` does not convert logs,
-  browser opening, builds, or cleanup messages into JSON and is rejected for `run`.
+  browser opening, builds, cleanup messages, or `rpc` results into JSON and is
+  rejected for `run`. Use `rpc --raw` for the full JSON-RPC response.
 - Accounts are referred to by **index**, `1` through `5`. Every environment
   starts with five disposable development accounts; there is no need to copy
   full Regtest addresses to use the commands on this page. (A hidden sixth
@@ -30,8 +34,9 @@ to run in order. For a worked dashboard flow, see [Chapter
   CLI.)
 - Amounts are ZEC decimal strings with up to 8 decimal places, e.g. `1`,
   `0.5`, `2.25000001`. These are disposable Regtest coins with no value.
-- Commands that call the app (`tx`, `block`, `mine`, `reorg`, `rollback`, `faucet`, and `wallet` subcommands) require
-  a running environment. Start one first with `ths` (or `ths --name <NAME>`).
+- Commands that call the app (`tx`, `block`, `mine`, `reorg`, `rollback`, `faucet`, and `wallet`
+  subcommands) or the node (`rpc`) require a running environment. Start one
+  first with `ths` (or `ths --name <NAME>`).
   `stop` and `reset --force` can remove resources left by an interrupted run.
 
 ---
@@ -72,6 +77,30 @@ each host port (default: `0`), and must be a multiple of 10. It is not multiplie
 by 10; the result must fit a valid nonzero host port. Startup fails and names an occupied port
 instead of selecting a random port.
 
+`start` also selects the instance's **mining mode**. Exactly one mode is active
+for the whole server lifetime, so the flags below are mutually exclusive:
+
+| Mode | Flag | Behavior |
+| --- | --- | --- |
+| `auto` (default) | none | Each payment, faucet, and treasury operation mines its own confirming block. |
+| `interval` | `--block-time <SECONDS>` | A background task mines an empty block every `<SECONDS>` seconds. The value must be a positive integer. |
+| `mempool` | `--mine-on-mempool` | A background task mines a block when the mempool holds a new, nonempty transaction set. |
+| `manual` | `--no-auto-mine` | Nothing is mined automatically; unresolved work waits for [`ths mine`](#ths-mine-blocks). |
+
+Funding the accounts during startup completes in **every** mode. Afterward, the
+mode decides who mines: in `auto`, a payment mines its own block; in `interval`
+and `mempool`, a background task produces blocks outside any manual job, so
+those blocks never count toward a `ths mine` request; in `manual`, a payment
+stays pending until you run `ths mine`. The selected mode is reported verbatim
+as `mining_mode` in `GET /api/v1/status` (with `block_time` for `interval`), and
+the dashboard's Network page names it. `ths run` always uses `auto`.
+
+```console
+ths start --block-time 2        # mine an empty block every 2 seconds
+ths start --mine-on-mempool     # mine whenever a transaction arrives
+ths start --no-auto-mine        # mine only when you run `ths mine`
+```
+
 ### `ths wait [--timeout <SECONDS>]`
 
 Waits for an instance's node, lightwalletd index, and wallet to be settled at
@@ -110,7 +139,8 @@ supports non-interactive commands: it creates a separate process group without
 transferring control of the terminal. Commands that read from the controlling
 terminal are unsupported. No persistent environment is provided. Seeds and
 spending keys are not exported. `--json` is rejected
-because the child owns stdout. The child receives:
+because the child owns stdout; launcher progress, Docker output, and the
+init container's secrets banner go to stderr. The child receives:
 
 | Variable | Value |
 | --- | --- |
@@ -192,14 +222,45 @@ ths endpoints --env
 JSON output includes `"network": "regtest"` and `"tls": false`; lightwalletd
 uses plaintext HTTP on loopback.
 
+### `ths rpc [--raw] [--yes] <METHOD> [PARAMS...]`
+
+Calls one method on the named instance's Zakura JSON-RPC endpoint and prints
+the result. The endpoint is the loopback URL stored for that instance. The
+call is sent only when the Zakura container recorded for the instance is still
+that container, is owned by the instance, and still publishes that URL. A
+container that only reuses the name is refused.
+
+```console
+ths rpc getblockcount
+ths rpc getblockhash 0
+ths rpc --raw getblockchaininfo
+ths --name alice rpc getblockcount
+```
+
+`getblockcount` prints the current height. A string result, such as a block
+hash, is printed without quotes. Objects and arrays are pretty-printed JSON.
+`--raw` prints the full JSON-RPC response instead of only `result`. The global
+`--json` flag does not change this output.
+
+Parameters are parsed as JSON when they are numbers, `true`, `false`, `null`,
+objects, or arrays. Any other argument is sent as a string.
+
+An RPC error prints the node's error message and exits nonzero. `stop` shuts
+the node down, so it is refused unless `--yes` is set:
+
+```console
+ths rpc --yes stop
+```
+
 ### `ths logs [app|zakura|lightwalletd] [-f|--follow] [--tail N | --head N]`
 
 Prints or streams logs for a service in the named environment. Defaults to the
 `app` (dashboard/server) service. Without `--tail` or `--head`, it prints
 all available Docker logs. Counts must be positive. `--head` conflicts with
 `--tail` and `--follow`; `--tail` can be combined with `--follow`. Output remains
-log text even with the global `--json` flag. If the reader closes the pipe, the
-command stops without an error.
+log text even with the global `--json` flag. App lines are plain text, without
+terminal color codes. If the reader closes the pipe, the command stops without an
+error.
 
 ```console
 ths logs                       # available logs from the app service
@@ -444,15 +505,24 @@ and Send dialogs, from a script or terminal:
 | --- | --- |
 | `ths wallet balances` | Print each account's balances and addresses |
 | `ths wallet activity` | Print canonical incoming and outgoing wallet history, plus pending or failed payments |
+| `ths wallet quote` | Show the spendable funds, fee, and maximum send for one account and pool route, without sending |
 | `ths wallet faucet` | Fund one or more accounts from the treasury |
-| `ths wallet send` | Send funds between accounts or pools, with an optional memo, or pay a `zcash:` URI |
+| `ths wallet send` | Send funds between accounts or pools or to a Regtest address, with an optional memo, or pay a `zcash:` URI |
 | `ths wallet shield` | Spend transparent funds into the same or another account's Ironwood balance |
 | `ths wallet unshield` | Spend Ironwood funds into the same or another account's transparent balance |
 
 The mutating subcommands attempt to mine a confirming block and
 print the resulting transaction ID. If auto-mining fails, activity may remain
 in `broadcast` state; `send`, `shield`, and `unshield` print a confirming block
-hash when one is available. Pass `--json` for machine-readable output.
+hash when one is available. In `interval`, `mempool`, and `manual` modes the
+command submits the payment, then waits up to 30 seconds for a confirming
+block. In `interval` and `mempool` modes the background task usually produces
+that block within the wait; in `manual` mode no block is produced automatically,
+so the wait expires and the command exits with status 1 and a pending-payment
+message that includes the idempotency key. Running the same command again with
+the same arguments resumes the retained payment identity and waits for another
+30 seconds; `ths mine` in a separate terminal produces the confirming block.
+Pass `--json` for machine-readable output.
 
 ### `ths wallet balances`
 
@@ -504,6 +574,59 @@ transparent source for an external incoming transaction is best effort and
 uses one short, shared lookup budget, so an unavailable Zakura node does not
 hold up the activity response.
 
+### `ths wallet quote --from <N> --source-pool <POOL> --destination-pool <POOL>`
+
+Shows how much one account could send along one pool route, and the network
+fee for that route, without sending anything. It asks the same dry-run quote
+the dashboard's **Send ZEC** dialog uses for its **Max** button
+(`POST /api/v1/send/quote`); see
+[quoting a send](accounts-and-balances.md#zec-zatoshi-and-spendability).
+
+- `--from <N>` (required): account index, 1–5. The treasury account cannot be
+  quoted.
+- `--source-pool <ironwood|transparent>` (required): pool the send would spend
+  from.
+- `--destination-pool <ironwood|transparent>` (required): pool the send would
+  pay into. Both pools are required because the fee depends on the route.
+
+```console
+ths wallet quote --from 1 --source-pool ironwood --destination-pool ironwood
+ths --name demo --json wallet quote --from 1 --source-pool ironwood --destination-pool transparent
+```
+
+The text output shows ZEC; `--json` keeps the server's integer zatoshi fields
+and adds the route they answer:
+
+```json
+{
+  "from_account": 1,
+  "source_pool": "ironwood",
+  "destination_pool": "transparent",
+  "available_zatoshi": 500000000,
+  "fee_zatoshi": 15000,
+  "max_zatoshi": 499985000
+}
+```
+
+- `available_zatoshi`: funds the quote's proposal could spend from the source
+  pool. This can be lower than the pool's balance in `ths wallet balances`,
+  for example while change is not yet spendable.
+- `fee_zatoshi`: the fee for spending them along this route.
+- `max_zatoshi`: the largest amount `ths wallet send` could send along this
+  route. `--max` on `send`, `shield`, and `unshield` asks for its own quote
+  when it runs, so it can submit a different amount if the wallet has changed.
+
+The quote is a **snapshot** for the selected route, not a reservation: a later
+payment, faucet, or mined block can change it, and it does not simulate one
+particular amount. The fee depends on the destination pool rather than which
+account receives, so the quote applies to a send to any development account
+in that pool. Like `balances`, the command first requires
+`wallet_sync.state: ready`.
+
+The command never submits a payment and never saves an idempotency key. An
+empty pool is a valid answer: `max_zatoshi` is `0` and the command exits 0.
+Invalid arguments, a syncing or failed wallet, and server errors exit nonzero.
+
 ### `ths wallet faucet --accounts <LIST> [--amount <ZEC>] [--pool <POOL>]`
 
 Funds one or more accounts from the treasury faucet in a single command.
@@ -540,7 +663,7 @@ rerunning the same command requests a new set of payments. JSON returns
 `{funded:[confirmed operations],pending:[operations with retained keys],
 failed:[diagnostic strings]}`; unknown pending members include `error`.
 
-### `ths wallet send --from <N> --to <N> (--amount <ZEC> | --max) [--source-pool <POOL>] [--destination-pool <POOL>] [--memo <TEXT>]`
+### `ths wallet send --from <N> (--to <N> | --to-address <ADDRESS>) (--amount <ZEC> | --max) [--source-pool <POOL>] [--destination-pool <POOL>] [--memo <TEXT>]`
 
 Sends funds between development accounts or pools. It does the same thing as
 the dashboard's **Send ZEC** dialog and uses the same endpoint
@@ -549,10 +672,16 @@ the dashboard's **Send ZEC** dialog and uses the same endpoint
 - `--from <N>` / `--to <N>` (required): two account indices,
   1–5. They may match when the source and destination pools differ. The treasury
   account cannot be used.
+- `--to-address <ADDRESS>`: pay a Regtest unified or transparent address
+  instead of `--to`, like the dashboard's **Other address** destination. The
+  destination pool follows the address, so `--destination-pool` is not
+  accepted; a unified address must include an Ironwood receiver.
 - `--amount <ZEC>` / `--max` (exactly one required): send an explicit amount,
   or ask `POST /api/v1/send/quote` for the maximum spendable amount after the
   network fee. The CLI submits the server's quoted `max_zatoshi`; it does not
-  calculate the fee itself.
+  calculate the fee itself. Spendable source funds must cover an explicit
+  amount plus the fee; use the quote's `max_zatoshi` as the ceiling, rather
+  than the displayed balance. See [`ths wallet quote`](#ths-wallet-quote---from-n---source-pool-pool---destination-pool-pool).
 - `--source-pool <ironwood|transparent>`: pool to spend from (default
   `ironwood`).
 - `--destination-pool <ironwood|transparent>`: pool the destination account
@@ -576,6 +705,10 @@ ths wallet send --from 1 --to 1 --amount 0.005 --source-pool transparent
 # Attach a memo for the recipient
 ths wallet send --from 2 --to 3 --amount 1 --memo "rent for October"
 
+# Pay an app's own Regtest address from account 2
+ths wallet send --from 2 --to-address uregtest1… --amount 0.1 --memo "order 42"
+ths wallet send --from 2 --to-address tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ --amount 0.1
+
 # Rejected: transparent outputs cannot carry a memo
 ths wallet send --from 2 --to 3 --amount 1 --destination-pool transparent --memo "hi"
 ```
@@ -585,8 +718,10 @@ fee; using the same account and pool is rejected. CLI `send`, `shield`, and
 `unshield` journal a key for the resolved request body, including memo. Each
 invocation submits once, then polls read-only keyed activity within a 30-second
 budget. Pending, unknown, or rejected results retain the key; rerun unchanged
-arguments and the same instance to resume. Observing `confirmed` or terminal
-`failed` clears it, so an identical command afterward can create another payment.
+arguments and the same instance to resume. A stdout write error also retains
+that identity, including the resolved amount for `--max`. Successfully reporting
+`confirmed` or terminal `failed` clears it, so an identical command afterward can
+create another payment.
 Pending/unknown output includes the key (also in JSON) and exits nonzero;
 see the [caller table](architecture/operations.md#which-caller-are-you-retrying).
 
@@ -735,6 +870,38 @@ account 1 to account 3, all without opening the dashboard.
 
 ---
 
+## `ths completions bash|zsh|fish`
+
+Prints a completion script for bash, zsh, or fish. The script covers every
+`ths` command and flag, including `wallet` subcommands. It does not start an
+environment or contact Docker. Save it where your shell loads completions,
+then open a new terminal.
+
+```console
+# bash (requires the bash-completion package)
+mkdir -p ~/.local/share/bash-completion/completions
+ths completions bash > ~/.local/share/bash-completion/completions/ths
+
+# zsh
+mkdir -p ~/.zsh/completions
+ths completions zsh > ~/.zsh/completions/_ths
+
+# fish
+mkdir -p ~/.config/fish/completions
+ths completions fish > ~/.config/fish/completions/ths.fish
+```
+
+Zsh loads `~/.zsh/completions` only when that directory is on `fpath` before
+`compinit`:
+
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -U compinit
+compinit
+```
+
+---
+
 ## Command summary
 
 | Command | What it does |
@@ -743,6 +910,9 @@ account 1 to account 3, all without opening the dashboard.
 | `ths start --no-open` | Start without opening a browser |
 | `ths start --detach` | Return once ready and leave the environment running; `ths stop` deletes it |
 | `ths start --port-offset <N>` | Shift loopback host ports by a multiple of 10 for another instance |
+| `ths start --block-time <SECONDS>` | Interval mining: mine an empty block every `SECONDS` seconds |
+| `ths start --mine-on-mempool` | Mempool mining: mine when the mempool holds new transactions |
+| `ths start --no-auto-mine` | Manual mining: nothing is mined until `ths mine` |
 | `ths wait [--timeout]` | Wait for existing node/index/wallet settlement |
 | `ths run [--timeout] -- <command>` | Run a child in a fresh settled instance, then clean up |
 | `ths build [--dev]` | Build runtime images from source |
@@ -750,6 +920,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths status [--json]` | Show environment service state and endpoints |
 | `ths open` | Open the running dashboard |
 | `ths endpoints [--json \| --env]` | Print endpoints, or `export` lines for the variables `ths run` passes to its child |
+| `ths rpc [--raw] [--yes] <METHOD> [PARAMS...]` | Call the instance's Zakura JSON-RPC and print the result |
 | `ths tx <TXID> [--json]` | Show explorer transaction data |
 | `ths block [ID] [--json]` | Show a block by height or hash, or the chain tip when omitted |
 | `ths mine <N>` | Mine blocks and synchronize the wallet |
@@ -758,6 +929,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths faucet <ADDRESS> [--amount]` | Send disposable ZEC to any Regtest address |
 | `ths wallet balances [--json]` | Print the five accounts' balances and addresses |
 | `ths wallet activity [--limit N] [--json]` | Print recent development-wallet activity |
+| `ths wallet quote --from --source-pool --destination-pool [--json]` | Show an account's maximum send and fee for one pool route without sending |
 | `ths wallet faucet --accounts <LIST> [--amount] [--pool]` | Fund one or more of the five accounts by index |
 | `ths wallet send --from --to (--amount \| --max) [--source-pool] [--destination-pool] [--memo]` | Send between accounts or pools, optionally with an Ironwood memo |
 | `ths wallet send --from --uri [--amount \| --max] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest address |
@@ -770,6 +942,7 @@ account 1 to account 3, all without opening the dashboard.
 | `ths doctor` | Check Docker and local configuration |
 | `ths update [--check]` | Check for or install a newer release |
 | `ths uninstall` | Remove the installed launcher executable |
+| `ths completions bash\|zsh\|fish` | Print a shell completion script for every command and flag |
 
 Every command accepts `--name` for isolated environments. For more on running
 them side by side, see [Chapter

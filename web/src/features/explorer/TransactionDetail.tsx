@@ -6,8 +6,9 @@ import { Badge } from '@/components/ui/Badge';
 import { DataTable, NumCell, Row, type Column } from '@/components/ui/DataTable';
 import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
 import { SakuraMark } from '@/components/ui/SakuraMark';
-import { useTransaction } from '@/hooks/queries';
-import { errorMessage, type TxInput } from '@/lib/api';
+import { useAccounts, useTransaction } from '@/hooks/queries';
+import { errorMessage, type Account, type TxInput } from '@/lib/api';
+import { AccountLabel } from './AccountLabel';
 import { formatZecAmount } from '@/lib/money';
 import { chainTime, shortHash } from '@/lib/format';
 import { actionSummary, summariseShielding, transactionFee } from './shielding';
@@ -32,10 +33,10 @@ function inputKey(input: TxInput, index: number): string {
     : String(index);
 }
 
-function PublicInputs({ vin }: { vin: TxInput[] }) {
-  // The server resolves every prevout before it hands the transaction over, so
-  // refetching each previous transaction here would repeat that work — and each
-  // refetch triggers another round of it server-side.
+function PublicInputs({ vin, accounts }: { vin: TxInput[]; accounts: Account[] | undefined }) {
+  // The server attempts to resolve every prevout before it hands the transaction
+  // over, so refetching previous transactions here would repeat that work — and
+  // each refetch triggers another round of it server-side.
   return (
     <Panel
       eyebrow="PUBLIC INPUTS"
@@ -58,16 +59,28 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
               <td>
                 {to ? (
                   <Link to={to} className="text-accent-strong font-mono hover:underline">
-                    <span className="block truncate" title={resolved.prevTxid}>
+                    <span className="block truncate" title={resolved.address ?? resolved.prevTxid}>
                       {label}
                     </span>
                   </Link>
                 ) : (
                   <span className="text-ink block truncate font-mono">{label}</span>
                 )}
+                {resolved.address && (
+                  <AccountLabel accounts={accounts} address={resolved.address} />
+                )}
+                {input.prevout_unavailable && (
+                  <span className="text-warning mt-1 block text-[11px]">
+                    Previous output details unavailable
+                  </span>
+                )}
               </td>
               <NumCell className="font-semibold">
-                {resolved.valueZat === undefined ? '—' : formatZecAmount(BigInt(resolved.valueZat))}
+                {input.prevout_unavailable
+                  ? 'Unavailable'
+                  : resolved.valueZat === undefined
+                    ? '—'
+                    : formatZecAmount(BigInt(resolved.valueZat))}
               </NumCell>
             </Row>
           );
@@ -80,6 +93,7 @@ function PublicInputs({ vin }: { vin: TxInput[] }) {
 export function TransactionDetail() {
   const { txid = '' } = useParams<{ txid: string }>();
   const transaction = useTransaction(txid);
+  const accounts = useAccounts();
 
   if (transaction.isPending) return <LoadingState label="Loading transaction…" />;
   if (transaction.isError) {
@@ -102,6 +116,7 @@ export function TransactionDetail() {
   const shielding = summariseShielding(tx);
   const fee = transactionFee(tx);
   const confirmations = tx.confirmations ?? 0;
+  const transparentInputsComplete = tx.transparent_inputs_complete !== false;
 
   return (
     <div className="grid gap-4">
@@ -141,6 +156,18 @@ export function TransactionDetail() {
       {/* What the transaction discloses publicly is the headline fact about a
           Zcash transaction, so it leads rather than sitting below the header. */}
       <Panel eyebrow="DISCLOSURE" title="What this transaction reveals">
+        {!transparentInputsComplete && (
+          <div className="border-warning/30 bg-warning-soft flex items-start gap-3 border-b px-5 py-4">
+            <EyeOff className="text-warning mt-0.5 size-5 shrink-0" aria-hidden />
+            <div>
+              <b className="text-warning block text-[13px]">Some input details are unavailable</b>
+              <p className="text-ink-muted mt-1 text-[12px] leading-relaxed">
+                The explorer could not resolve one or more previous outputs. Input addresses and
+                amounts shown below may be incomplete.
+              </p>
+            </div>
+          </div>
+        )}
         {shielding.fullyShielded && (
           <div className="border-accent-line bg-accent-soft flex items-start gap-3 border-b px-5 py-4">
             <SakuraMark className="text-accent mt-0.5 size-5 shrink-0" />
@@ -220,14 +247,19 @@ export function TransactionDetail() {
           </PanelNote>
         )}
 
-        {!shielding.shieldedOnly && !shielding.mixed && (
+        {!shielding.shieldedOnly && !shielding.mixed && transparentInputsComplete && (
           <PanelNote>
             Fully transparent. Every input, output, address and amount is public chain data.
           </PanelNote>
         )}
+        {!shielding.shieldedOnly && !shielding.mixed && !transparentInputsComplete && (
+          <PanelNote>
+            Fully transparent, but some public input addresses and amounts could not be retrieved.
+          </PanelNote>
+        )}
       </Panel>
 
-      {tx.vin.length > 0 && <PublicInputs vin={tx.vin} />}
+      {tx.vin.length > 0 && <PublicInputs vin={tx.vin} accounts={accounts.data} />}
 
       {tx.vout.length > 0 && (
         <Panel
@@ -255,6 +287,7 @@ export function TransactionDetail() {
                     ) : (
                       <span className="text-ink-muted block truncate font-mono">—</span>
                     )}
+                    {address && <AccountLabel accounts={accounts.data} address={address} />}
                   </td>
                   <NumCell className="font-semibold">
                     {out.valueZat === undefined ? '—' : formatZecAmount(BigInt(out.valueZat))}

@@ -34,6 +34,8 @@ const SCAN_BATCH_SIZE: u32 = 100;
 const REORG_REPAIR_POLL: Duration = Duration::from_millis(250);
 const ENHANCEMENT_BATCH_SIZE: usize = 100;
 
+mod transparent_history;
+
 pub(crate) async fn find_rewind<F, Fut>(
     wallet: &RealWallet,
     target: &ChainCheckpoint,
@@ -80,6 +82,33 @@ pub async fn sync_wallet(
     deadline: Instant,
 ) -> Result<()> {
     let mut rewind = find_rewind(wallet, target, deadline, |height| rpc.block_hash(height)).await?;
+    for cursor in wallet.transparent_history_checkpoints().await? {
+        let canonical = if cursor.height <= target.height {
+            Some(
+                within_deadline(
+                    deadline,
+                    "validating transparent history cursor",
+                    rpc.block_hash(u32::try_from(cursor.height)?),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        if canonical.as_deref() != Some(cursor.hash.as_str()) {
+            let floor = WALLET_BIRTHDAY_HEIGHT - 1;
+            rewind = Some(ChainCheckpoint {
+                height: u64::from(floor),
+                hash: within_deadline(
+                    deadline,
+                    "validating transparent history rewind floor",
+                    rpc.block_hash(floor),
+                )
+                .await?,
+            });
+            break;
+        }
+    }
     if let Some(cursor) = wallet.treasury_cursor().await? {
         let canonical = if target.height >= u64::from(cursor.height) {
             Some(
@@ -131,6 +160,7 @@ pub async fn sync_wallet(
         }
     }
     enhance_transactions(wallet, &mut client, deadline).await?;
+    transparent_history::synchronize(wallet, rpc, &mut client, deadline).await?;
     check_deadline(deadline)
 }
 

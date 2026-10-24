@@ -196,7 +196,15 @@ finishes that activity.
 | --- | --- |
 | Direct API | Repeat the identical request with your saved key. A new key requests a new payment. |
 | Dashboard Send or Faucet | Pending payments retain their key and exact details across dialog closure, refresh, and browser restart. Use **Resume** for the saved payment. A `broadcast` response does not clear it; terminal `confirmed` or `failed` results release the retained identity. |
-| CLI send, shield, unshield, or faucet | Rerun the same arguments against the same instance. The local payment journal retains keys across errors and pending results; an identical command after terminal observation starts a new payment. |
+| CLI send, shield, unshield, or faucet | Rerun the same arguments against the same instance. The local payment journal retains keys across errors and pending results; an identical command after successful terminal-result output starts a new payment. |
+
+Send and faucet commands retain their retry keys if a stdout result write
+returns an error. Fix the output destination and rerun the same
+arguments against the same instance to recover that payment. For an account
+faucet batch, every key stays retained until all members are terminal and the
+batch output succeeds. A successfully reported terminal failure also releases
+its key; a later invocation may request another payment. This covers reported
+write errors, not a guarantee that a downstream program consumed buffered output.
 
 The dashboard reads retained payment outcomes separately from wallet balances.
 A confirmation can appear before the wallet snapshot catches up. A partial CLI

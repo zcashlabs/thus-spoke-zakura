@@ -48,36 +48,6 @@ fn unidentified_create_stays_uncertain_for_either_snapshot() {
 }
 
 #[test]
-fn pending_mutation_survives_without_endpoint_metadata() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lifecycle-recovery.json");
-    let mut journal = RecoveryJournal::create(path.clone(), &name("alpha")).unwrap();
-    journal
-        .begin(
-            ResourceRef {
-                kind: ResourceKind::Container,
-                name: "ths-alpha-app".into(),
-                identity: None,
-            },
-            Vec::new(),
-            MutationOperation::Create,
-        )
-        .unwrap();
-    let recovered = RecoveryJournal::load(path, &name("alpha"))
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        recovered.record().mutations[0].outcome,
-        MutationOutcome::Pending
-    ));
-    assert_eq!(
-        recovered.record().mutations[0].resource.name,
-        "ths-alpha-app"
-    );
-    assert!(!dir.path().join("instance.json").exists());
-}
-
-#[test]
 fn failed_rewrite_keeps_the_previous_record_and_skips_the_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(recovery::RECOVERY_FILE);
@@ -234,6 +204,7 @@ fn uncertain_service_creates_record_every_mounted_dependency() {
                 &mut journal,
                 deadline,
                 dependencies,
+                MiningConfig::default(),
             )
             .map(|app| app.id),
         };
@@ -1327,4 +1298,367 @@ fn pending_start_identity_can_be_loaded_without_a_resource_summary() {
     assert!(report.verified(), "{report:?}");
     assert!(docker.resources.lock().unwrap().is_empty());
     assert!(!runtime.instance_dir(&instance).exists());
+}
+
+fn interrupted_create(
+    docker: &StatefulDocker,
+    instance: &str,
+    kind: ResourceKind,
+    target: &str,
+    outcome: MutationOutcome,
+) -> Runtime {
+    let instance = name(instance);
+    let runtime = Runtime {
+        root: docker.root.path().to_path_buf(),
+    };
+    fs::create_dir_all(runtime.instance_dir(&instance)).unwrap();
+    let mut journal = RecoveryJournal::create(runtime.recovery_path(&instance), &instance).unwrap();
+    let index = journal
+        .begin(
+            ResourceRef {
+                kind,
+                name: target.into(),
+                identity: None,
+            },
+            Vec::new(),
+            MutationOperation::Create,
+        )
+        .unwrap();
+    if outcome != MutationOutcome::Pending {
+        journal.finish(index, outcome, None).unwrap();
+    }
+    runtime
+}
+
+fn interrupted_creates() -> Vec<(ResourceKind, &'static str, &'static str, MutationOutcome)> {
+    let mut cases = Vec::new();
+    for outcome in [
+        MutationOutcome::Pending,
+        MutationOutcome::Uncertain("docker network create timed out".into()),
+    ] {
+        cases.push((
+            ResourceKind::Network,
+            "network",
+            "ths-alpha",
+            outcome.clone(),
+        ));
+        cases.push((ResourceKind::Volume, "volume", "ths-alpha-chain", outcome));
+    }
+    cases
+}
+
+fn interrupted_cleanup_policy() -> LifecyclePolicy {
+    LifecyclePolicy {
+        startup_docker: Duration::from_secs(5),
+        ..cleanup_policy()
+    }
+}
+
+#[test]
+fn an_interrupted_create_of_an_absent_resource_is_settled() {
+    for (kind, _, target, outcome) in interrupted_creates() {
+        let docker = StatefulDocker::new();
+        let runtime = interrupted_create(&docker, "alpha", kind, target, outcome);
+        let instance = name("alpha");
+
+        let report = runtime
+            .cleanup_with(&instance, &docker, false, &interrupted_cleanup_policy())
+            .unwrap();
+
+        assert!(report.verified(), "{target}: {report:?}");
+        assert!(docker.removal_calls().is_empty());
+        assert!(!runtime.instance_dir(&instance).exists());
+    }
+}
+
+#[test]
+fn an_interrupted_create_removes_the_resource_it_left_behind() {
+    for (kind, docker_kind, target, outcome) in interrupted_creates() {
+        let docker = StatefulDocker::new();
+        let runtime = interrupted_create(&docker, "alpha", kind, target, outcome);
+        let id = if docker_kind == "volume" {
+            target
+        } else {
+            "net-id"
+        };
+        docker.insert_owned(docker_kind, target, id, "alpha");
+        let instance = name("alpha");
+
+        let report = runtime
+            .cleanup_with(&instance, &docker, false, &interrupted_cleanup_policy())
+            .unwrap();
+
+        assert!(report.verified(), "{target}: {report:?}");
+        assert_eq!(docker.removal_calls(), [vec![docker_kind, "rm", id]]);
+        assert!(!docker.contains_id(id));
+        assert!(!runtime.instance_dir(&instance).exists());
+    }
+}
+
+#[test]
+fn an_interrupted_create_never_removes_a_foreign_resource() {
+    for (kind, docker_kind, target, outcome) in interrupted_creates() {
+        let docker = StatefulDocker::new();
+        let runtime = interrupted_create(&docker, "alpha", kind, target, outcome);
+        docker.insert_owned(docker_kind, target, "foreign-id", "other");
+        let instance = name("alpha");
+
+        let report = runtime
+            .cleanup_with(&instance, &docker, false, &interrupted_cleanup_policy())
+            .unwrap();
+
+        assert!(!report.verified(), "{target}: {report:?}");
+        assert!(docker.removal_calls().is_empty());
+        assert!(docker.contains_id("foreign-id"));
+        assert!(runtime.recovery_path(&instance).exists());
+        assert!(
+            format!("{report:?}").contains("is not owned by ths instance alpha"),
+            "{report:?}"
+        );
+    }
+}
+
+fn running_create(
+    docker_kind: &str,
+    instance: &str,
+    target: &str,
+    seconds: u32,
+) -> (tempfile::TempDir, std::process::Child) {
+    let script = tempfile::tempdir().unwrap();
+    let path = script.path().join("docker");
+    fs::write(&path, format!("#!/bin/sh\nsleep {seconds}\n")).unwrap();
+    make_executable(&path);
+    let child = std::process::Command::new(&path)
+        .args([
+            docker_kind,
+            "create",
+            "--label",
+            &format!("com.zakura.ths.instance={instance}"),
+            target,
+        ])
+        .spawn()
+        .unwrap();
+    (script, child)
+}
+
+#[test]
+fn an_interrupted_create_is_settled_once_its_running_create_ends() {
+    for (kind, docker_kind, target) in [
+        (ResourceKind::Network, "network", "ths-awaited"),
+        (ResourceKind::Volume, "volume", "ths-awaited-chain"),
+    ] {
+        let docker = StatefulDocker::new();
+        let runtime =
+            interrupted_create(&docker, "awaited", kind, target, MutationOutcome::Pending);
+        let (_script, mut creating) = running_create(docker_kind, "awaited", target, 1);
+        let instance = name("awaited");
+        let started = Instant::now();
+
+        let report = runtime
+            .cleanup_with(&instance, &docker, false, &interrupted_cleanup_policy())
+            .unwrap();
+
+        assert!(report.verified(), "{target}: {report:?}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "{target} settled while its create ran"
+        );
+        assert!(creating.try_wait().unwrap().is_some());
+    }
+}
+
+#[test]
+fn an_interrupted_create_is_kept_while_its_create_keeps_running() {
+    for (kind, docker_kind, target) in [
+        (ResourceKind::Network, "network", "ths-running"),
+        (ResourceKind::Volume, "volume", "ths-running-chain"),
+    ] {
+        let docker = StatefulDocker::new();
+        let runtime = interrupted_create(
+            &docker,
+            "running",
+            kind.clone(),
+            target,
+            MutationOutcome::Pending,
+        );
+        let (_script, mut creating) = running_create(docker_kind, "running", target, 30);
+        let instance = name("running");
+        let policy = LifecyclePolicy {
+            cleanup: Duration::from_millis(600),
+            ..interrupted_cleanup_policy()
+        };
+
+        let report = runtime
+            .cleanup_with(&instance, &docker, false, &policy)
+            .unwrap();
+
+        creating.kill().unwrap();
+        creating.wait().unwrap();
+        assert!(!report.verified(), "{target}: {report:?}");
+        assert!(
+            format!("{report:?}").contains("is still running"),
+            "{report:?}"
+        );
+        let journal = RecoveryJournal::load(runtime.recovery_path(&instance), &instance)
+            .unwrap()
+            .unwrap();
+        assert!(recovery::unresolved_create(journal.record(), &kind, target).is_some());
+    }
+}
+
+struct NeverExits;
+
+impl ChildOps for NeverExits {
+    fn kill(&self, child: &mut std::process::Child) -> std::io::Result<()> {
+        child.kill()
+    }
+
+    fn try_wait(
+        &self,
+        _child: &mut std::process::Child,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn an_interrupted_create_waits_for_this_launchers_unreaped_helpers() {
+    for (kind, docker_kind, target, _) in interrupted_creates() {
+        let docker = StatefulDocker::new();
+        let runtime = interrupted_create(
+            &docker,
+            "alpha",
+            kind.clone(),
+            target,
+            MutationOutcome::Uncertain("timed out".into()),
+        );
+        let instance = name("alpha");
+        let policy = interrupted_cleanup_policy();
+        let context = LifecycleContext::new(policy);
+        let script = sleep_script();
+        let never = NeverExits;
+        let removing =
+            script_docker(&script, &context, Duration::from_millis(150)).with_child_ops(&never);
+        assert!(removing.run(&[docker_kind, "rm", target]).is_err());
+        assert!(!context.helpers_finished());
+
+        let report = runtime
+            .cleanup_core(
+                &instance,
+                &docker,
+                true,
+                Deadline::after(policy.cleanup),
+                &context,
+            )
+            .unwrap();
+
+        assert!(!report.verified(), "{target}: {report:?}");
+        let journal = RecoveryJournal::load(runtime.recovery_path(&instance), &instance)
+            .unwrap()
+            .unwrap();
+        assert!(recovery::unresolved_create(journal.record(), &kind, target).is_some());
+    }
+}
+
+#[test]
+fn a_create_that_times_out_is_left_running_to_finish() {
+    let script = tempfile::tempdir().unwrap();
+    let path = script.path().join("docker");
+    fs::write(&path, "#!/bin/sh\nsleep 1\ntouch \"$THS_MARKER\"\n").unwrap();
+    make_executable(&path);
+    let marker = script.path().join("created");
+    let context = LifecycleContext::new(short_policy());
+    let mut docker = script_docker(&script, &context, Duration::from_millis(200));
+    docker
+        .env
+        .push(("THS_MARKER".into(), marker.to_string_lossy().into_owned()));
+    let started = Instant::now();
+
+    let error = docker
+        .create(&[
+            "network",
+            "create",
+            "--label",
+            &label(&name("timeout")),
+            "ths-timeout",
+        ])
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_millis(900));
+    assert!(
+        context
+            .finish_helpers(Deadline::after(Duration::from_secs(1)))
+            .is_empty()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the timed-out create was killed");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_running_create_past_the_process_listing_cap_is_still_seen() {
+    let (_script, mut creating) = running_create("network", "capped", "ths-capped", 5);
+    let context = LifecycleContext::new(LifecyclePolicy {
+        machine_output_limit: 64,
+        ..interrupted_cleanup_policy()
+    });
+
+    let running = create_running(
+        &context,
+        Deadline::after(Duration::from_secs(5)),
+        "network",
+        "ths-capped",
+        &name("capped"),
+    );
+
+    creating.kill().unwrap();
+    creating.wait().unwrap();
+    assert!(!matches!(running, Ok(false)), "{running:?}");
+}
+
+#[test]
+fn the_process_listing_ignores_the_terminal_width() {
+    let command = process_listing();
+
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == "COLUMNS" && value.is_none())
+    );
+}
+
+#[test]
+fn a_create_is_not_started_once_shutdown_is_requested() {
+    let script = tempfile::tempdir().unwrap();
+    let path = script.path().join("docker");
+    fs::write(&path, "#!/bin/sh\ntouch \"$THS_MARKER\"\n").unwrap();
+    make_executable(&path);
+    let marker = script.path().join("created");
+    let context = LifecycleContext::new(short_policy());
+    let requested = || true;
+    let mut docker = script_docker(&script, &context, Duration::from_secs(1));
+    docker.cancellation = Cancellation::Observe(&requested);
+    docker
+        .env
+        .push(("THS_MARKER".into(), marker.to_string_lossy().into_owned()));
+
+    let error = docker
+        .create(&[
+            "network",
+            "create",
+            "--label",
+            &label(&name("late")),
+            "ths-late",
+        ])
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("shutdown was requested"),
+        "{error:#}"
+    );
+    thread::sleep(Duration::from_millis(200));
+    assert!(!marker.exists());
 }

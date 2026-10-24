@@ -19,10 +19,11 @@ describe('classifyQuery', () => {
     expect(classifyQuery(numericHash)).toEqual({ hash: numericHash });
   });
 
-  it('explains why a unified address has no public history', () => {
+  it('leaves unified addresses for exact local-account resolution', () => {
     const result = classifyQuery('uregtest155n5yem3ztkhlt9agagqfckzxng40mj7pfdvp4z4ssc048mmxqmw');
-    expect(result).toHaveProperty('error');
-    expect((result as { error: string }).error).toContain('shielded');
+    expect(result).toEqual({
+      unifiedAddress: 'uregtest155n5yem3ztkhlt9agagqfckzxng40mj7pfdvp4z4ssc048mmxqmw',
+    });
   });
 
   it('rejects empty and unrecognised input', () => {

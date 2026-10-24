@@ -99,6 +99,7 @@ function mockWalletApis(status = 'confirmed') {
       instance: 'default',
       node: null,
       account_count: 5,
+      mining_mode: 'auto',
       auto_mine: true,
       network: 'regtest',
     });

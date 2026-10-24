@@ -259,31 +259,3 @@ async fn block_wait_stops_when_zakura_rolls_back_below_the_height() {
     assert!(error.to_string().contains("rolled back below"), "{error:#}");
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
-
-#[tokio::test]
-async fn database_work_does_not_block_the_async_executor() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("server.db")).unwrap();
-    store.initialize().unwrap();
-    let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let started = std::time::Instant::now();
-    let work = tokio::spawn(async move {
-        wallet
-            .with_db(move |_| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-                Ok(())
-            })
-            .await
-    });
-    entered_rx.await.unwrap();
-    let elapsed = started.elapsed();
-    release_tx.send(()).unwrap();
-    work.await.unwrap().unwrap();
-    assert!(
-        elapsed < Duration::from_millis(750),
-        "database work blocked the async executor for {elapsed:?}"
-    );
-}

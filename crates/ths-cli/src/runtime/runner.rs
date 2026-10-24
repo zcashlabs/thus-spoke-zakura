@@ -110,7 +110,8 @@ impl Runtime {
 
     pub fn run(&self, name: &InstanceName, timeout: Duration, command: &[OsString]) -> Result<u8> {
         let shutdown = Shutdown::install()?;
-        let mut context = LifecycleContext::new(LifecyclePolicy::default());
+        // The child owns stdout, so launcher progress and Docker output go to stderr.
+        let mut context = LifecycleContext::new_for_start(LifecyclePolicy::default(), true);
         let deadline = Deadline(
             Instant::now()
                 .checked_add(timeout)
@@ -128,7 +129,7 @@ impl Runtime {
                 Cancellation::Observe(&requested),
             );
             (|| {
-                startup_docker_reachable(&docker, false)?;
+                startup_docker_reachable(&docker, context.diagnostics_to_stderr)?;
                 for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
                     startup_require_image(&docker, &image)?;
                 }
@@ -215,10 +216,18 @@ impl Runtime {
             context,
             state: CleanupGuard::Armed,
         };
-        println!("Preparing a fresh {name} environment…");
+        eprintln!("Preparing a fresh {name} environment…");
         let primary = (|| {
             let mut journal = recovery::RecoveryJournal::create(self.recovery_path(name), name)?;
-            let allocated = host.allocate(self, name, shutdown, None, context, &mut journal)?;
+            let allocated = host.allocate(
+                self,
+                name,
+                shutdown,
+                None,
+                MiningConfig::default(),
+                context,
+                &mut journal,
+            )?;
             if allocated.zakura_container_id.is_empty()
                 || allocated
                     .resources
@@ -243,7 +252,7 @@ impl Runtime {
                 shutdown,
                 true,
             )?;
-            println!("{name} is settled; running child command…");
+            eprintln!("{name} is settled; running child command…");
             let ready = self.mark_ready(name, session)?;
             let outcome =
                 host.run_child(command, current_dir, name, &allocated.endpoints, shutdown);

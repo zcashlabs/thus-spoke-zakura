@@ -84,9 +84,14 @@ explain why these owners are separate. Keep host-published ports on
 ## Iterate on the frontend
 
 For a React-only change, build and start the runtime once. In a second
-terminal, get its live dashboard URL with the source launcher and pass it
-to Vite. The example selects `alice`; use the same name that you started
-(or omit `--name alice` for `default`):
+terminal, start Vite:
+
+```console
+npm run dev --prefix web
+```
+
+Vite proxies to the default dashboard port, `32805`. For a
+`--port-offset` instance, set `THS_DEV_API` to its URL (here `alice`):
 
 ```console
 THS_DEV_API="$(cargo run -q -p thus-spoke-zakura -- --name alice endpoints --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["dashboard"])')" npm run dev --prefix web
@@ -163,6 +168,7 @@ cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact reorg_and_rollback_preserve_canonical_wallet_and_payment_state
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact dependent_payments_resume_in_admission_order_after_restart --nocapture
+cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact external_transparent_spend_reconciles_after_restart
 ```
 
 Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart

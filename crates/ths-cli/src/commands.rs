@@ -1,10 +1,12 @@
 mod wallet;
 
-use std::{process::ExitCode, time::Duration};
+use std::{io::Write, process::ExitCode, time::Duration};
+
+use clap::CommandFactory;
 
 use crate::{
-    args::{Cli, Command, Pool, SendArgs, WalletCommand},
-    runtime::{InstanceName, Runtime},
+    args::{Cli, Command, CompletionShell, Pool, SendArgs, WalletCommand},
+    runtime::{InstanceName, MiningConfig, Runtime},
     updater,
 };
 use wallet::send;
@@ -22,6 +24,11 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if matches!(cli.command, Some(Command::Uninstall)) {
         return updater::uninstall();
     }
+    // The script is the entire stdout. Runtime discovery and the startup
+    // update notice must not run first, or they would corrupt it.
+    if let Some(Command::Completions { shell }) = cli.command {
+        return print_completions(shell);
+    }
     if should_check_for_updates(&cli)
         && let Some(notice) = updater::startup_notice()
     {
@@ -34,12 +41,21 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         no_open: false,
         detach: false,
         port_offset: 0,
+        block_time: None,
+        mine_on_mempool: false,
+        no_auto_mine: false,
     }) {
         Command::Start {
             no_open,
             detach,
             port_offset,
-        } => runtime.start(&name, no_open, detach, cli.json, port_offset),
+            block_time,
+            mine_on_mempool,
+            no_auto_mine,
+        } => {
+            let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
+            runtime.start(&name, no_open, detach, cli.json, port_offset, mining)
+        }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run { timeout, command } => {
             return runtime
@@ -57,6 +73,12 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Open => runtime.open(&name),
         Command::Endpoints { env } => runtime.endpoints(&name, cli.json, env),
+        Command::Rpc {
+            raw,
+            yes,
+            method,
+            params,
+        } => runtime.rpc(&name, &method, &params, raw, yes),
         Command::Tx { txid } => runtime.explorer(&name, "transactions", Some(&txid), cli.json),
         Command::Block { id } => runtime.explorer(&name, "blocks", id.as_deref(), cli.json),
         Command::Mine { blocks } => runtime.mine(&name, blocks, cli.json),
@@ -72,6 +94,17 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Wallet { action } => match action {
             WalletCommand::Balances => runtime.wallet_balances(&name, cli.json),
             WalletCommand::Activity { limit } => runtime.wallet_activity(&name, limit, cli.json),
+            WalletCommand::Quote {
+                from,
+                source_pool,
+                destination_pool,
+            } => runtime.wallet_quote(
+                &name,
+                from,
+                source_pool.as_str(),
+                destination_pool.as_str(),
+                cli.json,
+            ),
             WalletCommand::Faucet {
                 accounts,
                 amount,
@@ -90,6 +123,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 SendArgs {
                     from,
                     to: Some(to),
+                    to_address: None,
                     amount,
                     max,
                     uri: None,
@@ -110,6 +144,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 SendArgs {
                     from,
                     to: Some(to),
+                    to_address: None,
                     amount,
                     max,
                     uri: None,
@@ -130,8 +165,31 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Reset { force } => runtime.reset(&name, force),
         Command::List => runtime.list(cli.json),
         Command::Doctor => runtime.doctor(cli.json),
+        Command::Completions { .. } => {
+            unreachable!("completions are printed before runtime discovery")
+        }
     }?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_completions(shell: CompletionShell) -> anyhow::Result<ExitCode> {
+    let mut script = Vec::new();
+    write_completions(shell, &mut script);
+    let mut stdout = std::io::stdout().lock();
+    // A preview such as `ths completions zsh | head` closes stdout early.
+    // clap_complete treats that write error as fatal; a completion script is
+    // not a failed command when the reader stops.
+    if let Err(error) = stdout.write_all(&script).and_then(|()| stdout.flush())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(error.into());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn write_completions(shell: CompletionShell, buf: &mut dyn Write) {
+    let mut command = Cli::command();
+    clap_complete::generate(shell.generator(), &mut command, "ths", buf);
 }
 
 fn should_check_for_updates(cli: &Cli) -> bool {

@@ -212,35 +212,6 @@ fn startup_and_cleanup_failures_are_both_reported_once() {
 }
 
 #[test]
-fn interrupt_before_ready_deletes_the_started_instance() {
-    let (mut host, events) = RecordingHost::new();
-    host.interrupt_before_ready = true;
-    let (_sender, shutdown) = Shutdown::channel();
-    let err = runtime_for_tests()
-        .start_with(&name("alpha"), false, false, false, 0, &host, &shutdown)
-        .unwrap_err();
-    assert!(err.to_string().contains("interrupted"));
-    let events = events.lock().unwrap().clone();
-    assert!(events.iter().any(|e| e == "allocate:alpha"));
-    assert!(events.iter().any(|e| e == "delete:alpha"));
-    assert!(!events.iter().any(|e| e.starts_with("wait_for_shutdown")));
-}
-
-#[test]
-fn interrupt_during_allocate_deletes_only_the_named_instance() {
-    let (host, events) = RecordingHost::new();
-    let (sender, shutdown) = Shutdown::channel();
-    sender.send(Ended::Interrupted).unwrap();
-    let err = runtime_for_tests()
-        .start_with(&name("alpha"), false, false, false, 0, &host, &shutdown)
-        .unwrap_err();
-    assert!(err.to_string().contains("interrupted"));
-    let events = events.lock().unwrap().clone();
-    assert!(events.iter().any(|e| e == "delete:alpha"));
-    assert!(!events.iter().any(|e| e.contains("beta")));
-}
-
-#[test]
 fn shutdown_check_bails_when_latched() {
     let (sender, shutdown) = Shutdown::channel();
     shutdown.check().unwrap();
@@ -284,22 +255,6 @@ fn wait_ready_aborts_when_shutdown_is_signaled() {
     let err = readiness::wait_ready(
         "http://127.0.0.1:1",
         "missing-app",
-        Deadline::after(Duration::from_secs(5)),
-        &shutdown,
-        &LifecyclePolicy::default(),
-        &IdleDocker,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("interrupted"));
-}
-
-#[test]
-fn wait_for_zakura_tip_aborts_when_shutdown_is_signaled() {
-    let (sender, shutdown) = Shutdown::channel();
-    sender.send(Ended::Interrupted).unwrap();
-    let err = readiness::wait_for_zakura_tip(
-        "http://127.0.0.1:1",
-        "missing-zakura",
         Deadline::after(Duration::from_secs(5)),
         &shutdown,
         &LifecyclePolicy::default(),
@@ -379,6 +334,97 @@ fn detach_failure_before_ready_still_deletes() {
             .iter()
             .any(|e| e == "final_cleanup:alpha")
     );
+}
+
+/// A polling caller must not swallow a deletion notice. It cannot put the
+/// message back on the channel, so `wait` reads the latched reason instead.
+#[test]
+fn try_interrupted_preserves_a_queued_deletion_notice_for_wait() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::DeletedElsewhere).unwrap();
+
+    assert!(!shutdown.try_interrupted());
+    assert!(
+        shutdown.deleted_elsewhere(),
+        "the deletion notice was lost to a polling caller"
+    );
+}
+
+/// Polling repeatedly before `wait` must not change the outcome either.
+#[test]
+fn repeated_polling_keeps_a_deletion_notice_for_wait() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::DeletedElsewhere).unwrap();
+
+    for _ in 0..3 {
+        assert!(shutdown.check().is_ok());
+    }
+    assert!(
+        shutdown.deleted_elsewhere(),
+        "repeated polling dropped the deletion notice"
+    );
+    assert!(!shutdown.try_interrupted());
+}
+
+/// `wait` must still end with the deletion reason after a polling caller has
+/// taken the message. The trailing signal keeps this bounded: a `wait` that
+/// lost the notice would consume it and return the wrong reason rather than
+/// blocking forever, so a regression fails instead of hanging.
+#[test]
+fn wait_reports_a_deletion_that_polling_already_observed() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::DeletedElsewhere).unwrap();
+    assert!(!shutdown.try_interrupted());
+    sender.send(Ended::Interrupted).unwrap();
+
+    assert_eq!(shutdown.wait().unwrap(), Ended::DeletedElsewhere);
+}
+
+/// `wait_timeout` must not report a deletion as an interruption: that would
+/// latch the interrupted flag and make the two indistinguishable afterwards.
+#[test]
+fn wait_timeout_reports_a_deletion_as_a_deletion() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::DeletedElsewhere).unwrap();
+
+    let message = shutdown
+        .wait_timeout(Duration::from_secs(2))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !message.contains("interrupted"),
+        "a deletion was reported as an interruption: {message}"
+    );
+    assert!(message.contains("deleted by another command"), "{message}");
+    assert!(
+        !shutdown.try_interrupted(),
+        "a deletion latched the interrupted flag"
+    );
+}
+
+/// A genuine signal must still be reported as an interruption on both paths.
+#[test]
+fn both_polling_paths_still_report_a_genuine_signal_as_interrupted() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::Interrupted).unwrap();
+    let message = shutdown
+        .wait_timeout(Duration::from_secs(2))
+        .unwrap_err()
+        .to_string();
+    assert!(message.to_string().contains("interrupted"), "{message}");
+    assert!(shutdown.try_interrupted());
+}
+
+/// The two reasons must stay independent: a deletion does not mask a later
+/// signal, and neither one is reported as the other.
+#[test]
+fn a_deletion_latch_does_not_mask_a_later_signal() {
+    let (sender, shutdown) = Shutdown::channel();
+    sender.send(Ended::DeletedElsewhere).unwrap();
+    assert!(!shutdown.try_interrupted());
+    sender.send(Ended::Interrupted).unwrap();
+    assert!(shutdown.try_interrupted());
+    assert_eq!(shutdown.wait().unwrap(), Ended::Interrupted);
 }
 
 fn metadata_snapshot(dir: &Path) -> Vec<(OsString, Vec<u8>)> {

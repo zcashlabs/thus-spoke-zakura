@@ -42,6 +42,7 @@ different ports only because it was started with a different
 | What you see | What it means and what to do |
 | --- | --- |
 | `Docker is not reachable` | Run `docker version`. Its server section must respond without `sudo`. Start Docker Desktop or the daemon, then run `ths doctor`. |
+| `docker ... failed (...)` | The launcher names the Docker command it was running and its exit status. Run that command yourself to see the real reason. A failure with no text after the status means Docker printed nothing at all, so check `docker version` first: the daemon is usually stopped, out of memory, or was killed mid-call. |
 | `ths: command not found` after installation | Two different causes. Either nothing was installed — the installer runs `ths pull` **before** moving the binary into place, so with Docker stopped the image pull fails and leaves no executable; start Docker and rerun, or rerun with `THS_SKIP_IMAGE_PULL=1`. Or it installed fine and `~/.local/bin` is not on `PATH`; check with `ls ~/.local/bin/ths`, then fix `PATH` or reinstall with `THS_INSTALL_DIR` set to a directory already on it. |
 | `port 32805 is already in use on 127.0.0.1` | Host ports are fixed defaults, and the launcher names the occupied one instead of choosing another. Usually another instance already holds it: run `ths list`. Start this one with `ths --name <NAME> start --port-offset 10` (any multiple of 10) to shift all four of its ports. |
 | `required image ... is unavailable` | An installed launcher can run `ths pull`. From source, run `cargo run -p thus-spoke-zakura -- build --dev`. Start again after the images are present. |
@@ -50,7 +51,7 @@ different ports only because it was started with a different
 | Startup never reaches `alice is ready` | Read the launcher's printed error first. While the relevant container still exists, use `ths --name alice logs zakura -f`, `ths --name alice logs lightwalletd -f`, or `ths --name alice logs app -f`. Startup has bounded phases and waits for dependencies, wallet sync, and Account 1 funding; a failed start attempts cleanup. Preserve any reported `lifecycle-recovery.json` when cleanup fails or remains uncertain. |
 | A send, faucet, or mining POST returns 503 during startup | Side-effecting POSTs require startup to finish. Health returns 200 only after startup completes, the node responds, and a wallet snapshot has been published. While dependencies are unavailable, use the local read-only key lookups below to observe saved payments; POST replay can wait. |
 | Wallet says data may be stale | Read `GET /api/v1/status`: `wallet_sync.state`, `wallet_sync.error`, observed and fully scanned heights **and hashes**. Check `ths logs lightwalletd -f` and `ths logs app -f`. Wait for a `ready` snapshot before relying on balances; require `settled: true` if node/index/wallet alignment matters. The server retries background reconciliation. |
-| A send reports insufficient spendable funds | Ask `POST /api/v1/send/quote` for that account and source pool: it dry-runs a proposal and returns `available_zatoshi`, `fee_zatoshi`, and `max_zatoshi` without broadcasting. Compare your amount with `max_zatoshi`, not with the displayed total, which may include a different pool, pending change, or funds not yet spendable. Also confirm wallet sync is ready. |
+| A send reports insufficient spendable funds | Run `ths wallet quote --from <N> --source-pool <POOL> --destination-pool <POOL>`, or ask `POST /api/v1/send/quote` for that account and pool route: it dry-runs a proposal and returns `available_zatoshi`, `fee_zatoshi`, and `max_zatoshi` without broadcasting. Compare your amount with `max_zatoshi`, not with the displayed total, which may include a different pool, pending change, or funds not yet spendable. Also confirm wallet sync is ready. |
 | Faucet or send returned `broadcast` activity | Save the txid and inspect activity and chain inclusion. Background checks can confirm account activity before wallet settlement. Pending dashboard sends and faucets retain their keys and exact details; use **Resume**. CLI payments retain journaled keys until terminal observation; rerun the same arguments and instance to resume. Use the [caller table](architecture/operations.md#which-caller-are-you-retrying) before another submission. |
 | A mine request timed out or errored | Read the latest job through `GET /api/v1/mining/jobs`, then inspect canonical height and tip hash. Admitted work survives a disconnected client or the CLI's 300-second timeout. `progress_uncertain` means acknowledged progress is a lower bound; sync failure can retain the full count while the job is failed. CLI reruns use fresh keys, so do not repeat the count blindly. See [Chapter 5](mining-and-sync.md#follow-mining-progress-in-the-dashboard). |
 
@@ -111,6 +112,12 @@ unknown create, or prune shared Docker resources. Recovery validates recorded
 allocation identities; it does not adopt a same-name replacement or remove
 resources from another instance. If the original container cannot be identified,
 the launcher keeps its recovery state rather than risking another container.
+A network or volume create that has begun is never stopped part way: Ctrl+C
+or `stop` waits for it, and one that times out is left running. Cleanup
+settles a create that never recorded its result only after `ps` shows no
+`docker create` for that resource still running. Then a resource with this instance's
+label is removed, a missing one is recorded as absent, and a same-name
+resource of anything else is kept and reported.
 
 This environment is Regtest only. Its seed is fixed and public, so these
 addresses and keys are known to anyone who has read the project. Never use

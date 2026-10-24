@@ -2,15 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   accountSchema,
   activitySchema,
+  addressSchema,
   miningJobSchema,
   miningJobResponseSchema,
   statusSchema,
+  transactionSchema,
 } from './schemas';
 
 const baseStatus = {
   instance: 'default',
   node: null,
   account_count: 5,
+  mining_mode: 'auto' as const,
   auto_mine: true,
   network: 'Regtest',
 };
@@ -45,6 +48,26 @@ describe('statusSchema', () => {
 
     expect(status.settled).toBe(false);
     expect(status.settlement_blocker).toBe('wallet_behind');
+  });
+
+  it('accepts every mining mode and their fields', () => {
+    expect(statusSchema.parse(baseStatus).mining_mode).toBe('auto');
+    const interval = statusSchema.parse({
+      ...baseStatus,
+      mining_mode: 'interval',
+      block_time: 5,
+    });
+    expect(interval.block_time).toBe(5);
+    expect(statusSchema.parse({ ...baseStatus, mining_mode: 'mempool' }).mine_on_mempool).toBe(
+      undefined,
+    );
+    expect(statusSchema.parse({ ...baseStatus, mining_mode: 'manual' }).mining_mode).toBe('manual');
+  });
+
+  it('remains compatible with servers that predate mining modes', () => {
+    const legacy: Record<string, unknown> = { ...baseStatus };
+    delete legacy.mining_mode;
+    expect(statusSchema.parse(legacy).mining_mode).toBeUndefined();
   });
 });
 
@@ -215,6 +238,38 @@ describe('activitySchema', () => {
   });
 });
 
+describe('transactionSchema', () => {
+  const transaction = {
+    txid: 'ab'.repeat(32),
+    vin: [],
+    vShieldedSpend: [],
+    vShieldedOutput: [],
+  };
+
+  it('accepts outputs with distinct node-provided indices', () => {
+    const parsed = transactionSchema.parse({
+      ...transaction,
+      vout: [
+        { n: 0, valueZat: 1 },
+        { n: 1, valueZat: 2 },
+      ],
+    });
+    expect(parsed.vout.map((output) => output.n)).toEqual([0, 1]);
+  });
+
+  it.each([
+    { vout: [{ valueZat: 1 }, { n: 1, valueZat: 2 }] },
+    {
+      vout: [
+        { n: 0, valueZat: 1 },
+        { n: 0, valueZat: 2 },
+      ],
+    },
+  ])('rejects outputs with missing or duplicate indices: $vout', ({ vout }) => {
+    expect(transactionSchema.safeParse({ ...transaction, vout }).success).toBe(false);
+  });
+});
+
 const job = {
   id: '588e9911-20b6-4c4a-a9ae-5f6c1abae953',
   requested_blocks: 10,
@@ -241,4 +296,30 @@ describe('miningJobSchema', () => {
   ])('rejects malformed snapshots: %j', (change) => {
     expect(miningJobSchema.safeParse({ ...job, ...change }).success).toBe(false);
   });
+});
+
+describe('addressSchema', () => {
+  it('accepts integer balances and fills missing fields with zero', () => {
+    expect(
+      addressSchema.parse({
+        address: 'tmAddress',
+        balance: { balance: 100_000_000, received: 250_000_000 },
+      }).balance,
+    ).toEqual({ balance: 100_000_000, received: 250_000_000 });
+    expect(addressSchema.parse({ address: 'tmAddress', balance: {} }).balance).toEqual({
+      balance: 0,
+      received: 0,
+    });
+  });
+  it.each([{ balance: 1.5 }, { received: 100.25 }, { balance: -1 }, { received: -5 }])(
+    'rejects non-integer balances: %j',
+    (balance) => {
+      expect(
+        addressSchema.safeParse({
+          address: 'tmAddress',
+          balance: { balance: 0, received: 0, ...balance },
+        }).success,
+      ).toBe(false);
+    },
+  );
 });

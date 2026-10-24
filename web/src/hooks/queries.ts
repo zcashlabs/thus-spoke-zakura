@@ -1,4 +1,5 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { userAccounts } from '@/lib/accounts';
 import {
   api,
   type Account,
@@ -7,6 +8,7 @@ import {
   type Block,
   type BlockPage,
   type MiningJob,
+  type Mempool,
   type SendQuote,
   type SendQuoteInput,
   type Status,
@@ -24,6 +26,7 @@ export const queryKeys = {
   activity: (limit: number) => ['activity', limit] as const,
   payment: (key: string) => ['activity', 'payment', key] as const,
   blocks: (before?: number) => ['blocks', before ?? 'tip'] as const,
+  mempool: ['mempool'] as const,
   block: (id: string) => ['block', id] as const,
   transaction: (txid: string) => ['transaction', txid] as const,
   address: (address: string) => ['address', address] as const,
@@ -34,8 +37,10 @@ export function useStatus(): UseQueryResult<Status> {
   return useQuery({ queryKey: queryKeys.status, queryFn: api.status });
 }
 
+export const accountsQueryOptions = { queryKey: queryKeys.accounts, queryFn: () => api.accounts() };
+
 export function useAccounts(): UseQueryResult<Account[]> {
-  return useQuery({ queryKey: queryKeys.accounts, queryFn: api.accounts });
+  return useQuery({ ...accountsQueryOptions, select: userAccounts });
 }
 
 export function useActivity(limit = 30): UseQueryResult<Activity[]> {
@@ -72,6 +77,15 @@ export function useBlock(id: string): UseQueryResult<Block> {
     queryKey: queryKeys.block(id),
     queryFn: () => api.block(id),
     enabled: id.length > 0,
+  });
+}
+
+export function useMempool(): UseQueryResult<Mempool> {
+  return useQuery({
+    queryKey: queryKeys.mempool,
+    queryFn: api.mempool,
+    // External broadcasts do not advance the chain or emit a server event.
+    refetchInterval: 2_000,
   });
 }
 

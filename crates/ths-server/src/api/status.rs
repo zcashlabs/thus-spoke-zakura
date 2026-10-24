@@ -92,7 +92,14 @@ pub(crate) struct Status {
     instance: String,
     node: Option<ChainInfo>,
     account_count: usize,
+    /// The exact selected mode: `auto`, `interval`, `mempool`, or `manual`.
+    mining_mode: &'static str,
+    /// Legacy flag: true only when a payment operation mines its own block.
     auto_mine: bool,
+    /// The interval in seconds when `mining_mode` is `interval`.
+    block_time: Option<u64>,
+    /// True when `mining_mode` is `mempool`.
+    mine_on_mempool: bool,
     network: &'static str,
     endpoints: PublicEndpoints,
     wallet_sync: WalletSyncStatus,
@@ -132,11 +139,15 @@ pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<Json<Stat
         settlement.settled = false;
         settlement.settlement_blocker = Some("chain_operation");
     }
+    let mining = state.mining_config();
     Ok(Json(Status {
         instance: state.0.instance.clone(),
         node,
         account_count: usize::from(USER_ACCOUNT_COUNT),
-        auto_mine: true,
+        mining_mode: mining.mode.as_str(),
+        auto_mine: mining.mode.auto_mine(),
+        block_time: mining.block_time,
+        mine_on_mempool: matches!(mining.mode, crate::mining::MiningMode::Mempool),
         network: "Regtest",
         endpoints: PublicEndpoints {
             dashboard: public_dashboard_endpoint(

@@ -8,6 +8,7 @@ impl Runtime {
         detach: bool,
         json: bool,
         port_offset: u16,
+        mining: MiningConfig,
     ) -> Result<()> {
         host_ports(port_offset)?;
         let shutdown = Shutdown::install()?;
@@ -50,6 +51,7 @@ impl Runtime {
             detach,
             json,
             port_offset,
+            mining,
             &DockerHost,
             &shutdown,
             &context,
@@ -98,6 +100,10 @@ impl Drop for StartOwnership {
 pub(super) struct Shutdown {
     pub(super) flag: Arc<AtomicBool>,
     pub(super) signal: Arc<AtomicI32>,
+    /// Another command reported it deleted the environment. A polling caller may
+    /// take the channel message before `wait` sees it, so the fact is latched
+    /// here rather than carried only by the message.
+    pub(super) deleted: Arc<AtomicBool>,
     /// Lets a `DeletionMonitor` end `wait` through the same channel as Ctrl+C.
     pub(super) sender: mpsc::Sender<Ended>,
     pub(super) receiver: mpsc::Receiver<Ended>,
@@ -110,6 +116,7 @@ impl Shutdown {
         let shutdown = Self {
             flag: Arc::new(AtomicBool::new(false)),
             signal: Arc::new(AtomicI32::new(0)),
+            deleted: Arc::new(AtomicBool::new(false)),
             sender: sender.clone(),
             receiver,
             worker: None,
@@ -142,6 +149,7 @@ impl Shutdown {
         Ok(Self {
             flag,
             signal,
+            deleted: Arc::new(AtomicBool::new(false)),
             sender,
             receiver,
             worker: Some((handle, worker)),
@@ -149,11 +157,34 @@ impl Shutdown {
     }
 
     pub(super) fn try_interrupted(&self) -> bool {
-        // Deletion notices only arrive while `wait` runs, which receives them itself.
-        if matches!(self.receiver.try_recv(), Ok(Ended::Interrupted)) {
-            self.flag.store(true, Ordering::SeqCst);
+        // Only Ctrl+C belongs to a polling caller. `recv` cannot peek, so a
+        // deletion notice taken here would be lost to `wait`, which is the only
+        // path that can report that another command already deleted the
+        // environment. Record what was taken so the notice survives regardless.
+        if let Ok(ended) = self.receiver.try_recv() {
+            self.latch(ended);
         }
         self.flag.load(Ordering::SeqCst)
+    }
+
+    /// Latches a delivered shutdown reason so it survives a caller that already
+    /// consumed the channel message, and returns it for the caller's own report.
+    fn latch(&self, ended: Ended) -> Ended {
+        match ended {
+            Ended::Interrupted => {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+            Ended::DeletedElsewhere => {
+                self.deleted.store(true, Ordering::SeqCst);
+            }
+        }
+        ended
+    }
+
+    /// True once another command has reported it deleted this environment,
+    /// whether the notice was delivered by `wait` or taken by a polling caller.
+    pub(super) fn deleted_elsewhere(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
     }
 
     pub(super) fn received_signal(&self) -> Option<i32> {
@@ -179,33 +210,41 @@ impl Shutdown {
     /// Waits for a shutdown signal, or for a `DeletionMonitor` to report that another command
     /// (`ths stop` or `ths reset` from another shell) deleted the environment.
     pub(super) fn wait(&self) -> Result<Ended> {
-        // Not `try_interrupted`: it would drop a deletion notice that is already queued.
+        // Not `try_interrupted`: it would take a deletion notice that is already
+        // queued. Read the latches instead, so a notice a polling caller already
+        // consumed still ends `wait` with the right reason.
         if self.flag.load(Ordering::SeqCst) {
             return Ok(Ended::Interrupted);
+        }
+        if self.deleted_elsewhere() {
+            return Ok(Ended::DeletedElsewhere);
         }
         let ended = self
             .receiver
             .recv()
             .context("waiting for a shutdown signal")?;
-        if ended == Ended::Interrupted {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-        Ok(ended)
+        Ok(self.latch(ended))
     }
 
     pub(super) fn wait_timeout(&self, timeout: Duration) -> Result<()> {
         if self.try_interrupted() {
             bail!("interrupted");
         }
+        if self.deleted_elsewhere() {
+            bail!("{DELETED_ELSEWHERE}");
+        }
         match self.receiver.recv_timeout(timeout) {
-            Ok(_) => {
-                self.flag.store(true, Ordering::SeqCst);
-                bail!("interrupted");
-            }
+            Ok(ended) => match self.latch(ended) {
+                Ended::Interrupted => bail!("interrupted"),
+                Ended::DeletedElsewhere => bail!("{DELETED_ELSEWHERE}"),
+            },
             Err(RecvTimeoutError::Timeout) => Ok(()),
             Err(RecvTimeoutError::Disconnected) => {
                 if self.try_interrupted() {
                     bail!("interrupted");
+                }
+                if self.deleted_elsewhere() {
+                    bail!("{DELETED_ELSEWHERE}");
                 }
                 Err(anyhow!("waiting for a shutdown signal"))
             }
@@ -224,15 +263,15 @@ impl Drop for Shutdown {
     }
 }
 
+const DELETED_ELSEWHERE: &str = "the environment was deleted by another command";
+
 /// How a running environment's foreground `start` ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Ended {
     /// Ctrl+C or a termination signal: `start` deletes the environment itself.
     Interrupted,
     /// Another command already deleted it.
     DeletedElsewhere,
-    /// `start --detach` reached readiness and left the environment running.
-    Detached,
 }
 
 pub(super) trait StartHost {
@@ -284,12 +323,14 @@ pub(super) trait StartHost {
     ) -> Result<CleanupReport> {
         self.delete(runtime, name, context, deadline)
     }
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: Option<u16>,
+        mining: MiningConfig,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance>;
@@ -403,12 +444,14 @@ impl StartHost for DockerHost {
         runtime.cleanup_core(name, &docker, true, deadline, context)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
         port_offset: Option<u16>,
+        mining: MiningConfig,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
@@ -574,6 +617,7 @@ impl StartHost for DockerHost {
             journal,
             app_budget,
             vec![network],
+            mining,
         )?;
         shutdown.check()?;
         let app_start = context.startup_deadline(context.policy.startup_docker);
@@ -701,6 +745,7 @@ impl Runtime {
             &context,
         )
     }
+
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub(super) fn start_with_policy(
@@ -722,6 +767,7 @@ impl Runtime {
             detach,
             json,
             port_offset,
+            MiningConfig::default(),
             host,
             shutdown,
             context,
@@ -753,6 +799,7 @@ impl Runtime {
         detach: bool,
         json: bool,
         port_offset: u16,
+        mining: MiningConfig,
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
@@ -781,6 +828,7 @@ impl Runtime {
                 name,
                 shutdown,
                 Some(port_offset),
+                mining,
                 context,
                 &mut journal,
             )?;
@@ -809,7 +857,7 @@ impl Runtime {
                         "\nRunning in the background. Delete it with `ths --name {name} stop`."
                     );
                 }
-                return Ok(Ended::Detached);
+                return Ok(None);
             }
             if !no_open
                 && let Err(error) = host.open_url(&allocated.endpoints.dashboard, shutdown, context)
@@ -827,13 +875,13 @@ impl Runtime {
             let ready = self.mark_ready(name, ownership.session())?;
             let ended = host.wait_for_shutdown(&allocated.app_container, shutdown);
             drop(ready);
-            ended
+            ended.map(Some)
         })();
-        if matches!(primary, Ok(Ended::Detached)) {
-            // Ready: from here the environment belongs to `stop` / `reset`, not this process.
+        // `None`: detached once ready, so the environment belongs to `stop` / `reset` now.
+        let Some(primary) = primary.transpose() else {
             cleanup.state = CleanupGuard::Inactive;
             return Ok(());
-        }
+        };
         cleanup.state = CleanupGuard::Explicit;
         let primary = primary.map_err(|error| ownership.session().explain(name, error));
         if matches!(primary, Ok(Ended::DeletedElsewhere)) {

@@ -99,6 +99,19 @@ export function SendDialog({
     },
   });
 
+  const draftRevision = useRef(0);
+  const { subscribe } = form;
+  useEffect(
+    () =>
+      subscribe({
+        formState: { values: true },
+        callback: () => {
+          draftRevision.current += 1;
+        },
+      }),
+    [subscribe],
+  );
+
   const current = sendSchema.safeParse(useWatch({ control: form.control }));
   const variablesFor = (values: SendValues) => ({
     from_account: values.from_account,
@@ -249,10 +262,12 @@ export function SendDialog({
     if (paymentUri.trim() === '') return;
     paymentUriRevision.current += 1;
     const uriRevision = paymentUriRevision.current;
+    const revision = draftRevision.current;
     setPaymentUriNeedsApply(true);
     parseUri.mutate(paymentUri, {
       onSuccess: (parsed) => {
-        if (uriRevision === paymentUriRevision.current) {
+        // Any edit, including Max and changing a value back, invalidates this parse.
+        if (uriRevision === paymentUriRevision.current && revision === draftRevision.current) {
           applyPaymentUri(parsed);
           setPaymentUriNeedsApply(false);
         }
@@ -338,7 +353,8 @@ export function SendDialog({
           setCheckingSendQuote(false);
         }
       }
-      if (uriRevision !== paymentUriRevision.current) {
+      // Closing the form before quoting finishes must not create a new payment.
+      if (!mounted.current || uriRevision !== paymentUriRevision.current) {
         releaseSendSubmission();
         return;
       }
@@ -356,7 +372,7 @@ export function SendDialog({
       }
       if (quoted !== undefined && values.amount > quoted.max_zatoshi) {
         form.setError('amount', {
-          message: `The ${formatZecAmount(quoted.fee_zatoshi)} network fee leaves at most ${formatZecAmount(quoted.max_zatoshi)} spendable — Account ${values.from_account} holds ${formatZecAmount(quoted.available_zatoshi)} in the ${values.source_pool} pool.`,
+          message: `For this send, Account ${values.from_account}'s ${values.source_pool} pool has ${formatZecAmount(quoted.available_zatoshi)} available. The ${formatZecAmount(quoted.fee_zatoshi)} network fee leaves at most ${formatZecAmount(quoted.max_zatoshi)} spendable.`,
         });
         releaseSendSubmission();
         return;

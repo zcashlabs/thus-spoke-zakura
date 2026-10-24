@@ -7,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     str::FromStr,
     sync::{
         Arc, Mutex, PoisonError,
@@ -20,7 +20,7 @@ use std::{
 
 use crate::lifecycle::{
     Cancellation, CapturedOutput, CommandFailure, CommandFailureKind, Deadline, HelperSet,
-    LifecyclePolicy, OutputMode, run,
+    LifecyclePolicy, OutputMode, run, run_leaving_running_on_timeout,
 };
 #[cfg(test)]
 use crate::lifecycle::{ChildOps, run_observed};
@@ -60,6 +60,7 @@ use crate::client::{RuntimeStatus, runtime_status};
 pub(crate) use instance::Endpoints;
 pub(crate) use resources::container_running;
 use resources::*;
+mod rpc;
 mod runner;
 use runner::*;
 mod startup;
@@ -67,6 +68,66 @@ use startup::*;
 
 pub struct Runtime {
     root: PathBuf,
+}
+
+/// The mining mode selected for a new environment. The server owns the actual
+/// behavior; the launcher only validates the flags and forwards the choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MiningConfig {
+    pub(crate) mode: MiningMode,
+    pub(crate) block_time: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MiningMode {
+    Auto,
+    Interval,
+    Mempool,
+    Manual,
+}
+
+impl MiningMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Interval => "interval",
+            Self::Mempool => "mempool",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl Default for MiningConfig {
+    fn default() -> Self {
+        Self {
+            mode: MiningMode::Auto,
+            block_time: None,
+        }
+    }
+}
+
+impl MiningConfig {
+    pub(crate) fn from_flags(
+        block_time: Option<u64>,
+        mine_on_mempool: bool,
+        no_auto_mine: bool,
+    ) -> Self {
+        match (block_time, mine_on_mempool, no_auto_mine) {
+            (Some(seconds), _, _) => Self {
+                mode: MiningMode::Interval,
+                block_time: Some(seconds),
+            },
+            (None, true, _) => Self {
+                mode: MiningMode::Mempool,
+                block_time: None,
+            },
+            (None, false, true) => Self {
+                mode: MiningMode::Manual,
+                block_time: None,
+            },
+            (None, false, false) => Self::default(),
+        }
+    }
 }
 
 impl Runtime {

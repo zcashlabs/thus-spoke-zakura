@@ -54,6 +54,11 @@ export function MineDialog({
           Unable to start mining: {errorMessage(mine.error)}
         </p>
       )}
+      {mine.cleanupError && (
+        <p role="alert" className="text-negative text-[13px]">
+          Mining job accepted, but browser storage cleanup failed: {mine.cleanupError}
+        </p>
+      )}
       <form onSubmit={(event) => void submit(event)} noValidate>
         <Field
           label="Number of blocks"

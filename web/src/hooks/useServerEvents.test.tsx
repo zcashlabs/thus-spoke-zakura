@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AddressDetail } from '@/features/explorer/AddressDetail';
 import { BlockDetail } from '@/features/explorer/BlockDetail';
 import { TransactionDetail } from '@/features/explorer/TransactionDetail';
 import { AppProviders } from '@/app/providers';
+import { MempoolPanel } from '@/features/explorer/MempoolPanel';
+import { WalletActionsContext } from '@/features/wallet/wallet-actions-context';
 import { renderWithProviders, requestUrl } from '@/test/utils';
 import { useAccounts } from './queries';
 import { useServerEvents } from './useServerEvents';
@@ -147,6 +149,7 @@ describe('useServerEvents', () => {
       [{ queryKey: ['send-quote'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['blocks'] }],
+      [{ queryKey: ['mempool'] }],
       [{ queryKey: ['block'] }],
       [{ queryKey: ['transaction'] }],
       [{ queryKey: ['address'] }],
@@ -180,6 +183,26 @@ describe('useServerEvents', () => {
     expect(await screen.findByText('4 conf')).toBeInTheDocument();
   });
 
+  it('removes a mined transaction from the mempool on a chain update', async () => {
+    let transactions = [TXID];
+    routes = { '/mempool': () => ({ transactions }) };
+    renderPage(
+      '/explorer',
+      '/explorer',
+      <WalletActionsContext
+        value={{ openMine: vi.fn(), openSend: vi.fn(), openFaucet: vi.fn(), openRequest: vi.fn() }}
+      >
+        <MempoolPanel />
+      </WalletActionsContext>,
+    );
+    await screen.findByRole('link', { name: TXID });
+    transactions = [];
+    FakeEventSource.current?.emit('chain');
+    await waitFor(() => expect(screen.queryByRole('link', { name: TXID })).not.toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: 'Pending transactions' })).not.toBeInTheDocument();
+    expect(requestsTo('/mempool')).toBe(2);
+  });
+
   it('refreshes an open address page on a new block', async () => {
     let balance = 0;
     routes = {
@@ -203,6 +226,7 @@ describe('useServerEvents', () => {
       '/status': () => ({
         instance: 'test',
         account_count: 5,
+        mining_mode: 'auto',
         auto_mine: true,
         network: 'regtest',
         node: { blocks: 106 + confirmations - 1, bestblockhash: 'ab'.repeat(32) },

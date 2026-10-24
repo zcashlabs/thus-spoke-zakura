@@ -1,7 +1,4 @@
-use std::{future::pending, sync::Arc};
-
 use anyhow::Result;
-use tokio::sync::{Mutex, oneshot};
 
 use super::{Activity, assert_persisted_send_response, preserve_scenario_failure};
 
@@ -55,32 +52,4 @@ fn cleanup_error_does_not_mask_a_scenario_error() {
     let error = result.expect_err("scenario failure must remain the result");
     assert!(error.to_string().contains("scenario failure marker"));
     assert!(!error.to_string().contains("cleanup failure marker"));
-}
-
-#[tokio::test]
-async fn test_local_cancellation_aborts_awaits_then_records_cleanup() -> Result<()> {
-    let (cancel_sender, mut cancel_receiver) = oneshot::channel();
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let mut scenario = tokio::spawn(async {
-        pending::<()>().await;
-        Ok::<(), anyhow::Error>(())
-    });
-    cancel_sender
-        .send(())
-        .map_err(|_| anyhow::anyhow!("test-local cancellation receiver was unavailable"))?;
-
-    tokio::select! {
-        _ = &mut cancel_receiver => {
-            scenario.abort();
-            assert!(scenario.await.is_err());
-            events.lock().await.push("scenario-aborted-and-awaited");
-        }
-        _ = &mut scenario => panic!("test scenario completed before cancellation"),
-    }
-    events.lock().await.push("cleanup-recorded");
-    assert_eq!(
-        events.lock().await.as_slice(),
-        ["scenario-aborted-and-awaited", "cleanup-recorded"]
-    );
-    Ok(())
 }

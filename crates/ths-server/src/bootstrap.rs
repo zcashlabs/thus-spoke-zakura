@@ -32,11 +32,14 @@ pub(super) async fn serve(data_dir: PathBuf) -> Result<()> {
     let store = Store::open(data_dir.join("ths.db"))?;
     store.initialize()?;
     let wallet = wallet::RealWallet::open(&data_dir, &store.seed()?)?;
-    let state = AppState::new(
+    let mining_config = crate::mining::MiningConfig::from_env()
+        .context("invalid mining configuration in the environment")?;
+    let state = AppState::new_with_mining(
         store,
         wallet,
         std::env::var("THS_ZAKURA_RPC").unwrap_or_else(|_| "http://127.0.0.1:18232".into()),
         std::env::var("THS_INSTANCE").unwrap_or_else(|_| "default".into()),
+        mining_config,
     );
     let address: SocketAddr = std::env::var("THS_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8080".into())
@@ -53,12 +56,35 @@ pub(super) async fn serve(data_dir: PathBuf) -> Result<()> {
 }
 
 fn background_tasks(state: AppState) -> tokio::task::JoinSet<Result<()>> {
+    let mining = state.mining_config();
     let mut background = tokio::task::JoinSet::new();
     background.spawn(start_and_sync(state.clone()));
+    let progression = state.clone();
     background.spawn(async move {
-        crate::payments::progression::payment_confirmation_loop(state).await;
+        crate::payments::progression::payment_confirmation_loop(progression).await;
         Ok(())
     });
+    match mining {
+        crate::mining::MiningConfig {
+            mode: crate::mining::MiningMode::Interval,
+            block_time: Some(seconds),
+        } => {
+            background.spawn(async move {
+                crate::mining::interval_mining_loop(state, Duration::from_secs(seconds)).await;
+                Ok(())
+            });
+        }
+        crate::mining::MiningConfig {
+            mode: crate::mining::MiningMode::Mempool,
+            ..
+        } => {
+            background.spawn(async move {
+                crate::mining::mempool_mining_loop(state).await;
+                Ok(())
+            });
+        }
+        _ => {}
+    }
     background
 }
 

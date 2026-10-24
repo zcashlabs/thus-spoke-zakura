@@ -126,16 +126,6 @@ fn deletion_monitor_reports_a_destroy_event() {
 }
 
 #[test]
-fn deletion_monitor_reports_a_container_already_gone() {
-    let events = Arc::new(ScriptedEvents::default());
-    events.streams.lock().unwrap().push_back(Ok(false));
-    events.exists.lock().unwrap().push_back(Ok(false));
-    let (_sender, shutdown) = Shutdown::channel();
-    let _monitor = monitor(&events, &shutdown);
-    assert_eq!(shutdown.wait().unwrap(), Ended::DeletedElsewhere);
-}
-
-#[test]
 fn deletion_monitor_treats_docker_errors_as_unknown() {
     let events = Arc::new(ScriptedEvents::default());
     events

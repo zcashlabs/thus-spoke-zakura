@@ -6,7 +6,7 @@ use transparent::{
 use zcash_client_backend::{
     data_api::testing::{
         self, AddressType, IronwoodFvk, TestBuilder, orchard::OrchardPoolTester,
-        pool::ShieldedPoolTester,
+        pool::ShieldedPoolTester, sapling::SaplingPoolTester,
     },
     wallet::WalletTransparentOutput,
 };
@@ -57,6 +57,17 @@ fn fund_ironwood(st: &mut TestState, value: u64) {
     let (height, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
     st.scan_cached_blocks(height, 1);
     assert_eq!(st.get_total_balance(account_id), value);
+    add_empty_blocks(st, 5);
+}
+
+fn fund_sapling(st: &mut TestState, value: u64) {
+    let fvk = SaplingPoolTester::test_account_fvk(st);
+    let (height, _, _) = st.generate_next_block(
+        &fvk,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(value),
+    );
+    st.scan_cached_blocks(height, 1);
     add_empty_blocks(st, 5);
 }
 
@@ -221,6 +232,81 @@ async fn canonical_balances_ignore_unmined_effects_without_deleting_them() {
         )
         .unwrap();
     assert_eq!(retained, (1, 1, 2));
+}
+
+#[test]
+fn ironwood_send_rejects_sapling_funds_when_ironwood_is_empty_or_insufficient() {
+    for ironwood in [0, 1_000_000] {
+        let mut st = test_state();
+        if ironwood != 0 {
+            fund_ironwood(&mut st, ironwood);
+        }
+        fund_sapling(&mut st, 10_000_000);
+        for destination in ["ironwood", "transparent"] {
+            let quoted = quote(&mut st, "ironwood", destination).unwrap();
+            assert_eq!(quoted.available_zatoshi, ironwood);
+            let recipient = recipient(&st, destination);
+            let account_id = st.test_account().unwrap().id();
+            let params = *st.network();
+            let error = RealWallet::propose_send(
+                st.wallet_mut(),
+                &params,
+                account_id,
+                "ironwood",
+                &recipient,
+                Zatoshis::const_from_u64(5_000_000),
+                None,
+            )
+            .expect_err("Sapling must not cover an Ironwood shortfall");
+            assert!(
+                matches!(error.downcast_ref(), Some(PaymentError::InsufficientFunds { available, .. }) if *available == ironwood),
+                "{ironwood} Ironwood -> {destination}: {error:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ironwood_send_uses_only_ironwood_inputs_with_both_pools_funded() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 10_000_000);
+    fund_sapling(&mut st, 10_000_000);
+    for destination in ["ironwood", "transparent"] {
+        let recipient = recipient(&st, destination);
+        let account_id = st.test_account().unwrap().id();
+        let params = *st.network();
+        let proposal = RealWallet::propose_send(
+            st.wallet_mut(),
+            &params,
+            account_id,
+            "ironwood",
+            &recipient,
+            Zatoshis::const_from_u64(5_000_000),
+            None,
+        )
+        .unwrap();
+        let notes: Vec<_> = proposal
+            .steps()
+            .iter()
+            .flat_map(|step| {
+                step.shielded_inputs()
+                    .into_iter()
+                    .flat_map(|inputs| inputs.notes())
+            })
+            .collect();
+        assert!(!notes.is_empty());
+        assert!(
+            notes
+                .iter()
+                .all(|note| note.note().pool() == ShieldedPool::Ironwood)
+        );
+        assert!(
+            proposal
+                .steps()
+                .iter()
+                .all(|step| step.transparent_inputs().is_empty())
+        );
+    }
 }
 
 #[test]
@@ -527,4 +613,48 @@ async fn shielding_stale_replacement_authorization_returns_the_newer_journal() {
     assert_eq!(retained.txid, prepared.txid);
     assert_eq!(retained.raw_transaction, prepared.raw_transaction);
     assert_eq!(retained.expiry_height, prepared.expiry_height);
+}
+
+// A fixed send gathers at most 1,333 transparent inputs. With one more 100,000-zatoshi UTXO
+// than that, the quoted maximum must still be an amount Send can propose.
+#[test]
+fn transparent_quote_max_is_sendable_when_utxos_exceed_the_input_cap() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 100_000);
+    st.wallet()
+        .conn()
+        .execute(
+            "WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM n WHERE value < 1333)
+             INSERT INTO transparent_received_outputs(
+                transaction_id, output_index, account_id, address, script, value_zat, address_id)
+             SELECT transaction_id, n.value, account_id, address, script, value_zat, address_id
+             FROM transparent_received_outputs, n
+             WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+    let quote = quote(&mut st, "transparent", "ironwood").unwrap();
+    assert_eq!(MAX_TRANSPARENT_INPUTS, 1_333);
+    // 1,333 transparent + 2 Ironwood logical actions at 5,000 zatoshis.
+    assert_eq!(quote.fee_zatoshi, 6_675_000);
+    assert_eq!(quote.available_zatoshi, 133_300_000);
+    assert_eq!(quote.max_zatoshi, 126_625_000);
+
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let params = *st.network();
+    let mut propose = |amount| {
+        RealWallet::propose_send(
+            st.wallet_mut(),
+            &params,
+            account_id,
+            "transparent",
+            &recipient,
+            Zatoshis::from_u64(amount).unwrap(),
+            None,
+        )
+    };
+    propose(quote.max_zatoshi).unwrap();
+    assert!(propose(quote.max_zatoshi + 1).is_err());
 }

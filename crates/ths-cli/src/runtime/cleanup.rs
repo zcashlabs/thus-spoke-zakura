@@ -105,10 +105,6 @@ impl Runtime {
         };
         let mut environment_found = recorded || loaded.is_some();
         let mut journal = loaded;
-        let kept = journal
-            .as_ref()
-            .map(|existing| retained_mutation_resources(existing.record(), false))
-            .unwrap_or_default();
         let work_deadline = deadline.saturating_sub(context.policy.termination_reserve);
         let prefix = prefix(name);
         let mut failures = Vec::new();
@@ -130,6 +126,51 @@ impl Runtime {
         let mut targets: Vec<(String, String, String)> = Vec::new();
         let mut absent_containers = Vec::new();
         let mut consider = |kind: &str, target: &str| -> Result<()> {
+            if let Some(index) = journal
+                .as_ref()
+                .filter(|_| context.helpers_finished())
+                .and_then(|existing| interrupted_create(existing.record(), kind, target))
+            {
+                match create_finished(context, work_deadline, kind, target, name) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        uncertain = true;
+                        failures.push(format!(
+                            "kept {kind} {target}: an earlier `docker {kind} create` for it is still running"
+                        ));
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        uncertain = true;
+                        failures.push(format!(
+                            "kept {kind} {target}: checking for a running create: {error:#}"
+                        ));
+                        return Ok(());
+                    }
+                }
+                let settled = match owned_resource(docker, kind, target, name) {
+                    Ok(Some(id)) => (recovery::MutationOutcome::ReconciledPresent, Some(id)),
+                    Ok(None) => (recovery::MutationOutcome::ReconciledAbsent, None),
+                    Err(error) => {
+                        uncertain = true;
+                        failures.push(format!("kept {kind} {target}: {error:#}"));
+                        return Ok(());
+                    }
+                };
+                if let Some(existing) = &mut journal
+                    && let Err(error) = existing.finish(index, settled.0, settled.1)
+                {
+                    uncertain = true;
+                    failures.push(format!(
+                        "recording the interrupted create of {kind} {target}: {error:#}"
+                    ));
+                    return Ok(());
+                }
+            }
+            let kept = journal
+                .as_ref()
+                .map(|existing| retained_mutation_resources(existing.record(), false))
+                .unwrap_or_default();
             if kept.contains(&(resource_kind(kind), target.to_owned())) {
                 let present = match resource_absent(docker, kind, target) {
                     Ok(absent) => !absent,
@@ -600,6 +641,44 @@ pub(super) fn resource_absent(
         _ => unreachable!("resource kind is fixed by the caller"),
     };
     Ok(!names.lines().any(|candidate| candidate.trim() == name))
+}
+
+fn create_finished(
+    context: &LifecycleContext,
+    deadline: Deadline,
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+) -> Result<bool> {
+    let polling = deadline.saturating_sub(context.policy.startup_docker);
+    loop {
+        if !create_running(context, deadline, kind, target, name)? {
+            return Ok(true);
+        }
+        if polling.expired() {
+            return Ok(false);
+        }
+        thread::sleep(CREATE_CHECK_INTERVAL.min(polling.remaining()));
+    }
+}
+
+const CREATE_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
+fn interrupted_create(
+    record: &recovery::RecoveryRecord,
+    kind: &str,
+    target: &str,
+) -> Option<usize> {
+    if !matches!(kind, "network" | "volume") {
+        return None;
+    }
+    record.mutations.iter().rposition(|mutation| {
+        mutation.operation == recovery::MutationOperation::Create
+            && mutation.resource.kind == resource_kind(kind)
+            && mutation.resource.name == target
+            && mutation.resource.identity.is_none()
+            && unresolved_allocation(mutation)
+    })
 }
 
 pub(super) fn unresolved_allocation(mutation: &recovery::MutationRecord) -> bool {

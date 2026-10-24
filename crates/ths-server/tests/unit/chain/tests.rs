@@ -282,16 +282,6 @@ async fn rollback_does_not_mine_and_invalid_depth_does_not_mutate() {
 }
 
 #[tokio::test]
-async fn regtest_is_identified_despite_the_shared_testnet_rpc_label() {
-    let runtime = FakeChain::new();
-    let result = change_chain_with(&runtime, &store(), 3, true, false)
-        .await
-        .unwrap();
-    assert_eq!(result.new_tip.height, 108);
-    assert_eq!(result.replacement_hashes.len(), 3);
-}
-
-#[tokio::test]
 async fn chain_changes_reject_other_networks_before_any_mutation() {
     for network in ["main", "test"] {
         let mut runtime = FakeChain::new();

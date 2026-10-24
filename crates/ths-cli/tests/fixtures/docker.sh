@@ -53,8 +53,14 @@ case "$1 $2" in
     'network create'|'volume create')
         kind=$1
         for target do :; done
+        if [ "${THS_TEST_SLOW_CREATE:-}" = "$kind" ]; then
+            sleep "${THS_TEST_SLOW_CREATE_SECONDS:-2}"
+        fi
         mkdir -p "$THS_TEST_STATE/$kind"
         touch "$THS_TEST_STATE/$kind/$target"
+        if [ "${THS_TEST_SLOW_CREATE:-}" = "$kind" ]; then
+            printf 'finished %s create\n' "$kind" >> "$THS_TEST_COMMANDS"
+        fi
         printf '%s\n' "$target"
         ;;
     'create --name')

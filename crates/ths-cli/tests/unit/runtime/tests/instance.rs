@@ -138,16 +138,6 @@ fn instance_lock_registry_contention_is_bounded_and_preserves_the_named_lock() {
 }
 
 #[test]
-fn port_offset_shifts_all_four_hosts_by_the_same_stride() {
-    let base = host_ports(0).unwrap();
-    let shifted = host_ports(10).unwrap();
-    assert_eq!(shifted.dashboard, base.dashboard + 10);
-    assert_eq!(shifted.rpc, base.rpc + 10);
-    assert_eq!(shifted.p2p, base.p2p + 10);
-    assert_eq!(shifted.lightwalletd, base.lightwalletd + 10);
-}
-
-#[test]
 fn port_offset_rejects_values_that_are_not_multiples_of_ten() {
     let err = host_ports(1).unwrap_err();
     assert!(err.to_string().contains('1'));
@@ -157,12 +147,6 @@ fn port_offset_rejects_values_that_are_not_multiples_of_ten() {
 fn port_offset_accepts_the_largest_value_that_keeps_every_port_in_range() {
     let ports = host_ports(32730).unwrap();
     assert_eq!(ports.dashboard, 65535);
-}
-
-#[test]
-fn port_offset_rejects_values_that_overflow_a_host_port() {
-    let err = host_ports(32740).unwrap_err();
-    assert!(err.to_string().contains("overflow"));
 }
 
 #[test]

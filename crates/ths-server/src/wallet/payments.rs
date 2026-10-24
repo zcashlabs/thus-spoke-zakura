@@ -59,6 +59,17 @@ where
 {
 }
 
+/// Share of a block one fixed transparent send may fill with inputs (the selector's default).
+const TRANSPARENT_BLOCK_SPACE_PERCENT: u32 = 10;
+
+/// The most transparent inputs that share allows at the standard P2PKH input size (1,333). Fixed
+/// sends and the Max quote use the same bound, so a fragmented balance never quotes more than a
+/// Send can spend.
+const MAX_TRANSPARENT_INPUTS: usize = zcash_protocol::constants::MAX_BLOCK_BYTES
+    * TRANSPARENT_BLOCK_SPACE_PERCENT as usize
+    / 100
+    / zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_INPUT_SIZE;
+
 impl RealWallet {
     /// Builds the proposal a send would use, without signing or broadcasting.
     fn propose_send<DbT>(
@@ -73,56 +84,42 @@ impl RealWallet {
     where
         DbT: ProposalDb,
     {
-        let proposal = if source_pool == "transparent" {
-            let request = TransactionRequest::new(vec![Payment::new(
-                recipient.to_zcash_address(params),
-                Some(amount),
-                memo,
-                None,
-                None,
-                vec![],
-            )?])?;
-            let selector = GreedyInputSelector::<DbT>::new();
-            let change = SingleOutputChangeStrategy::<DbT>::new(
-                StandardFeeRule::Zip317,
-                None,
-                ShieldedPool::Ironwood,
-                DustOutputPolicy::default(),
-            );
-            let policy = SpendPolicy::shielded_pools([])
-                .with_transparent(TransparentSpendPolicy::any_account_addr());
-            propose_transfer::<_, _, _, _, Infallible>(
-                db,
-                params,
-                account_id,
-                &selector,
-                &change,
-                request,
-                ConfirmationsPolicy::MIN,
-                &policy,
-                None,
-                None,
-            )
-        } else if source_pool == "ironwood" {
-            // Once NU6.3 is active the SDK builds a unified-address payment's
-            // Orchard receiver as an Ironwood output, and routes change there too.
-            propose_standard_transfer_to_address::<_, _, Infallible>(
-                db,
-                params,
-                StandardFeeRule::Zip317,
-                account_id,
-                ConfirmationsPolicy::MIN,
-                recipient,
-                amount,
-                memo,
-                None,
-                ShieldedPool::Ironwood,
-                None,
-                None,
-            )
-        } else {
-            bail!("source pool must be transparent or ironwood")
-        }
+        let policy = match source_pool {
+            "transparent" => SpendPolicy::shielded_pools([])
+                .with_transparent(TransparentSpendPolicy::any_account_addr()),
+            // The standard address helper permits every shielded pool. A fixed
+            // send must restrict inputs to the same source pool as its quote.
+            "ironwood" => SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
+            _ => bail!("source pool must be transparent or ironwood"),
+        };
+        let request = TransactionRequest::new(vec![Payment::new(
+            recipient.to_zcash_address(params),
+            Some(amount),
+            memo,
+            None,
+            None,
+            vec![],
+        )?])?;
+        let selector = GreedyInputSelector::<DbT>::new()
+            .with_shielding_block_space_percent(TRANSPARENT_BLOCK_SPACE_PERCENT);
+        let change = SingleOutputChangeStrategy::<DbT>::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        );
+        let proposal = propose_transfer::<_, _, _, _, Infallible>(
+            db,
+            params,
+            account_id,
+            &selector,
+            &change,
+            request,
+            ConfirmationsPolicy::MIN,
+            &policy,
+            None,
+            None,
+        )
         .map_err(|error| match error {
             WalletError::InsufficientFunds {
                 available,
@@ -406,7 +403,7 @@ impl RealWallet {
                     CoinbaseFilter::NonCoinbaseOnly,
                     None,
                     TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-                    usize::MAX,
+                    MAX_TRANSPARENT_INPUTS,
                     &StandardFeeRule::Zip317,
                     LockFilter::Policy(&LockedInputPolicy::Exclude),
                 )?

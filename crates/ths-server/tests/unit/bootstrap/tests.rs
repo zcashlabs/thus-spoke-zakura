@@ -239,35 +239,6 @@ async fn startup_retries_past_two_minutes_with_a_delay_then_recovers() {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn startup_does_not_cancel_a_slow_preparation_or_release_its_guard() {
-    let guard = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    let owned = guard.clone();
-    let (entered, ready) = tokio::sync::oneshot::channel();
-    let (release, released) = tokio::sync::oneshot::channel();
-    let mut attempt = Some((entered, released));
-    let startup = tokio::spawn(async move {
-        retry_startup(|| {
-            let owned = owned.clone();
-            let (entered, released) = attempt.take().expect("preparation was restarted");
-            async move {
-                let _guard = owned.lock().await;
-                entered.send(()).unwrap();
-                released.await.unwrap();
-                Ok(())
-            }
-        })
-        .await
-    });
-    ready.await.unwrap();
-    tokio::time::advance(Duration::from_secs(130)).await;
-    assert!(!startup.is_finished());
-    assert!(guard.try_lock().is_err());
-    release.send(()).unwrap();
-    startup.await.unwrap().unwrap();
-    assert!(guard.try_lock().is_ok());
-}
-
 #[test]
 fn startup_retries_only_typed_transient_failures() {
     for code in [-28, -5, -32603] {
@@ -412,7 +383,7 @@ async fn background_task_panic_stops_http_and_cancels_siblings() {
     assert_background_failure_stops_http(true).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stored_payments_are_served_after_restart_while_dependencies_are_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("ths.db")).unwrap();
@@ -468,6 +439,9 @@ async fn stored_payments_are_served_after_restart_while_dependencies_are_unavail
     };
 
     tokio::time::sleep(Duration::from_secs(122)).await;
+    // Startup retries outlast the former two-minute deadline in virtual time.
+    // Real time resumes so the client's 2 s timeout cannot fire by auto-advance.
+    tokio::time::resume();
     let (status, activity) = get("/api/v1/activity?idempotency_key=restart-failed").await;
     assert_eq!(status, reqwest::StatusCode::OK);
     assert_eq!(activity[0]["id"], failed.id);

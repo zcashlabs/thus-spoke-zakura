@@ -5,6 +5,9 @@ import { parseZec, ZATOSHIS_PER_ZEC } from '@/lib/money';
 /** Server-side faucet ceiling (`api.rs`: `5 * ZATOSHIS_PER_ZEC`). */
 export const FAUCET_MAX_ZATOSHI = 5n * ZATOSHIS_PER_ZEC;
 
+/** Consensus supply ceiling (`zcash_protocol::value::MAX_MONEY`). */
+export const MAX_MONEY_ZATOSHI = 21_000_000n * ZATOSHIS_PER_ZEC;
+
 /** Server-side mining bounds (`api.rs`: `(1..=10_000)`). */
 export const MINE_MIN_BLOCKS = 1;
 export const MINE_MAX_BLOCKS = 10_000;
@@ -30,6 +33,13 @@ const amountField = z
     }
     if (zatoshi <= 0n) {
       ctx.addIssue({ code: 'custom', message: 'Amount must be greater than zero.' });
+      return z.NEVER;
+    }
+    if (zatoshi > MAX_MONEY_ZATOSHI) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Amount must not exceed 21,000,000 ZEC.',
+      });
       return z.NEVER;
     }
     return zatoshi;

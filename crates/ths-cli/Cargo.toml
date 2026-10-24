@@ -17,6 +17,7 @@ release-distribution = []
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+clap_complete = "4.5"
 directories.workspace = true
 nix.workspace = true
 reqwest.workspace = true

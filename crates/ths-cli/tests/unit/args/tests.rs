@@ -119,7 +119,10 @@ fn separates_building_from_starting() {
         Some(Command::Start {
             no_open: false,
             detach: false,
-            port_offset: 10
+            port_offset: 10,
+            block_time: None,
+            mine_on_mempool: false,
+            no_auto_mine: false,
         })
     ));
 
@@ -132,7 +135,8 @@ fn separates_building_from_starting() {
             Some(Command::Start {
                 no_open: false,
                 detach: true,
-                port_offset: 0
+                port_offset: 0,
+                ..
             })
         ));
     }
@@ -150,6 +154,50 @@ fn separates_building_from_starting() {
         cli.command,
         Some(Command::Endpoints { env: true })
     ));
+}
+
+#[test]
+fn start_selects_one_mining_mode() {
+    let cli = Cli::try_parse_from(["ths", "start", "--block-time", "2"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start {
+            block_time: Some(2),
+            mine_on_mempool: false,
+            no_auto_mine: false,
+            ..
+        })
+    ));
+
+    let cli = Cli::try_parse_from(["ths", "start", "--mine-on-mempool"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start {
+            block_time: None,
+            mine_on_mempool: true,
+            no_auto_mine: false,
+            ..
+        })
+    ));
+
+    let cli = Cli::try_parse_from(["ths", "start", "--no-auto-mine"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start {
+            block_time: None,
+            mine_on_mempool: false,
+            no_auto_mine: true,
+            ..
+        })
+    ));
+
+    // A zero interval cannot produce blocks, and the modes are exclusive.
+    assert!(Cli::try_parse_from(["ths", "start", "--block-time", "0"]).is_err());
+    assert!(
+        Cli::try_parse_from(["ths", "start", "--block-time", "2", "--mine-on-mempool"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["ths", "start", "--block-time", "2", "--no-auto-mine"]).is_err());
+    assert!(Cli::try_parse_from(["ths", "start", "--mine-on-mempool", "--no-auto-mine"]).is_err());
 }
 
 #[test]
@@ -337,6 +385,81 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
 }
 
 #[test]
+fn wallet_quote_requires_an_account_and_both_pools() {
+    let cli = Cli::try_parse_from([
+        "ths",
+        "--name",
+        "demo",
+        "--json",
+        "wallet",
+        "quote",
+        "--from",
+        "1",
+        "--source-pool",
+        "ironwood",
+        "--destination-pool",
+        "transparent",
+    ])
+    .unwrap();
+    assert_eq!(cli.name.unwrap().to_string(), "demo");
+    assert!(cli.json);
+    assert!(matches!(
+        cli.command,
+        Some(Command::Wallet {
+            action: WalletCommand::Quote {
+                from: 1,
+                source_pool: Pool::Ironwood,
+                destination_pool: Pool::Transparent,
+            }
+        })
+    ));
+
+    let parse = |args: &[&str]| {
+        let mut argv = vec!["ths", "wallet", "quote"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    };
+    let route = [
+        "--source-pool",
+        "transparent",
+        "--destination-pool",
+        "ironwood",
+    ];
+    assert!(parse(&[&["--from", "5"][..], &route].concat()).is_ok());
+    assert!(parse(&route).is_err());
+    assert!(parse(&["--from", "1", "--source-pool", "ironwood"]).is_err());
+    assert!(parse(&["--from", "1", "--destination-pool", "ironwood"]).is_err());
+    for from in ["0", "6"] {
+        assert!(
+            parse(&[&["--from", from][..], &route].concat()).is_err(),
+            "accepted quote account {from}"
+        );
+    }
+    assert!(
+        parse(&[
+            "--from",
+            "1",
+            "--source-pool",
+            "orchard",
+            "--destination-pool",
+            "ironwood"
+        ])
+        .is_err()
+    );
+    for extra in [
+        &["--amount", "1"][..],
+        &["--max"],
+        &["--to", "2"],
+        &["--uri", "zcash:tm"],
+    ] {
+        assert!(
+            parse(&[&["--from", "1"][..], &route, extra].concat()).is_err(),
+            "accepted {extra:?}"
+        );
+    }
+}
+
+#[test]
 fn wallet_send_takes_a_payment_uri_instead_of_a_destination() {
     let parse = |args: &[&str]| {
         let mut argv = vec!["ths", "wallet", "send", "--from", "1"];
@@ -392,5 +515,97 @@ fn shield_and_unshield_accept_exactly_one_amount_mode() {
         assert!(parse(&["--max"]).is_ok());
         assert!(parse(&[]).is_err());
         assert!(parse(&["--amount", "1", "--max"]).is_err());
+    }
+}
+
+#[test]
+fn parses_rpc_method_params_and_flags() {
+    let cli = Cli::try_parse_from([
+        "ths",
+        "--name",
+        "alice",
+        "rpc",
+        "--raw",
+        "getblockhash",
+        "0",
+    ])
+    .unwrap();
+    assert_eq!(cli.name.unwrap().to_string(), "alice");
+    let Some(Command::Rpc {
+        raw,
+        yes,
+        method,
+        params,
+    }) = cli.command
+    else {
+        panic!("expected rpc");
+    };
+    assert!(raw);
+    assert!(!yes);
+    assert_eq!(method, "getblockhash");
+    assert_eq!(params, ["0"]);
+
+    let cli = Cli::try_parse_from(["ths", "rpc", "getblockcount", "--raw"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Rpc {
+            raw: true,
+            yes: false,
+            ..
+        })
+    ));
+
+    let cli = Cli::try_parse_from(["ths", "rpc", "--yes", "stop"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Rpc {
+            raw: false,
+            yes: true,
+            ..
+        })
+    ));
+
+    let cli = Cli::try_parse_from(["ths", "rpc", "getblock", "-1"]).unwrap();
+    let Some(Command::Rpc { params, .. }) = cli.command else {
+        panic!("expected rpc");
+    };
+    assert_eq!(params, ["-1"]);
+
+    assert!(Cli::try_parse_from(["ths", "rpc"]).is_err());
+}
+
+#[test]
+fn send_to_address_excludes_other_destinations() {
+    let address = "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ";
+    let send = |extra: &[&str]| {
+        let mut args = vec![
+            "ths",
+            "wallet",
+            "send",
+            "--from",
+            "2",
+            "--to-address",
+            address,
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    };
+    let cli = send(&["--amount", "0.1"]).unwrap();
+    let Some(Command::Wallet {
+        action: WalletCommand::Send(args),
+    }) = cli.command
+    else {
+        panic!("expected wallet send");
+    };
+    assert_eq!(args.to_address.as_deref(), Some(address));
+    assert_eq!(args.to, None);
+    assert!(send(&["--max"]).is_ok());
+    for conflicting in [
+        &["--amount", "0.1", "--to", "3"][..],
+        &["--amount", "0.1", "--uri", "zcash:tm"][..],
+        &["--amount", "0.1", "--destination-pool", "ironwood"][..],
+        &[][..],
+    ] {
+        assert!(send(conflicting).is_err(), "{conflicting:?}");
     }
 }

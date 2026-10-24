@@ -385,8 +385,10 @@ struct PaymentUri {
     memo: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SendQuote {
+    available_zatoshi: u64,
+    fee_zatoshi: u64,
     max_zatoshi: u64,
 }
 
@@ -394,6 +396,22 @@ struct SendQuote {
 pub(crate) enum TransferAmount {
     Exact(u64),
     Max,
+}
+
+fn send_quote_request(
+    client: &reqwest::blocking::Client,
+    dashboard: &str,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> reqwest::blocking::RequestBuilder {
+    client
+        .post(format!("{dashboard}/api/v1/send/quote"))
+        .json(&serde_json::json!({
+            "from_account": from,
+            "source_pool": source_pool,
+            "destination_pool": destination_pool,
+        }))
 }
 
 fn quote_max_amount(
@@ -408,18 +426,15 @@ fn quote_max_amount(
     let timeout = remaining(deadline)
         .ok_or_else(|| anyhow!("maximum transfer quote timed out"))
         .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
-    let quote: SendQuote = client
-        .post(format!("{dashboard}/api/v1/send/quote"))
-        .json(&serde_json::json!({
-            "from_account": from,
-            "source_pool": source_pool,
-            "destination_pool": destination_pool,
-        }))
-        .timeout(timeout)
-        .send()
-        .map_err(anyhow::Error::from)
-        .and_then(decode_response)
-        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
+    let quote: SendQuote =
+        send_quote_request(client, dashboard, from, source_pool, destination_pool)
+            .timeout(timeout)
+            .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
+            .with_context(|| {
+                format!("asking environment {name} for the maximum transfer amount")
+            })?;
     if quote.max_zatoshi == 0 {
         bail!(
             "account {from} has no spendable {source_pool} funds remaining after the network fee"
@@ -436,6 +451,7 @@ impl Runtime {
         }
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(300))
             .build()?;
         Ok((dashboard, client))
@@ -680,11 +696,11 @@ impl Runtime {
         if result.status == "confirmed" && result.block_hash.is_none() {
             bail!("faucet reported confirmation without a block hash; retry the same command");
         }
-        journal.clear(&[(&intent, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&result)?)?;
         }
         if result.status == "failed" {
+            journal.clear(&[(&intent, &idempotency_key)])?;
             bail!(
                 "faucet payment to {} failed: {}",
                 result.address,
@@ -703,6 +719,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(&intent, &idempotency_key)])?;
         Ok(())
     }
 
@@ -803,17 +821,6 @@ impl Runtime {
                 }
             }
         }
-        if followed
-            .iter()
-            .all(|outcome| matches!(outcome, Followed::Settled(_)))
-        {
-            let settled: Vec<_> = intents
-                .iter()
-                .zip(&keys)
-                .map(|(intent, key)| (intent.as_str(), key.as_str()))
-                .collect();
-            journal.clear(&settled)?;
-        }
         if json {
             let pending: Vec<_> = pending.iter().map(|(_, value)| value).collect();
             writeln!(
@@ -844,6 +851,18 @@ impl Runtime {
             for failure in &failures {
                 eprintln!("Failed to fund {failure}");
             }
+        }
+        // Release the batch together, only after its results were written.
+        if followed
+            .iter()
+            .all(|outcome| matches!(outcome, Followed::Settled(_)))
+        {
+            let settled: Vec<_> = intents
+                .iter()
+                .zip(&keys)
+                .map(|(intent, key)| (intent.as_str(), key.as_str()))
+                .collect();
+            journal.clear(&settled)?;
         }
         if failures.is_empty() && pending.is_empty() {
             Ok(())
@@ -912,6 +931,75 @@ impl Runtime {
             serde_json::json!({
                 "from_account": from,
                 "to_account": to,
+                "source_pool": source_pool,
+                "destination_pool": destination_pool,
+                "memo": memo,
+            }),
+            source_pool,
+            destination_pool,
+            memo,
+            json,
+        )
+    }
+
+    /// Pays an external Regtest address, like the dashboard's "Other address"
+    /// destination. The server validates the address and its pool.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wallet_send_address(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        address: &str,
+        source_pool: &str,
+        destination_pool: &str,
+        amount: TransferAmount,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_send_address_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            Instant::now() + PAYMENT_WAIT,
+            from,
+            address,
+            source_pool,
+            destination_pool,
+            amount,
+            memo,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_send_address_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        address: &str,
+        source_pool: &str,
+        destination_pool: &str,
+        amount: TransferAmount,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        self.submit_transfer(
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            from,
+            amount,
+            serde_json::json!({
+                "from_account": from,
+                "to_address": address,
                 "source_pool": source_pool,
                 "destination_pool": destination_pool,
                 "memo": memo,
@@ -1210,11 +1298,11 @@ impl Runtime {
                 return Err(error.context(format!("asking environment {name} to send")));
             }
         };
-        journal.clear(&[(fingerprint, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&activity)?)?;
         }
         if activity.status == "failed" {
+            journal.clear(&[(fingerprint, &idempotency_key)])?;
             bail!(
                 "payment from account {from} to {} failed: {}",
                 activity.recipient(),
@@ -1242,6 +1330,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(fingerprint, &idempotency_key)])?;
         Ok(())
     }
 }
@@ -1558,6 +1648,55 @@ impl Runtime {
         }
         Ok(())
     }
+
+    pub fn wallet_quote(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_quote_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            from,
+            source_pool,
+            destination_pool,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_quote_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        require_wallet_ready(dashboard, client, name)?;
+        let quote = send_quote(dashboard, client, name, from, source_pool, destination_pool)?;
+        let route = RouteQuote {
+            from_account: from,
+            source_pool,
+            destination_pool,
+            quote: &quote,
+        };
+        if json {
+            writeln!(out, "{}", serde_json::to_string_pretty(&route)?)?;
+        } else {
+            writeln!(out, "{}", quote_lines(name, &route))?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1580,11 +1719,11 @@ struct WalletSyncStatus {
     error: Option<String>,
 }
 
-pub(crate) fn account_balances(
+fn require_wallet_ready(
     dashboard: &str,
     client: &reqwest::blocking::Client,
     name: &InstanceName,
-) -> Result<Vec<Account>> {
+) -> Result<()> {
     let status: ServerStatus = client
         .get(format!("{dashboard}/api/v1/status"))
         .send()
@@ -1592,7 +1731,7 @@ pub(crate) fn account_balances(
         .and_then(decode_response)
         .with_context(|| format!("checking wallet sync for environment {name}"))?;
     match status.wallet_sync.state.as_str() {
-        "ready" => {}
+        "ready" => Ok(()),
         "syncing" => bail!("wallet for environment {name} is still syncing; try again later"),
         "error" => bail!(
             "wallet synchronization failed for environment {name}: {}",
@@ -1604,6 +1743,14 @@ pub(crate) fn account_balances(
         ),
         state => bail!("wallet for environment {name} has unknown sync state `{state}`"),
     }
+}
+
+pub(crate) fn account_balances(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+) -> Result<Vec<Account>> {
+    require_wallet_ready(dashboard, client, name)?;
     client
         .get(format!("{dashboard}/api/v1/accounts"))
         .send()
@@ -1629,6 +1776,63 @@ pub(crate) fn balance_lines(accounts: &[Account]) -> String {
         .join("\n")
 }
 
+fn send_quote(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> Result<SendQuote> {
+    send_quote_request(client, dashboard, from, source_pool, destination_pool)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| {
+            format!(
+                "asking environment {name} to quote account {from} from {source_pool} to {destination_pool}"
+            )
+        })
+}
+
+#[derive(Serialize)]
+struct RouteQuote<'a> {
+    from_account: u8,
+    source_pool: &'a str,
+    destination_pool: &'a str,
+    #[serde(flatten)]
+    quote: &'a SendQuote,
+}
+
+fn quote_lines(name: &InstanceName, route: &RouteQuote) -> String {
+    let RouteQuote {
+        from_account,
+        source_pool,
+        destination_pool,
+        quote,
+    } = route;
+    let mut lines = vec![
+        format!(
+            "Maximum-spend quote for account {from_account} ({source_pool} -> {destination_pool}) on {name}"
+        ),
+        format!(
+            "  Available     {} ZEC",
+            format_zec(quote.available_zatoshi)
+        ),
+        format!("  Fee           {} ZEC", format_zec(quote.fee_zatoshi)),
+        format!("  Maximum send  {} ZEC", format_zec(quote.max_zatoshi)),
+    ];
+    if quote.max_zatoshi == 0 {
+        lines.push(format!(
+            "Account {from_account} has nothing spendable in the {source_pool} pool after the fee."
+        ));
+    }
+    lines.push(
+        "This is a snapshot of the current wallet, not a reservation. Nothing was sent.".to_owned(),
+    );
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeStatus {
     pub(crate) node_height: Option<u64>,
@@ -1640,6 +1844,7 @@ pub(crate) struct RuntimeStatus {
 }
 pub(crate) fn runtime_status(endpoints: &Endpoints, timeout: Duration) -> Result<RuntimeStatus> {
     let response = reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(timeout)
         .build()?
         .get(format!("{}/api/v1/status", endpoints.dashboard))

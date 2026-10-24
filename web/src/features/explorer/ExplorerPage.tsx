@@ -1,6 +1,7 @@
 import { Link, Route, Routes } from 'react-router-dom';
 import { SearchBar } from './SearchBar';
 import { BlockList } from './BlockList';
+import { MempoolPanel } from './MempoolPanel';
 import { BlockDetail } from './BlockDetail';
 import { TransactionDetail } from './TransactionDetail';
 import { AddressDetail } from './AddressDetail';
@@ -12,7 +13,15 @@ export function ExplorerPage() {
     <>
       <SearchBar />
       <Routes>
-        <Route index element={<BlockList />} />
+        <Route
+          index
+          element={
+            <div className="grid gap-4">
+              <MempoolPanel />
+              <BlockList />
+            </div>
+          }
+        />
         <Route path="block/:id" element={<BlockDetail />} />
         <Route path="tx/:txid" element={<TransactionDetail />} />
         <Route path="address/:address" element={<AddressDetail />} />

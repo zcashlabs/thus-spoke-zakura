@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowDownToLine, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -55,7 +55,7 @@ function recipientLabel(activity: Activity): string {
   return shortHash(activity.to_address ?? '', 14, 6);
 }
 
-function ActivityRow({ activity, index }: { activity: Activity; index: number }) {
+function ActivityRow({ activity, index, now }: { activity: Activity; index: number; now: Date }) {
   const id = useId();
   const errorId = activity.last_error ? id : undefined;
   const isFaucet = activity.kind === 'faucet';
@@ -134,7 +134,7 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
         <NumCell className="text-ink-muted max-sm:hidden">
           {activity.created_at ? (
             <time dateTime={activity.created_at} title={absoluteTime(activity.created_at)}>
-              {timeAgo(activity.created_at)}
+              {timeAgo(activity.created_at, now)}
             </time>
           ) : activity.mined_height !== null && activity.mined_height !== undefined ? (
             `Block ${activity.mined_height}`
@@ -188,6 +188,14 @@ export function ActivityList({
   };
 }) {
   const count = activity.data?.length ?? 0;
+  const [now, setNow] = useState(() => new Date());
+  const hasActivity = count > 0;
+  useEffect(() => {
+    if (!hasActivity) return;
+    // Relative labels age independently of server events and query updates.
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActivity]);
 
   return (
     <Panel
@@ -207,7 +215,7 @@ export function ActivityList({
         ) : (
           <DataTable columns={COLUMNS}>
             {activity.data.map((item, index) => (
-              <ActivityRow key={item.id} activity={item} index={index} />
+              <ActivityRow key={item.id} activity={item} index={index} now={now} />
             ))}
           </DataTable>
         ))}

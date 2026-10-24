@@ -7,10 +7,14 @@ mod chain;
 mod assertions;
 #[path = "scenarios/activity_recovery/faucet.rs"]
 mod faucet;
+#[path = "scenarios/activity_recovery/mining.rs"]
+mod mining;
 #[path = "scenarios/activity_recovery/recovery.rs"]
 mod recovery;
 #[path = "scenarios/activity_recovery/send.rs"]
 mod send;
+#[path = "scenarios/activity_recovery/transparent_history.rs"]
+mod transparent_history;
 #[path = "scenarios/activity_recovery/treasury.rs"]
 mod treasury;
 
@@ -46,6 +50,12 @@ use support::{
     RecoveryPhase, RegtestStack, TerminationSignals, lose_payment_response, request_json, rpc,
     rpc_with_timeout,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn external_transparent_spend_reconciles_after_restart() -> Result<()> {
+    transparent_history::external_transparent_spend_reconciles_after_restart().await
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker and prepared regtest images"]
@@ -514,6 +524,30 @@ mod tests;
 #[ignore = "requires Docker and prepared regtest images"]
 async fn startup_funding_retry_after_auto_mine_failure_has_one_payout() -> Result<()> {
     treasury::startup_funding_retry_after_auto_mine_failure_has_one_payout().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn interval_mode_mines_empty_blocks_without_api_actions() -> Result<()> {
+    mining::interval_mode_mines_empty_blocks_without_api_actions().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn interval_mode_confirms_a_payment_without_ths_mine() -> Result<()> {
+    mining::interval_mode_confirms_a_payment_without_ths_mine().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn mempool_mode_confirms_a_payment_without_ths_mine() -> Result<()> {
+    mining::mempool_mode_confirms_a_payment_without_ths_mine().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn manual_mode_keeps_a_payment_pending_until_ths_mine() -> Result<()> {
+    mining::manual_mode_keeps_a_payment_pending_until_ths_mine().await
 }
 
 #[tokio::test(flavor = "multi_thread")]

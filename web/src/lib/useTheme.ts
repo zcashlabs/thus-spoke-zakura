@@ -25,10 +25,14 @@ function emit() {
 function subscribe(onChange: () => void): () => void {
   listeners.add(onChange);
   // Keep other tabs in step.
-  window.addEventListener('storage', onChange);
+  const onStorage = () => {
+    applyTheme(readPreference());
+    onChange();
+  };
+  window.addEventListener('storage', onStorage);
   return () => {
     listeners.delete(onChange);
-    window.removeEventListener('storage', onChange);
+    window.removeEventListener('storage', onStorage);
   };
 }
 

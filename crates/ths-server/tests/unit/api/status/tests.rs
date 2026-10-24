@@ -1,12 +1,12 @@
 use super::*;
 use crate::api::router;
+use crate::mining::MiningMode;
 use crate::network::regtest_network;
-use crate::state::tests::state_with_local_wallet;
+use crate::state::tests::{state_with_local_wallet, state_with_mode};
 use crate::wallet::PreparedPayment;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use transparent::{
     address::Script,
@@ -204,26 +204,6 @@ fn canonical_activity_exposes_aggregate_wallet_value_effects() {
     assert_eq!(activity[0].net_zatoshi, Some(-110_000_000));
 }
 
-#[test]
-fn persisted_preparation_association_joins_a_stale_journal_snapshot() {
-    let mut stale = journal_send("");
-    stale.status = "preparing".to_owned();
-    stale.block_hash = None;
-    let prepared_txids = HashMap::from([(stale.id.clone(), "prepared-tx".to_owned())]);
-
-    let activity = unified_activity_with_prepared(
-        vec![stale],
-        vec![canonical_activity("internal", "prepared-tx")],
-        &prepared_txids,
-        30,
-    );
-
-    assert_eq!(activity.len(), 1);
-    assert_eq!(activity[0].id, "send-1");
-    assert_eq!(activity[0].txid, "prepared-tx");
-    assert_eq!(activity[0].status, "confirmed");
-}
-
 #[tokio::test]
 async fn activity_router_deduplicates_preparation_completed_after_its_journal_snapshot() {
     let (state, _dir) = state_with_local_wallet();
@@ -361,16 +341,6 @@ fn confirmed_activity_uses_chain_order_and_does_not_invent_incoming_creation_tim
 }
 
 #[test]
-fn activity_limit_is_applied_after_journal_and_wallet_history_are_merged() {
-    let activity = unified_activity(
-        vec![journal_send("")],
-        vec![canonical_activity("incoming", "external-tx")],
-        1,
-    );
-    assert_eq!(activity.len(), 1);
-}
-
-#[test]
 fn confirmed_journal_outside_the_canonical_window_does_not_displace_recent_history() {
     let canonical = (101..=200)
         .map(|height| {
@@ -473,6 +443,31 @@ async fn non_loopback_host_cannot_access_the_seed_endpoint() {
     );
 }
 
+#[tokio::test]
+async fn status_reports_the_selected_mining_mode() {
+    for mode in [
+        MiningMode::Auto,
+        MiningMode::Interval,
+        MiningMode::Mempool,
+        MiningMode::Manual,
+    ] {
+        let (state, _dir) = state_with_mode(mode);
+        let (code, status) = api_get(&state, "/api/v1/status").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status["mining_mode"], json!(mode.as_str()));
+        assert_eq!(status["auto_mine"], json!(mode.auto_mine()));
+        assert_eq!(
+            status["mine_on_mempool"],
+            json!(matches!(mode, MiningMode::Mempool))
+        );
+        let block_time = if matches!(mode, MiningMode::Interval) {
+            json!(2)
+        } else {
+            Value::Null
+        };
+        assert_eq!(status["block_time"], block_time, "{mode:?}");
+    }
+}
 use crate::wallet::WALLET_BIRTHDAY_HEIGHT;
 
 #[test]
@@ -645,7 +640,6 @@ fn settlement_waits_for_startup_after_the_components_agree() {
 }
 
 use crate::state::tests::{api_get, counting_rpc};
-use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

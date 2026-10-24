@@ -1,8 +1,8 @@
 # 5. Mining and wallet sync
 
-You have funded Account 2 and sent a payment. Both operations normally mine
-a confirming block for you. This chapter mines explicitly and follows a
-block from the node to the wallet and browser.
+You have funded Account 2 and sent a payment. In the default `auto` mode both
+operations mine a confirming block for you. This chapter mines explicitly and
+follows a block from the node to the wallet and browser.
 
 **Mining** asks Zakura to generate Regtest blocks on demand. A transaction is
 **confirmed** when the node reports it in a block on its current chain with
@@ -25,6 +25,37 @@ and reconcile it.
    synchronization, the CLI returns `blocks` and `hashes`; the dashboard job
    becomes `completed`. If a step after generation fails, the CLI returns an
    error and the job becomes `failed`, even though blocks may already exist.
+
+## Mining modes
+
+An instance is started in exactly one mining mode, chosen by a [`ths start`
+flag](cli.md#ths-ths-start). The mode never changes for the server's lifetime.
+
+| Mode | Who produces the block |
+| --- | --- |
+| `auto` (default) | The payment, faucet, or treasury operation itself. |
+| `interval` | A background task, one empty block every `--block-time` seconds. |
+| `mempool` | A background task, when the mempool holds a new, nonempty transaction set. |
+| `manual` | Nobody, until you run `ths mine`. |
+
+Funding the development accounts during startup mines regardless of mode, so an
+instance is always ready to use. What changes is the chain's progress after
+startup:
+
+- In `interval` and `mempool`, the background task produces blocks directly, not
+  through the manual mining coordinator. Those blocks therefore **do not count**
+  toward a `ths mine` job's requested block count, and a manual job is never
+  interleaved with them.
+- `mempool` remembers the last transaction set it tried to mine. It only mines
+  a new block when that set changes, so a transaction the node cannot include
+  does not make the server generate a stream of empty blocks.
+- In `manual`, a payment is submitted and left pending. It confirms once a block
+  that includes it arrives, normally from `ths mine`.
+
+`GET /api/v1/status` reports the exact mode as `mining_mode`. It also keeps the
+legacy boolean `auto_mine` (true only in `auto` mode), plus `block_time` in
+`interval` mode and `mine_on_mempool` in `mempool` mode. The dashboard's Network
+page reads `mining_mode` and names the rule in words.
 
 ## Mine and inspect one result
 
@@ -65,6 +96,16 @@ repeating the command starts new mining. Each poll is capped at two seconds.
 On completion, the CLI reports the confirmed count and mined tip hash; errors
 include the job ID. `--json` includes the legacy `blocks` and `hashes` fields
 alongside the job's ID, state, and progress.
+
+Before starting a job, the dashboard retains its idempotency key in browser
+session storage. If browser policy denies storage access or the key cannot be
+saved, the Mine dialog stays open and shows a storage error; no mining request
+is sent. Allow site storage before retrying. After an uncertain response, keep
+the existing session storage so a retry can reuse the same key.
+
+If storage cleanup fails after the server accepts a job, the dashboard still
+shows the accepted job and follows its progress. The dialog reports cleanup
+failure separately; it does not mean the mining request was rejected.
 
 Read the node and wallet view through the running instance's API:
 
@@ -113,9 +154,20 @@ after reconciliation succeeds.
 2. The wallet checks its scanned chain against Zakura and uses
    lightwalletd's compact blocks to catch up. A mismatch can require a
    rewind and rescan.
+   It also imports mined transaction history for public transparent
+   addresses, including transactions created by another wallet using the
+   development accounts. This records spent outputs as well as incoming
+   funds. Each address has durable history progress; existing wallets
+   backfill from their birthday on the first run with this support.
 3. On success, the server refreshes account balances, marks sync `ready`,
    and notifies dashboard query hooks. On failure it reports `error`;
    the last known balances can remain visible and may be stale.
+
+Transparent history must catch up through the scanned checkpoint before
+that snapshot is published. Interrupted history requests retain their last
+complete progress and retry; a reorganization rewinds history progress
+with the wallet. This does not add external transactions to the
+request-based Recent activity feed.
 
 This is why the Network page, Explorer, Recent activity, and Wallet page can
 show different stages of one event. They are observations of different

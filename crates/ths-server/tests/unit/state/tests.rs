@@ -1,19 +1,69 @@
 use crate::api::router;
+use crate::mining::{MiningConfig, MiningMode};
 use crate::{db::Store, state::AppState, wallet::RealWallet};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
-pub(crate) fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+/// Returns a private data directory holding an initialized server store and
+/// wallet. Key derivation and wallet migrations dominate fixture cost in debug
+/// builds, so they run once per test process and each fixture gets a copy of
+/// the resulting files. The seed is fixed, so a copy matches a fresh store.
+fn initialized_data_dir() -> tempfile::TempDir {
+    static TEMPLATE: std::sync::OnceLock<Vec<(std::ffi::OsString, Vec<u8>)>> =
+        std::sync::OnceLock::new();
+    let files = TEMPLATE.get_or_init(|| {
+        let template = tempfile::tempdir().expect("template dir");
+        let store = Store::open(template.path().join("server.db")).expect("open store");
+        store.initialize().expect("initialize store");
+        RealWallet::open(template.path(), &store.seed().expect("wallet seed"))
+            .expect("open wallet");
+        // Both connections are closed here, so the database files are complete.
+        drop(store);
+        std::fs::read_dir(template.path())
+            .expect("list template")
+            .map(|entry| {
+                let entry = entry.expect("template entry");
+                (
+                    entry.file_name(),
+                    std::fs::read(entry.path()).expect("read template"),
+                )
+            })
+            .collect()
+    });
     let dir = tempfile::tempdir().expect("temp dir");
+    for (name, bytes) in files {
+        std::fs::write(dir.path().join(name), bytes).expect("copy template");
+    }
+    dir
+}
+
+pub(crate) fn state_with_local_wallet() -> (AppState, tempfile::TempDir) {
+    state_with_mining(MiningConfig::default())
+}
+
+pub(crate) fn state_with_mining(mining: MiningConfig) -> (AppState, tempfile::TempDir) {
+    let dir = initialized_data_dir();
     let store = Store::open(dir.path().join("server.db")).expect("open store");
-    store.initialize().expect("initialize store");
     let wallet =
         RealWallet::open(dir.path(), &store.seed().expect("wallet seed")).expect("open wallet");
     (
-        AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into()),
+        AppState::new_with_mining(
+            store,
+            wallet,
+            "http://127.0.0.1:1".into(),
+            "test".into(),
+            mining,
+        ),
         dir,
     )
+}
+
+pub(crate) fn state_with_mode(mode: MiningMode) -> (AppState, tempfile::TempDir) {
+    state_with_mining(MiningConfig {
+        mode,
+        block_time: matches!(mode, MiningMode::Interval).then_some(2),
+    })
 }
 
 #[tokio::test]
@@ -71,12 +121,7 @@ async fn account_reads_return_the_snapshot_without_contacting_lightwalletd() {
 }
 
 pub(crate) fn offline_state() -> (AppState, tempfile::TempDir) {
-    let store = Store::open(":memory:").unwrap();
-    store.initialize().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
-    let state = AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into());
-    (state, dir)
+    state_with_local_wallet()
 }
 
 use axum::{Json, Router, routing::post};
