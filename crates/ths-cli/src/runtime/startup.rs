@@ -842,6 +842,10 @@ impl Runtime {
             }
             shutdown.check()?;
             host.wait_ready(&allocated, shutdown, context)?;
+            if detach {
+                self.mark_detached(name, ownership.session())
+                    .with_context(|| format!("recording that {name} is detached"))?;
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&allocated.endpoints)?);
             } else {

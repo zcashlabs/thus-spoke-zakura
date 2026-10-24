@@ -18,8 +18,8 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
   [#294](https://github.com/zcashlabs/thus-spoke-zakura/issues/294)
 - **Detached start:** `ths start --detach` (`-d`) returns once the environment
   is ready and leaves it running for scripts and CI. It implies `--no-open`;
-  `ths stop` or `ths reset --force` deletes it. A failure or Ctrl+C before ready
-  still deletes it.
+  `ths wait` works on it, and `ths stop` or `ths reset --force` deletes it. A
+  failure or Ctrl+C before ready still deletes it.
   [#147](https://github.com/zcashlabs/thus-spoke-zakura/issues/147)
 
 ## v0.4.1

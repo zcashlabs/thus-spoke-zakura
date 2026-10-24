@@ -314,6 +314,9 @@ fn detach_returns_once_ready_and_leaves_the_environment_running() {
     assert_eq!(events.iter().filter(|e| *e == "delete:alpha").count(), 1);
     assert!(!events.iter().any(|e| e.starts_with("delete_partial")));
     assert!(!events.iter().any(|e| e.starts_with("final_cleanup")));
+    // `wait` reads this in place of a running launcher.
+    let marker = fs::read_to_string(runtime.instance_dir(&name("alpha")).join("detached")).unwrap();
+    assert!(!marker.trim().is_empty());
     // The per-name lock is released so `stop` and `reset` can take it.
     drop(runtime.lock_instance(&name("alpha")).unwrap());
 }

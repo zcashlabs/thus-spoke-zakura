@@ -68,6 +68,7 @@ non-zero. Environments stay ephemeral.
 ```console
 ths --name ci start --detach --port-offset 100
 ths --name ci faucet <address> --amount 5
+ths --name ci wait
 ths --name ci stop
 ```
 
@@ -105,7 +106,7 @@ ths start --no-auto-mine        # mine only when you run `ths mine`
 
 Waits for an instance's node, lightwalletd index, and wallet to be settled at
 the same canonical tip, and for the `ths start` or `ths run` that owns it to
-report ready. It also waits for an instance that is still being created in
+report ready (a `start --detach` has reported ready once it returns). It also waits for an instance that is still being created in
 another shell, and fails after a few seconds if no command is creating it or
 if its launcher has exited and left only its containers behind. It creates
 no instance and makes no chain changes. The timeout defaults to **120 seconds**, and status reads are bounded
