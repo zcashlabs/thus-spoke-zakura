@@ -206,7 +206,7 @@ These are every route the server serves today, from
 | `POST /api/v1/zip321/parse` | Parse one Regtest payment URI into its address, pool, optional amount, and memo; moves no funds. |
 | `POST /api/v1/zip321/request` | Generate a payment URI from `{account_id}` and an optional amount and memo; moves no funds. |
 | `POST /api/v1/dev/seed` | Returns the raw seed hex. Refuses unless the body carries `"confirmation": "I understand this seed is for regtest only"`. |
-| `GET /api/v1/blocks`, `/blocks/{id}`, `/transactions/{txid}`, `/mempool`, `/addresses/{address}`, `/search` | Read-only explorer views of public chain data. |
+| `GET /api/v1/blocks`, `/blocks/{id}`, `/transactions/{txid}`, `/mempool`, `/addresses/{address}`, `/search` | Read-only explorer views of public chain data. An empty or whitespace-only `/search` query is HTTP 400 and is not sent to Zakura. An address with surrounding whitespace is HTTP 400 from `/addresses/{address}` and from `/search`. |
 | `GET /api/v1/events` | The server-sent stream described above. |
 
 Accepted payment intents now progress in the background, including payments

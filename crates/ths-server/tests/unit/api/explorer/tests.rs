@@ -9,7 +9,62 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
+
+const EMPTY_SEARCH: &str =
+    "q must be a block height, block hash, transaction id, or transparent address";
+const UNTRIMMED_ADDRESS: &str = "address must not have leading or trailing whitespace";
+
+async fn node_that_records_calls() -> (String, Arc<Mutex<Vec<String>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/",
+        post(move |Json(req): Json<Value>| {
+            let recorded = recorded.clone();
+            async move {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(req["method"].as_str().unwrap().to_owned());
+                Json(json!({"result": {"balance": 0}, "error": null, "id": req["id"]}))
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (node, calls)
+}
+
+fn state_at(node: String) -> (AppState, tempfile::TempDir) {
+    let (state, dir) = state_with_local_wallet();
+    let state = AppState::new(
+        state.0.store.clone(),
+        state.0.wallet.clone(),
+        node,
+        "test".into(),
+    );
+    (state, dir)
+}
+
+async fn assert_bad_request(state: AppState, uri: &str, message: &str) {
+    let response = router(state)
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"error": {"message": message, "status": 400}}),
+        "{uri}"
+    );
+}
+
 #[test]
 fn copies_spent_output_address_and_value_onto_vin() {
     let mut tx = json!({
@@ -132,6 +187,66 @@ async fn explorer_reports_unknown_blocks_and_transactions_as_404() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn search_rejects_an_empty_query_before_calling_zakura() {
+    let (node, calls) = node_that_records_calls().await;
+    let (state, _dir) = state_at(node);
+    for uri in [
+        "/api/v1/search?q=",
+        "/api/v1/search?q=%20",
+        "/api/v1/search?q=%0A",
+        "/api/v1/search?q=%20%09%0A",
+    ] {
+        assert_bad_request(state.clone(), uri, EMPTY_SEARCH).await;
+        assert!(calls.lock().unwrap().is_empty(), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn explorer_rejects_untrimmed_addresses_before_calling_zakura() {
+    let (node, calls) = node_that_records_calls().await;
+    let (state, _dir) = state_at(node);
+    let address = state.0.store.account(1).unwrap().transparent_address;
+    for uri in [
+        format!("/api/v1/addresses/{address}%0A"),
+        format!("/api/v1/addresses/%20{address}"),
+        format!("/api/v1/search?q={address}%0A"),
+        format!("/api/v1/search?q=%20{address}"),
+    ] {
+        assert_bad_request(state.clone(), &uri, UNTRIMMED_ADDRESS).await;
+        assert!(calls.lock().unwrap().is_empty(), "{uri}");
+    }
+
+    for uri in [
+        format!("/api/v1/addresses/{address}"),
+        format!("/api/v1/search?q={address}"),
+    ] {
+        calls.lock().unwrap().clear();
+        let response = router(state.clone())
+            .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["getaddressbalance"],
+            "{uri}"
+        );
+    }
+
+    calls.lock().unwrap().clear();
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/search?q=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(calls.lock().unwrap().as_slice(), ["getblock"]);
 }
 
 #[tokio::test]

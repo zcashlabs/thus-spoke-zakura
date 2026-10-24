@@ -179,7 +179,18 @@ pub(crate) async fn search(
     State(state): State<AppState>,
     ApiQuery(query): ApiQuery<SearchQuery>,
 ) -> ApiResult<Json<Value>> {
-    if query.q.starts_with('t') {
+    // An empty value is not a height, hash, transaction id, or address.
+    // Asking Zakura would report that client mistake as a node failure.
+    let q = query.q.trim();
+    if q.is_empty() {
+        return Err(ApiError::bad_request(
+            "q must be a block height, block hash, transaction id, or transparent address",
+        ));
+    }
+    // Trim only to choose the address path. The raw query is what gets
+    // validated there, so an address with surrounding whitespace stays a
+    // client error instead of reaching `getaddressbalance`.
+    if q.starts_with('t') {
         return address(State(state), ApiPath(query.q)).await;
     }
     // Only a 64-character hash can also be a txid; anything else is answered by the block lookup.
@@ -207,8 +218,14 @@ pub(crate) const NO_TRANSACTION: &str =
     "No transaction with that ID on this chain. It may not have been mined yet.";
 const NO_BLOCK_OR_TRANSACTION: &str = "No block or transaction on this chain has that hash.";
 
-/// Zakura answers an unknown or unparseable block or transaction with -5 or -8.
 fn require_transparent_address(value: &str) -> ApiResult<()> {
+    // `Address::decode` trims, so a trailing newline would be accepted and
+    // then fail when the raw value is sent to Zakura.
+    if value.trim() != value {
+        return Err(ApiError::bad_request(
+            "address must not have leading or trailing whitespace",
+        ));
+    }
     match Address::decode(&regtest_network(), value) {
         Some(Address::Transparent(_)) => Ok(()),
         _ => Err(ApiError::bad_request(

@@ -14,6 +14,7 @@ use axum::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use zcash_protocol::value::MAX_MONEY;
+/// Zakura answers an unknown or unparseable block or transaction with -5 or -8.
 pub(crate) fn not_found(error: anyhow::Error, message: &str) -> ApiError {
     match error.downcast_ref::<RpcError>().map(|error| error.code) {
         Some(-5 | -8) => ApiError {
