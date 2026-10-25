@@ -17,7 +17,7 @@
       "source": "/index.md",
       "headers": [
         { "key": "Content-Type", "value": "text/markdown; charset=utf-8" },
-        { "key": "Link", "value": "<https://thus-spoke-zakura.example/>; rel=\"canonical\"" }
+        { "key": "Link", "value": "<https://ths.zypherpunk.xyz/>; rel=\"canonical\"" }
       ]
     },
     {

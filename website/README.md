@@ -17,6 +17,23 @@ python3 -m http.server 8767 --bind 127.0.0.1 --directory website
 
 Open `http://127.0.0.1:8767/`. Run the site smoke checks with `node --test website/tests/*.test.mjs` from the repository root. Font licenses are in `assets/fonts/`.
 
+## Browser checks
+
+`tests/browser-smoke.mjs` exercises the actual page at 360, 390, 768, 1024 and 1440 px in both themes. It checks layout bounds, mobile menu focus and Escape, pointer and keyboard theme changes, saved theme, both clipboard buttons, footer navigation, reduced motion (including live preference changes), and the animation CDN fallback.
+
+Run it against the local preview above. Playwright is an optional test tool; the site still needs no dependencies or build step. Install it outside the repository:
+
+```sh
+npm install --prefix /tmp/ths-website-browser --no-save --package-lock=false playwright
+/tmp/ths-website-browser/node_modules/.bin/playwright install chromium
+THS_PLAYWRIGHT_MODULE=/tmp/ths-website-browser/node_modules/playwright/index.mjs \
+  node --test website/tests/browser-smoke.mjs
+```
+
+If Playwright is already installed in the project, the module override is unnecessary. `THS_CHROMIUM_EXECUTABLE` can select an existing Chromium binary, and `THS_WEBSITE_URL` can select a different preview or the public site. Animation checks need access to jsDelivr and a WebGL2-capable browser; the fallback check blocks jsDelivr deliberately.
+
+Visually inspect each width and theme as well: scroll through the hero, walkthrough, controls, endpoints, docs and footer; check for overlapping or clipped content and horizontal page scroll. The hero stacks below 901 px, with the contributor heading above the faces. Reduced motion keeps the blossom still and presents all walkthrough steps without scroll choreography.
+
 ## Search and AI discovery
 
 The page's title, description, social metadata, canonical URL and JSON-LD (`SoftwareApplication`, `SoftwareSourceCode`, `WebSite`, `WebPage`, `Organization`) are in the `<head>` of `index.html`. Alongside it:
@@ -30,7 +47,7 @@ The page's title, description, social metadata, canonical URL and JSON-LD (`Soft
 | `404.html` | Not-found page; Vercel serves it with a real 404 status |
 | `vercel.json` | Security headers (including the Content-Security-Policy), cache rules, and content types |
 
-**Public origin.** The site's HTTPS address is not decided yet, so every absolute site URL uses the placeholder `https://thus-spoke-zakura.example` (`.example` is reserved and never resolves). When the address is chosen, replace it everywhere in `website/` in one pass, then submit `sitemap.xml` in Google Search Console and Bing Webmaster Tools. `tests/site-origin.test.mjs` checks that every file uses the same origin, and reports a TODO while the placeholder remains. Do not use the local preview URL for these tags.
+**Public origin.** The canonical HTTPS address is `https://ths.zypherpunk.xyz/`. All absolute site URLs, social preview images, structured data, crawler discovery files and the Markdown canonical header use this origin. `tests/site-origin.test.mjs` checks their consistency and enforces the chosen production domain. Serve `website/` at the domain root, make it publicly accessible without a login, then submit `https://ths.zypherpunk.xyz/sitemap.xml` in Google Search Console and Bing Webmaster Tools. Do not use the local preview URL for these tags.
 
 **Keep in step.**
 

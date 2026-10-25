@@ -37,8 +37,6 @@ test('social, sitemap, robots and JSON-LD URLs use the canonical origin', () => 
   }
 });
 
-/* The public HTTPS address is not decided yet. `.example` is reserved (RFC 2606), so the
-   placeholder can never resolve to someone else's site. Reported as TODO, not a failure. */
-test('public origin replaces the placeholder', { todo: 'replace https://thus-spoke-zakura.example in website/' }, () => {
-  assert.notEqual(new URL(canonical).hostname, 'thus-spoke-zakura.example');
+test('public origin uses the chosen production domain', () => {
+  assert.equal(canonical, 'https://ths.zypherpunk.xyz/');
 });

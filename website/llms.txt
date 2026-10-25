@@ -10,7 +10,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlab
 
 ## Site
 
-- [Home page as Markdown](https://thus-spoke-zakura.example/index.md): What ths runs, the walkthrough, and default endpoints.
+- [Home page as Markdown](https://ths.zypherpunk.xyz/index.md): What ths runs, the walkthrough, and default endpoints.
 
 ## Docs
 

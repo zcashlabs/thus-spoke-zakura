@@ -211,21 +211,23 @@ async function startStage() {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   if (!location.hash) scrollTo(0, 0);
 
-  gsap.from(scene.blossom.rotation, { y: Math.PI * 1.2, duration: 2.2, ease: 'power3.out' });
-  gsap.from(scene.scrollGroup.position, { y: -2.4, duration: 2.2, ease: 'power3.out' });
+  gsap.matchMedia().add('(prefers-reduced-motion: no-preference)', () => {
+    gsap.from(scene.blossom.rotation, { y: Math.PI * 1.2, duration: 2.2, ease: 'power3.out' });
+    gsap.from(scene.scrollGroup.position, { y: -2.4, duration: 2.2, ease: 'power3.out' });
 
-  /* Hero centred -> walkthrough hides it -> Controls left -> Connect right. */
-  gsap.timeline({ scrollTrigger: { trigger: '.hero', start: 'top top', end: 'bottom top', scrub: 1.2 } })
-    .to(scene.scrollGroup.position, { y: 1.6, z: -2.4, ease: 'none' }, 0)
-    .to(scene.scrollGroup.rotation, { x: 0.4, ease: 'none' }, 0);
+    /* Hero centred -> walkthrough hides it -> Controls left -> Connect right. */
+    gsap.timeline({ scrollTrigger: { trigger: '.hero', start: 'top top', end: 'bottom top', scrub: 1.2 } })
+      .to(scene.scrollGroup.position, { y: 1.6, z: -2.4, ease: 'none' }, 0)
+      .to(scene.scrollGroup.rotation, { x: 0.4, ease: 'none' }, 0);
 
-  gsap.timeline({ scrollTrigger: { trigger: '#features', start: 'top bottom', end: 'center center', scrub: 1.4 } })
-    .fromTo(scene.scrollGroup.position, { x: 0, y: 1.6, z: -2.4 }, { x: 0, y: 0, z: 0, ease: 'power1.inOut', immediateRender: false }, 0)
-    .fromTo(scene.scrollGroup.rotation, { x: 0.4, y: 0, z: 0 }, { x: -0.25, y: 0.8, z: 0.25, ease: 'power1.inOut', immediateRender: false }, 0);
+    gsap.timeline({ scrollTrigger: { trigger: '#features', start: 'top bottom', end: 'center center', scrub: 1.4 } })
+      .fromTo(scene.scrollGroup.position, { x: 0, y: 1.6, z: -2.4 }, { x: 0, y: 0, z: 0, ease: 'power1.inOut', immediateRender: false }, 0)
+      .fromTo(scene.scrollGroup.rotation, { x: 0.4, y: 0, z: 0 }, { x: -0.25, y: 0.8, z: 0.25, ease: 'power1.inOut', immediateRender: false }, 0);
 
-  gsap.timeline({ scrollTrigger: { trigger: '#connect', start: 'top bottom', end: 'center center', scrub: 1.4 } })
-    .fromTo(scene.scrollGroup.position, { x: 0 }, { x: scene.mirrorX(), ease: 'power1.inOut', immediateRender: false }, 0)
-    .fromTo(scene.scrollGroup.rotation, { y: 0.8, z: 0.25 }, { y: -0.8, z: -0.25, ease: 'power1.inOut', immediateRender: false }, 0);
+    gsap.timeline({ scrollTrigger: { trigger: '#connect', start: 'top bottom', end: 'center center', scrub: 1.4 } })
+      .fromTo(scene.scrollGroup.position, { x: 0 }, { x: scene.mirrorX(), ease: 'power1.inOut', immediateRender: false }, 0)
+      .fromTo(scene.scrollGroup.rotation, { y: 0.8, z: 0.25 }, { y: -0.8, z: -0.25, ease: 'power1.inOut', immediateRender: false }, 0);
+  });
 
   /* Stop rendering entirely once the canvas is covered by opaque sections. */
   ScrollTrigger.create({

@@ -25,4 +25,4 @@ User-agent: CCBot
 Content-Signal: search=yes, ai-input=yes, ai-train=yes
 Allow: /
 
-Sitemap: https://thus-spoke-zakura.example/sitemap.xml
+Sitemap: https://ths.zypherpunk.xyz/sitemap.xml

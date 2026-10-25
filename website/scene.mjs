@@ -110,11 +110,11 @@ let homeX = 0;
 function layout() {
   const halfH = Math.tan((camera.fov * Math.PI) / 360) * camera.position.z;
   const halfW = halfH * camera.aspect;
-  const narrow = innerWidth < 900;
+  const narrow = innerWidth <= 900;
   homeX = narrow ? 0 : -halfW * 0.5;
   /* Stacked layout: lift the blossom into the stage band above the copy. */
   blossom.position.set(homeX, narrow ? halfH * 0.52 : 0, 0);
-  blossom.scale.setScalar(narrow ? Math.min(0.42, halfW * 0.22) : Math.min(0.78, halfH * 0.26));
+  blossom.scale.setScalar(narrow ? Math.min(0.32, halfW * 0.22) : Math.min(0.78, halfH * 0.26, halfW * 0.18));
 }
 layout();
 
@@ -178,13 +178,13 @@ function frame() {
   }
 
   raycaster.setFromCamera(pointer, camera);
-  const hit = raycaster.intersectObject(hitSphere);
+  const hit = reduced.matches ? [] : raycaster.intersectObject(hitSphere);
   if (hit.length) {
     blossom.worldToLocal(localHover.copy(hit[0].point));
     hover.point.copy(localHover);
     hover.strength = Math.min(hover.strength + delta * 4, 1);
   } else {
-    hover.strength = Math.max(hover.strength - delta * 2, 0);
+    hover.strength = reduced.matches ? 0 : Math.max(hover.strength - delta * 2, 0);
   }
 
   for (const petal of petals) {
