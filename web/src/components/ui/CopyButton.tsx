@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
+import { useToast } from './toast-context';
 
 /**
  * Copying gave no feedback in the previous UI, so there was no way to tell a
  * successful copy from a no-op. The confirmation is also announced politely
- * for screen readers.
+ * for screen readers, and a failed copy raises an error notification.
  */
 export function CopyButton({
   value,
@@ -16,6 +17,7 @@ export function CopyButton({
   icon: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     if (!copied) return;
@@ -29,9 +31,21 @@ export function CopyButton({
       aria-label={label}
       className="text-ink-muted hover:text-accent cursor-pointer rounded transition-colors"
       onClick={() => {
-        void navigator.clipboard.writeText(value).then(
+        let write: Promise<void>;
+        try {
+          write = navigator.clipboard.writeText(value);
+        } catch (error) {
+          write = Promise.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+        void write.then(
           () => setCopied(true),
-          () => setCopied(false),
+          () => {
+            setCopied(false);
+            toast.error(
+              'Could not copy',
+              `The browser blocked clipboard access. Copy it manually: ${value}`,
+            );
+          },
         );
       }}
     >
