@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) const APP_IMAGE_REPOSITORY: &str = "ghcr.io/zcashlabs/thus-spoke-zakura-app";
-pub(super) const ZAKURA_IMAGE: &str = "zakuracore/zakura:1.6.0";
+pub(super) const ZAKURA_IMAGE: &str = "zakuracore/zakura:1.7.0";
 pub(super) const LIGHTWALLETD_IMAGE_REPOSITORY: &str =
     "ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd";
 pub(super) fn app_image() -> String {

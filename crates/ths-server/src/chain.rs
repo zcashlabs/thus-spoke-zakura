@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-// The non-finalized window in the pinned Zakura 1.6.0 image.
+// The non-finalized window in the pinned Zakura 1.7.0 image.
 pub(crate) const MAX_REORG_DEPTH: u32 = 1000;
 const REGTEST_GENESIS_HASH: &str =
     "029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327";

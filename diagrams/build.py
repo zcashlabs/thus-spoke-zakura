@@ -448,7 +448,7 @@ def source_to_runtime():
     d.zone(48, 236, 904, 172, "IMAGES — THE ONLY THING A RUN USES")
     d.card(xs[0], 268, w * 2 + 28, 60, "app:&lt;version&gt;", "web/ and the server crate, together")
     d.card(xs[2], 268, w, 60, "lightwalletd:&lt;version&gt;", "from that Dockerfile")
-    d.card(xs[1], 344, w, 52, "zakuracore/zakura:1.6.0", "pinned — ths pull, never built")
+    d.card(xs[1], 344, w, 52, "zakuracore/zakura:1.7.0", "pinned — ths pull, never built")
     d.text(500, 432, "editing source changes neither a running container nor an existing image", "s")
     return d
 

@@ -116,7 +116,7 @@ impl CommandExecutor for RecordingExecutor {
         if args.first().is_some_and(|argument| argument == "run")
             && args
                 .iter()
-                .any(|argument| argument == "zakuracore/zakura:1.6.0")
+                .any(|argument| argument == "zakuracore/zakura:1.7.0")
             && self.fail_node_run.load(Ordering::SeqCst)
         {
             return Ok(CommandOutput {

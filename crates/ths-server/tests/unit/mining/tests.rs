@@ -784,7 +784,7 @@ async fn mine_and_sync_background_returns_unknown_on_malformed_response() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
     // When the generate reply is lost (transport/decode failure), the node may
     // have already produced a block. The loop must reconcile against the chain
@@ -793,10 +793,11 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
     // The pre-generate checkpoint returns the genesis tip; the reconciliation
     // checkpoint returns a new tip — confirming the block was produced.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (poll_tx, mut polls) = tokio::sync::mpsc::unbounded_channel::<()>();
     let checkpoint_calls = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn({
+    let server_task = tokio::spawn({
         let tx = tx.clone();
         async move {
             axum::serve(
@@ -805,10 +806,12 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
                     "/",
                     post(move |Json(req): Json<Value>| {
                         let tx = tx.clone();
+                        let poll_tx = poll_tx.clone();
                         let checkpoint_calls = checkpoint_calls.clone();
                         async move {
                             match req["method"].as_str() {
                                 Some("getrawmempool") => {
+                                    let _ = poll_tx.send(());
                                     Json(json!({"result":["tx1"],"error":null,"id":req["id"]}))
                                         .into_response()
                                 }
@@ -853,28 +856,27 @@ async fn mempool_loop_suppresses_retry_after_lost_generate_reply() {
     let (mut state, _dir) = state_with_local_wallet();
     Arc::get_mut(&mut state.0).unwrap().rpc = NodeRpc::new(url);
     state.mark_started();
-    tokio::spawn(mempool_mining_loop(state));
+    let mining_task = tokio::spawn(mempool_mining_loop(state));
 
-    // First tick fires at t=0: before=genesis, generate → Unknown →
-    // unresolved = {genesis, ["tx1"]}.
-    rx.recv().await.expect("first generate call at t=0");
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        rx.recv().await.expect("first generate call at t=0");
+        polls.recv().await.expect("initial mempool poll at t=0");
+        // The t=2 tick reconciles the changed checkpoint. Actual polls at
+        // t=4, t=6, and t=8 prove earlier unchanged-set iterations completed.
+        // Use the real clock because loopback HTTP also needs OS I/O progress.
+        for _ in 0..3 {
+            polls.recv().await.expect("subsequent mempool poll");
+        }
+    })
+    .await;
 
-    // Advance to t=2: reconciliation tick reads current tip (H1), which differs
-    // from before (genesis) → chain advanced → attempted = Some(["tx1"]).
-    tokio::time::advance(Duration::from_secs(2)).await;
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-    }
-
-    // Advance through two more ticks; the unchanged set must be skipped.
-    tokio::time::advance(Duration::from_secs(2)).await;
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(Duration::from_secs(2)).await;
-    for _ in 0..20 {
-        tokio::task::yield_now().await;
-    }
+    mining_task.abort();
+    let mining_result = mining_task.await;
+    server_task.abort();
+    let server_result = server_task.await;
+    observed.expect("mempool polling must progress after the lost generate reply");
+    assert!(mining_result.unwrap_err().is_cancelled());
+    assert!(server_result.unwrap_err().is_cancelled());
     assert!(
         rx.try_recv().is_err(),
         "generate must not be called again after a lost reply is reconciled as produced"

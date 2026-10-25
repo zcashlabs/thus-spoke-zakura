@@ -58,6 +58,9 @@ struct RecordingFaucetRuntime {
     funds_available: AtomicBool,
     reward_discovered: AtomicBool,
     height: AtomicUsize,
+    anchor_pending_until: AtomicUsize,
+    anchor_stays_pending: AtomicBool,
+    mining_progress: AtomicBool,
     cursor: Mutex<Option<crate::db::TreasuryCursor>>,
 }
 
@@ -68,6 +71,9 @@ impl Default for RecordingFaucetRuntime {
             funds_available: AtomicBool::new(false),
             reward_discovered: AtomicBool::new(false),
             height: AtomicUsize::new(2),
+            anchor_pending_until: AtomicUsize::new(0),
+            anchor_stays_pending: AtomicBool::new(false),
+            mining_progress: AtomicBool::new(true),
             cursor: Mutex::new(None),
         }
     }
@@ -88,6 +94,16 @@ impl FaucetRuntime for RecordingFaucetRuntime {
         F: FnOnce(PreparedPayment) -> anyhow::Result<PreparedPayment> + Send + 'static,
     {
         self.events.lock().unwrap().push("prepare".into());
+        let anchor_height = self.anchor_pending_until.load(Ordering::SeqCst);
+        if anchor_height > 0
+            && (self.height.load(Ordering::SeqCst) < anchor_height
+                || self.anchor_stays_pending.load(Ordering::SeqCst))
+        {
+            return Err(PaymentError::AnchorPending {
+                height: anchor_height as u64,
+            }
+            .into());
+        }
         if self.funds_available.load(Ordering::SeqCst) {
             record(PreparedPayment {
                 txid: "recovered-txid".into(),
@@ -160,7 +176,9 @@ impl FaucetRuntime for RecordingFaucetRuntime {
     }
     async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
         self.events.lock().unwrap().push(format!("mine:{blocks}"));
-        self.height.fetch_add(blocks as usize, Ordering::SeqCst);
+        if self.mining_progress.load(Ordering::SeqCst) {
+            self.height.fetch_add(blocks as usize, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -204,4 +222,111 @@ async fn insufficient_funds_discovers_only_the_needed_mature_reward_and_retries(
             "prepare"
         ]
     );
+}
+
+fn anchor_pending_runtime() -> RecordingFaucetRuntime {
+    let runtime = RecordingFaucetRuntime::default();
+    runtime.funds_available.store(true, Ordering::SeqCst);
+    runtime.anchor_pending_until.store(3, Ordering::SeqCst);
+    runtime
+}
+
+fn treasury_account() -> Account {
+    Account {
+        id: TREASURY_ACCOUNT_ID,
+        name: "Account 6".into(),
+        unified_address: "uregtest-treasury".into(),
+        transparent_address: "tmTreasury".into(),
+        unified_full_viewing_key: None,
+        transparent_zatoshi: 0,
+        ironwood_zatoshi: 100_010_000,
+    }
+}
+
+#[tokio::test]
+async fn pending_treasury_anchor_mines_to_required_height_without_replenishment() {
+    let runtime = anchor_pending_runtime();
+    let prepared = prepare_with_replenishment(
+        &runtime,
+        None,
+        None,
+        "seed",
+        &treasury_account(),
+        "uregtest-recipient",
+        100_000_000,
+        Ok,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.txid, "recovered-txid");
+    assert_eq!(runtime.height.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        runtime.events.into_inner().unwrap(),
+        ["prepare", "mine:1", "sync", "prepare"]
+    );
+    assert!(!runtime.reward_discovered.load(Ordering::SeqCst));
+    assert!(runtime.cursor.into_inner().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn treasury_anchor_is_retried_at_most_once_when_it_stays_pending() {
+    let runtime = anchor_pending_runtime();
+    runtime.anchor_stays_pending.store(true, Ordering::SeqCst);
+    let error = prepare_with_replenishment(
+        &runtime,
+        None,
+        None,
+        "seed",
+        &treasury_account(),
+        "uregtest-recipient",
+        100_000_000,
+        Ok,
+    )
+    .await
+    .err()
+    .expect("anchor must remain pending");
+    assert!(matches!(
+        error.downcast_ref::<PaymentError>(),
+        Some(PaymentError::AnchorPending { height: 3 })
+    ));
+    assert_eq!(
+        runtime.events.into_inner().unwrap(),
+        ["prepare", "mine:1", "sync", "prepare"]
+    );
+    assert!(!runtime.reward_discovered.load(Ordering::SeqCst));
+    assert!(runtime.cursor.into_inner().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn treasury_anchor_without_mining_progress_remains_pending_without_replenishment() {
+    let runtime = anchor_pending_runtime();
+    runtime.mining_progress.store(false, Ordering::SeqCst);
+    let error = prepare_with_replenishment(
+        &runtime,
+        None,
+        None,
+        "seed",
+        &treasury_account(),
+        "uregtest-recipient",
+        100_000_000,
+        Ok,
+    )
+    .await
+    .err()
+    .expect("anchor must remain pending");
+    assert!(matches!(
+        error.downcast_ref::<PaymentError>(),
+        Some(PaymentError::AnchorPending { height: 3 })
+    ));
+    assert_eq!(runtime.height.load(Ordering::SeqCst), 2);
+    let events = runtime.events.into_inner().unwrap();
+    assert_eq!(events.iter().filter(|event| *event == "mine:1").count(), 1);
+    assert!((1..=2).contains(&events.iter().filter(|event| *event == "prepare").count()));
+    assert!(
+        events
+            .iter()
+            .all(|event| event == "prepare" || event == "mine:1")
+    );
+    assert!(!runtime.reward_discovered.load(Ordering::SeqCst));
+    assert!(runtime.cursor.into_inner().unwrap().is_none());
 }

@@ -16,8 +16,9 @@ image.
 
 ## Build and start
 
-Use **Rust 1.98**, **Node 24**, and a running Docker daemon. Run these from
-the repository root of the [recorded main checkout](README.md):
+Use **Rust 1.98**, **Node 24**, and a running Docker daemon. The declared
+Rust minimum is 1.97; the pinned development toolchain remains 1.98.0. Run these
+from the repository root of the [recorded main checkout](README.md):
 
 ```console
 npm ci --prefix web
@@ -162,7 +163,7 @@ ignored cases, then run one at a time:
 ```console
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery --no-run
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
-docker pull zakuracore/zakura:1.6.0
+docker pull zakuracore/zakura:1.7.0
 docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --list
 cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact broadcast_recovers_after_auto_mine_failure
@@ -192,3 +193,80 @@ restart do not rebroadcast orphaned payments. Mempool absence is not that proof:
 Zakura's own RPC retry queue can re-admit an earlier submission even while the
 server is stopped. Canonical inclusion, balances, signed bytes, payment identity,
 and the reconciled wallet checkpoint are checked separately.
+
+## Ironwood anchor compatibility
+
+The Common 4 SDK can require another block before a newly confirmed Ironwood
+note or change output is eligible for a spend anchor. A confirmed balance
+therefore does not guarantee that construction can spend it at the same tip.
+Automatic Send progression mines at most one prerequisite block and retries
+construction once. Manual and interval modes leave the original operation
+pending until the chain advances. No public payment status is added.
+
+The focused treasury seam regressions in
+`crates/ths-server/tests/unit/payments/treasury/tests.rs` distinguish existing
+funds waiting for an anchor from a treasury deficit. They simulate reaching the
+required height, an anchor that stays unavailable after one retry, and a miner
+that makes no progress. Anchor waits must not discover rewards or shield more
+funds. These tests complement the wallet adapter's checks that the relevant
+notes are unspent, unlocked, and actually mined at the selected tip; unmined
+and orphaned credits cannot trigger prerequisite mining.
+
+## Retained-wallet upgrade regression
+
+The ignored `retained_rc7_payment_survives_common4_and_node_upgrade` case needs
+two source-built server executables. Build the baseline from commit
+`42dfcea09ee3cf696dcf6cd922bf370a10e9da77`, using that checkout's lockfile
+(Common 2.2.0 and wallet backend/SQLite rc7). Keep its binary separate from the
+current Cargo target directory and explicitly select it with
+`THS_UPGRADE_BASELINE_SERVER`. The test fails clearly if that variable is absent;
+it never substitutes the upgraded binary for baseline evidence.
+
+After the current implementation is complete, prepare and select the case:
+
+```console
+docker pull zakuracore/zakura:1.6.0
+docker pull zakuracore/zakura:1.7.0
+docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
+THS_UPGRADE_BASELINE_SERVER=/absolute/path/to/rc7/ths-server cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact retained_rc7_payment_survives_common4_and_node_upgrade --nocapture
+```
+
+The fixture initializes and funds six accounts with the baseline server and
+node 1.6.0, loses a Send admission response, and retains its signed broadcast
+payment while mining is rejected. It stops only its own server and node,
+replaces them with the Cargo-built upgraded server and node 1.7.0, and reuses
+the same app databases, chain volume, network, and loopback endpoints. The
+baseline fixture enables the node's existing synchronous state-backup test
+setting so the captured recent blocks are durable; its normal periodic backup
+can lag behind the visible tip at shutdown. The replacement node must restore
+the exact saved height and hash before the upgraded server starts. Replay
+must preserve the original activity, transaction ID, bytes, expiry and key;
+canonical inclusion and reconciled balances must show one payout. Accounts
+1–5 remain visible and the treasury remains hidden. Cleanup errors fail the
+scenario and cleanup remains scoped to its generated resources.
+
+Record both source revisions and binary paths, image identities, selected test
+count, chain inclusion, wallet outcomes, and cleanup when reporting a run. This
+host-server case does not validate the app-container path; also build current
+images and start one disposable named instance with the launcher. The migration
+includes transparent and Ironwood coverage and adds no new Sapling scenario.
+Do not infer successful compatibility from a compile or an unexecuted ignored
+test. Downgrades require a consistent pre-upgrade snapshot of affected app and
+node state; `ths stop` deletes instance data and is not such a snapshot.
+
+The server explicitly selects the SDK's public transparent ledger mode alongside
+standard transaction enhancement, preserving its existing local RPC/lightwalletd
+sync path without a private receiver service.
+
+The dependency-family guard consumes Cargo metadata, including dev dependencies:
+
+```console
+cargo metadata --locked --format-version 1 | python3 tests/zakura_dependencies.py
+python3 -m unittest discover -s tests -p zakura_dependencies_test.py
+```
+
+It requires each resolved Common family crate to have one 4.x version, requires
+explicit direct wallet-family dependencies and resolved
+`zakura-note-encryption` (which may be transitive), and rejects their upstream
+counterparts. Independent `zcash_script`,
+`zcash_encoding`, and `zcash_spec` packages keep their own versioning.

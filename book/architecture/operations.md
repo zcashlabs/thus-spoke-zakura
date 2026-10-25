@@ -59,6 +59,53 @@ instance's databases remain intact. This is not an end-to-end exactly-once
 guarantee: a fresh key requests a new payment, and deleting the instance deletes
 its recovery records.
 
+### Freshly confirmed Ironwood and spend anchors
+
+An Ironwood credit or change output can be confirmed and visible in the wallet
+while the SDK still needs the next block's anchor before spending it. This is
+a preparation prerequisite, not a new payment status. The existing intent stays
+`preparing` with its original key until an eligible anchor is available.
+
+In automatic mining mode, a Send can mine at most one prerequisite block and
+retry construction once. Manual and interval modes wait for normal chain
+progress instead of mining that block on the Send's behalf. Retained signed
+payments still reconcile their original transaction before replacement is
+considered. Unmined or orphaned credits do not qualify as confirmed funds
+waiting for an anchor.
+
+Faucet preparation checks whether existing treasury funds await an anchor
+before replenishing the treasury. It advances to the required height and
+retries once; if no progress is made or the anchor is still unavailable, the
+payment remains pending. Waiting for an anchor alone does not discover more
+coinbase rewards or start another shielding payment.
+
+If a pending Ironwood Send needs another block in manual or mempool mode,
+run `ths mine 1` for the same instance. An empty mempool alone does not advance
+the mempool miner. Interval mode supplies the next block on its schedule.
+Keep the original idempotency key while the operation resumes.
+
+## Retained payments across a wallet upgrade
+
+A forward wallet migration retains the original intent and idempotency mapping.
+Already signed payments keep their transaction ID, signed bytes, and stored
+expiry, including when the caller lost a response. Retry the original request
+with its original key and details. A new SDK validation error alone does not
+authorize a replacement of signed work: recovery must first reconcile the
+original transaction with the chain and mempool through the existing expiry
+checks.
+
+New ordinary NU7 transactions use the SDK's 120-block expiry delta from the
+candidate inclusion height. That new default does not rewrite an old signed
+transaction's expiry. An unsigned proposal that has become stale can be
+proposed again under the original intent. Construction refusal must leave no
+new committed transaction, prepared journal entry, or leaked input reservation.
+
+These guarantees require retained databases. The normal launcher cleanup
+removes instance data; `ths stop` followed by `ths start` does not demonstrate
+an existing-wallet upgrade. See the [retained live upgrade
+procedure](../development.md#retained-wallet-upgrade-regression) for development
+validation.
+
 ## HTTP admission and status
 
 `POST /api/v1/send`, `POST /api/v1/faucet`, and

@@ -506,10 +506,8 @@ pub(crate) async fn prepare_activity_intent(
             let memo = parse_payment_memo(intent.memo.as_deref(), &activity.destination_pool)
                 .map_err(|error| anyhow::anyhow!(error))?;
             attempt.check_can_start()?;
-            state
-                .0
-                .wallet
-                .prepare(
+            let prepare = || {
+                state.0.wallet.prepare(
                     Some(&activity.id),
                     replacement_txid,
                     &seed,
@@ -517,10 +515,21 @@ pub(crate) async fn prepare_activity_intent(
                     &activity.source_pool,
                     &destination,
                     activity.amount_zatoshi,
-                    memo,
-                    record,
+                    memo.clone(),
+                    record.clone(),
                 )
-                .await
+            };
+            let prepared = prepare().await;
+            if let Err(error) = &prepared
+                && matches!(
+                    error.downcast_ref(),
+                    Some(PaymentError::AnchorPending { .. })
+                )
+                && !attempt.mine_and_sync(1).await?.is_empty()
+            {
+                return prepare().await;
+            }
+            prepared
         }
         "faucet" => {
             let account = state.0.store.account(TREASURY_ACCOUNT_ID)?;

@@ -33,19 +33,18 @@ tonic = "0.14"
 
 # Pin the Zakura type family even where API-facing values are serialized. The
 # wallet adapter can never silently resolve the upstream LRZ crypto packages.
-zcash_keys = { package = "zakura-keys", version = "=2.2.0", default-features = false, features = ["orchard", "transparent-inputs", "unstable"] }
-zcash_primitives = { package = "zakura-primitives", version = "=2.2.0", default-features = false }
-zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc7", features = ["orchard", "transparent-inputs", "lightwalletd-tonic-transport"] }
-zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc7", features = ["orchard", "transparent-inputs", "unstable"] }
-zcash_proofs = { package = "zakura-proofs", version = "=2.2.0", features = ["bundled-prover"] }
-orchard = { package = "zakura-orchard", version = "=2.2.0" }
-sapling = { package = "zakura-sapling-crypto", version = "=2.2.0", default-features = false }
-pczt = { package = "zakura-pczt", version = "=0.1.0-rc4", features = ["signer"] }
-transparent = { package = "zakura-transparent", version = "=2.2.0" }
-zcash_script = "=0.4.5"
+zcash_keys = { package = "zakura-keys", version = "=4.0.0", default-features = false, features = ["backend-halo2", "wallet", "zip32-addresses", "orchard", "transparent-inputs", "unstable"] }
+zcash_primitives = { package = "zakura-primitives", version = "=4.0.0", default-features = false, features = ["backend-halo2", "wallet", "pczt"] }
+zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc9.4", features = ["orchard", "transparent-inputs", "lightwalletd-tonic-transport"] }
+zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc9.4", features = ["orchard", "transparent-inputs", "unstable"] }
+zcash_proofs = { package = "zakura-proofs", version = "=4.0.0", features = ["bundled-prover"] }
+orchard = { package = "zakura-orchard", version = "=4.0.0" }
+sapling = { package = "zakura-sapling-crypto", version = "=4.0.0", default-features = false, features = ["wallet", "zip32-addresses"] }
+transparent = { package = "zakura-transparent", version = "=4.0.0" }
+zcash_script = "=0.6.0"
 zcash_protocol.workspace = true
 zip32.workspace = true
-zip321 = { package = "zakura-zip321", version = "=2.2.0" }
+zip321 = { package = "zakura-zip321", version = "=4.0.0" }
 
 [dev-dependencies]
 # The live recovery fault proxy forwards lightwalletd's HTTP/2 gRPC streams.
@@ -57,5 +56,5 @@ tempfile = "3"
 h2 = "0.4"
 tokio = { workspace = true, features = ["test-util"] }
 # The wallet SDK's in-memory chain/scanner harness for proposal-level tests.
-zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc7", features = ["test-dependencies"] }
-zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc7", features = ["test-dependencies"] }
+zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc9.4", features = ["test-dependencies"] }
+zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc9.4", features = ["test-dependencies"] }

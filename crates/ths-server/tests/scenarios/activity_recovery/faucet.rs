@@ -44,7 +44,7 @@ pub(super) async fn address_faucet_retry_after_server_restart_pays_each_destinat
             nu6_1: one,
             nu6_2: one,
             nu6_3: one,
-            nu7: None,
+            nu7: one,
         };
         let external =
             Address::Transparent(TransparentAddress::PublicKeyHash([42; 20])).encode(&network);
@@ -52,6 +52,9 @@ pub(super) async fn address_faucet_retry_after_server_restart_pays_each_destinat
             (internal, "internal-restart-faucet"),
             (external, "external-restart-faucet"),
         ] {
+            // Fail confirmation mining only after the prior payout's change
+            // has an eligible anchor, so this exercises broadcast recovery.
+            let _: Vec<String> = rpc(&client, fixture.node_url(), "generate", json!([1])).await?;
             fixture.proxy().reject_payment_mining(true)?;
             let body = json!({
                 "address": address, "amount_zatoshi": 1_000_000,
@@ -202,6 +205,8 @@ pub(super) async fn internal_address_faucet_recovers_after_auto_mine_failure() -
             SEND_TIMEOUT,
         )
         .await?;
+        // Mature the warmup's treasury change before failing confirmation mining.
+        let _: Vec<String> = rpc(&client, fixture.node_url(), "generate", json!([1])).await?;
         let warmed = faucet_accounts(&client, &fixture).await?;
         let balance = warmed
             .iter()
@@ -370,7 +375,7 @@ pub(super) fn external_faucet_test_address() -> String {
         nu6_1: one,
         nu6_2: one,
         nu6_3: one,
-        nu7: None,
+        nu7: one,
     };
     Address::Transparent(transparent::address::TransparentAddress::PublicKeyHash(
         [0x7a; 20],

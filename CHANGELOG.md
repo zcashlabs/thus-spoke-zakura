@@ -4,6 +4,22 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
+- **Zakura Common 4 migration:** The wallet uses Common 4.0.0 and backend/SQLite
+  0.1.0-rc9.4 with Zakura 1.7.0. The declared Rust minimum rises to 1.97;
+  the development and release toolchain remains 1.98.0. Wallet databases migrate
+  forward on open. Retained signed payments keep their original transaction
+  bytes, expiry, activity, and idempotency key. Newly constructed ordinary NU7
+  transactions use the SDK's 120-block expiry delta from the candidate inclusion
+  height. Freshly confirmed Ironwood can need the next block's spend anchor:
+  automatic Sends mine at most one prerequisite block and retry once, while
+  manual and interval Sends wait. Existing treasury funds awaiting that anchor
+  do not trigger reward discovery or shielding. Operations retain their existing
+  pending statuses and keys. Downgrades require a consistent pre-upgrade snapshot
+  of app and node state; no database downgrade compatibility is promised. Release validation
+  must cover fresh and retained wallets before publishing this coordinated set.
+  No new Sapling migration scenarios are included in this change.
+  [#436](https://github.com/zcashlabs/thus-spoke-zakura/issues/436)
+
 - **Docker failures name the failed command:** A Docker invocation that exited
   nonzero without printing anything produced an empty error message, so a
   launcher read that goes through Docker could report a blank reason with no

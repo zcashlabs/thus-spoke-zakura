@@ -577,9 +577,23 @@ pub(super) async fn expired_unseen_send_replaces_once_under_the_original_key() -
         let original = pending_payment_snapshot(&fixture, false, key)?;
         let chain: ChainInfo =
             rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
-        let blocks = original.expiry_height.saturating_sub(chain.blocks) + 1;
+        let expiry_delta =
+            u64::from(zcash_primitives::transaction::builder::NU7_DEFAULT_TX_EXPIRY_DELTA);
+        let signed = zcash_primitives::transaction::Transaction::read(
+            original.raw.as_slice(),
+            zcash_protocol::consensus::BranchId::Nu7,
+        )?;
+        let signed_expiry = u64::from(u32::from(signed.expiry_height()));
         anyhow::ensure!(
-            blocks > 0 && blocks <= 100,
+            signed_expiry == original.expiry_height,
+            "journal expiry differs from signed transaction"
+        );
+        let blocks = signed_expiry
+            .checked_sub(chain.blocks)
+            .context("signed transaction expired before expiry scenario advanced the chain")?
+            + 1;
+        anyhow::ensure!(
+            blocks > 0 && blocks <= expiry_delta + 2,
             "unexpected expiry distance: {blocks}"
         );
         let _: serde_json::Value = rpc_with_timeout(

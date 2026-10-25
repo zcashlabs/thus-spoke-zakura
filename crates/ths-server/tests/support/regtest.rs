@@ -267,6 +267,12 @@ struct DockerPortBinding {
     host_port: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct NodeChainCheckpoint {
+    blocks: u64,
+    bestblockhash: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct HealthResponse {
     instance: String,
@@ -287,6 +293,7 @@ struct AccountBalance {
 /// Owns an isolated Zakura node, lightwalletd, proxy and `ths-server` process.
 pub struct RegtestStack {
     server: PathBuf,
+    node_image: &'static str,
     temporary_directory: Option<TempDir>,
     data_dir: PathBuf,
     config_dir: PathBuf,
@@ -341,6 +348,7 @@ impl RegtestStack {
 
         Ok(Self {
             server,
+            node_image: "zakuracore/zakura:1.7.0",
             temporary_directory: Some(temporary_directory),
             data_dir,
             config_dir,
@@ -407,6 +415,27 @@ impl RegtestStack {
         )
         .await?;
 
+        if self.node_image == "zakuracore/zakura:1.6.0" {
+            let path = self.config_dir.join("zakurad.toml");
+            let config =
+                fs::read_to_string(&path).context("reading baseline fixture node config")?;
+            ensure!(
+                config.matches("[state]\n").count() == 1,
+                "baseline node config must have one state section"
+            );
+            // Zakura's five-second periodic backup can miss blocks at shutdown.
+            // Its existing test setting persists blocks before publishing the tip.
+            fs::write(
+                &path,
+                config.replacen(
+                    "[state]\n",
+                    "[state]\ndebug_skip_non_finalized_state_backup_task = true\n",
+                    1,
+                ),
+            )
+            .context("enabling synchronous retained-node backups")?;
+        }
+
         let network = DockerResource::Network(self.names.network.clone());
         let chain_volume = DockerResource::Volume(self.names.chain_volume.clone());
         let lightwalletd_volume = DockerResource::Volume(self.names.lightwalletd_volume.clone());
@@ -442,47 +471,7 @@ impl RegtestStack {
 
         let node = DockerResource::Container(self.names.node_container.clone());
         self.claim_docker_resource(node).await?;
-        self.docker_checked(
-            vec![
-                "run".into(),
-                "--detach".into(),
-                "--name".into(),
-                self.names.node_container.clone(),
-                "--network".into(),
-                self.names.network.clone(),
-                "--network-alias".into(),
-                "zakura".into(),
-                "--volume".into(),
-                format!("{}:/data", self.names.chain_volume),
-                "--volume".into(),
-                format!("{}:/config:ro", self.config_dir.display()),
-                "--env".into(),
-                "CONFIG_FILE_PATH=/config/zakurad.toml".into(),
-                "--env".into(),
-                "ZAKURA_STATE__CACHE_DIR=/data".into(),
-                // The private host-mounted config is mode 0700. Keep the
-                // image entrypoint from dropping to its default UID so the
-                // isolated node can read that config while preserving its
-                // private host permissions.
-                "--env".into(),
-                "UID=0".into(),
-                "--env".into(),
-                "GID=0".into(),
-                "--publish".into(),
-                "127.0.0.1::18232".into(),
-                "zakuracore/zakura:1.6.0".into(),
-                "zakurad".into(),
-                "start".into(),
-            ],
-            COMMAND_TIMEOUT,
-            false,
-            "starting the fixture Zakura node",
-        )
-        .await?;
-        let node_inspect = self.inspect_container(&self.names.node_container).await?;
-        let node_port = published_loopback_port(&node_inspect, "18232/tcp")?;
-        self.node_url = format!("http://127.0.0.1:{node_port}");
-        self.wait_for_node_ready().await?;
+        self.start_node("").await?;
 
         let lightwalletd = DockerResource::Container(self.names.lightwalletd_container.clone());
         self.claim_docker_resource(lightwalletd).await?;
@@ -538,6 +527,118 @@ impl RegtestStack {
         self.cleanup.push(CleanupResource::Server);
         self.spawn_server(api_port, lightwalletd_port).await?;
         self.wait_for_funded_server().await
+    }
+
+    pub fn upgrade_baseline(server: PathBuf) -> Result<Self> {
+        let mut fixture = Self::new(server)?;
+        fixture.node_image = "zakuracore/zakura:1.6.0";
+        Ok(fixture)
+    }
+
+    /// Replaces only the owned node and server, preserving their volumes and endpoints.
+    pub async fn upgrade_retained_stack(&mut self, server: PathBuf) -> Result<()> {
+        ensure!(
+            self.node_image == "zakuracore/zakura:1.6.0",
+            "upgrade requires the baseline node"
+        );
+        self.stop_server().await?;
+        let baseline: NodeChainCheckpoint = rpc_with_timeout(
+            &self.client,
+            &self.node_url,
+            "getblockchaininfo",
+            json!([]),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .context("capturing the retained baseline node tip")?;
+        self.docker_checked(
+            vec![
+                "stop".into(),
+                "--time".into(),
+                "30".into(),
+                self.names.node_container.clone(),
+            ],
+            Duration::from_secs(45),
+            false,
+            "stopping the baseline fixture node",
+        )
+        .await?;
+        self.remove_docker_resource(&DockerResource::Container(
+            self.names.node_container.clone(),
+        ))
+        .await?;
+        let host_port = self
+            .node_url
+            .rsplit(':')
+            .next()
+            .context("fixture node port is missing")?
+            .to_owned();
+        self.node_image = "zakuracore/zakura:1.7.0";
+        self.start_node(&host_port).await?;
+        let restored: NodeChainCheckpoint = rpc_with_timeout(
+            &self.client,
+            &self.node_url,
+            "getblockchaininfo",
+            json!([]),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .context("reading the replacement node tip before restarting the server")?;
+        ensure!(
+            restored == baseline,
+            "replacement node changed retained chain: expected height {} hash {}, restored height {} hash {}; refusing to restart the upgraded server",
+            baseline.blocks,
+            baseline.bestblockhash,
+            restored.blocks,
+            restored.bestblockhash,
+        );
+        self.server = server;
+        self.require_server_path()?;
+        self.restart_server().await
+    }
+
+    async fn start_node(&mut self, host_port: &str) -> Result<()> {
+        self.docker_checked(
+            vec![
+                "run".into(),
+                "--detach".into(),
+                "--name".into(),
+                self.names.node_container.clone(),
+                "--network".into(),
+                self.names.network.clone(),
+                "--network-alias".into(),
+                "zakura".into(),
+                "--volume".into(),
+                format!("{}:/data", self.names.chain_volume),
+                "--volume".into(),
+                format!("{}:/config:ro", self.config_dir.display()),
+                "--env".into(),
+                "CONFIG_FILE_PATH=/config/zakurad.toml".into(),
+                "--env".into(),
+                "ZAKURA_STATE__CACHE_DIR=/data".into(),
+                // The private host-mounted config is mode 0700. Keep the
+                // image entrypoint from dropping to its default UID so the
+                // isolated node can read that config while preserving its
+                // private host permissions.
+                "--env".into(),
+                "UID=0".into(),
+                "--env".into(),
+                "GID=0".into(),
+                "--publish".into(),
+                format!("127.0.0.1:{host_port}:18232"),
+                self.node_image.into(),
+                "zakurad".into(),
+                "start".into(),
+            ],
+            COMMAND_TIMEOUT,
+            false,
+            "starting the fixture Zakura node",
+        )
+        .await?;
+        let node_inspect = self.inspect_container(&self.names.node_container).await?;
+        let node_port = published_loopback_port(&node_inspect, "18232/tcp")?;
+        self.node_url = format!("http://127.0.0.1:{node_port}");
+        self.wait_for_node_ready().await
     }
 
     pub fn api_url(&self) -> &str {

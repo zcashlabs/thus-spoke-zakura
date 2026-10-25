@@ -81,10 +81,38 @@ The launcher always selects these exact tags using its compiled Cargo version:
 ```text
 ghcr.io/zcashlabs/thus-spoke-zakura-app:<version>
 ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:<version>
-zakuracore/zakura:1.6.0
+zakuracore/zakura:1.7.0
 ```
 
 `ths pull` fetches that set. `start` has no network-side image
 resolution and never consumes `latest`. Contributor builds deliberately use
 the same exact local tags, allowing a source build to replace the matching
 images without changing runtime behavior.
+
+## Common 4 compatibility gate
+
+The coordinated runtime is Common 4.0.0, wallet backend/SQLite 0.1.0-rc9.4,
+and `zakuracore/zakura:1.7.0`. The declared Rust floor is 1.97; build with the
+existing 1.98.0 toolchain. A successful 1.98 build alone does not verify the
+1.97 floor. Keep the lightwalletd source version unless integration evidence
+requires a change, and publish a newly versioned launcher/app/lightwalletd set.
+Never overwrite an existing release tag to introduce this migration.
+
+Before release, record the locked dependency-family check, production server
+build, required Rust checks, both supported Linux image architectures, and
+fresh-instance startup through rebuilt launcher/app images. Run the retained
+rc7-to-Common-4 live upgrade described in `book/development.md` as well as the
+existing transparent/Ironwood transfers, shielding, faucet, mining, reorg, and
+payment-recovery regressions. New Sapling scenarios are excluded from this
+migration's requested coverage; existing workspace tests remain required.
+These checks are release gates, not results established by the dependency bump.
+
+The SDK migrates retained wallet schemas forward during open. Preserve
+`ths.db`, `wallet.db`, account identities, and original signed payment bytes
+and expiry; resetting data is not a migration fallback. Surface migration
+errors and preserve the affected state for diagnosis and retry. Upstream
+migrations commit individually, so a failed upgrade need not leave every file
+byte-for-byte unchanged. Do not promise downgrade support: restoring older
+software requires a consistent pre-upgrade snapshot of the affected app and
+node state. Ordinary `ths stop` cleans instance data and is not a retained-state
+upgrade procedure.

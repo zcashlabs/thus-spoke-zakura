@@ -338,8 +338,14 @@ ths stop                 # repeat with --name for each instance you intend to de
 ths uninstall
 docker image rm ghcr.io/zcashlabs/thus-spoke-zakura-app:0.3.0 \
                 ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:0.3.0 \
-                zakuracore/zakura:1.6.0
+                zakuracore/zakura:1.7.0
 ```
+
+The pinned node is Zakura 1.7.0, paired with Common 4.0.0 and wallet
+backend/SQLite 0.1.0-rc9.4. Wallet schemas migrate forward on open; retaining an
+old signed payment keeps its original bytes and expiry. No downgrade
+compatibility is promised without restoring a consistent pre-upgrade snapshot
+of app and node state.
 
 Inspect `$THS_CONFIG_DIR` separately before deleting configuration. Retained
 recovery records should be resolved before removing that directory. Executable,

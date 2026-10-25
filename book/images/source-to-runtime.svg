@@ -63,7 +63,7 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 <text class="l" x="810.6666666666667" y="295.0" text-anchor="middle">lightwalletd:&lt;version&gt;</text>
 <text class="s" x="810.6666666666667" y="313.0" text-anchor="middle">from that Dockerfile</text>
 <rect class="card" x="358.6666666666667" y="344" width="282.6666666666667" height="52" rx="8"/>
-<text class="l" x="500.0" y="367.0" text-anchor="middle">zakuracore/zakura:1.6.0</text>
+<text class="l" x="500.0" y="367.0" text-anchor="middle">zakuracore/zakura:1.7.0</text>
 <text class="s" x="500.0" y="385.0" text-anchor="middle">pinned — ths pull, never built</text>
 <text class="s" x="500" y="432" text-anchor="middle">editing source changes neither a running container nor an existing image</text>
 </svg>

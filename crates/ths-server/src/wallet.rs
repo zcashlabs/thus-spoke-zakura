@@ -23,6 +23,7 @@ use zcash_client_backend::{
         enhance_pir::{EnhancePirRead, EnhancementMode, TransactionEnhancementWork},
         error::Error as WalletError,
         scanning::ScanRange,
+        transparent_ledger::TransparentLedgerMode,
         wallet::{
             ConfirmationsPolicy, SpendingKeys, create_proposed_transactions,
             decrypt_and_store_transaction,
@@ -190,7 +191,8 @@ impl RealWallet {
             SystemClock,
             UnwrapErr(SysRng),
         )?
-        .with_enhancement_mode(EnhancementMode::Standard);
+        .with_enhancement_mode(EnhancementMode::Standard)
+        .with_transparent_ledger_mode(TransparentLedgerMode::Public);
         WalletMigrator::new()
             .with_seed(SecretVec::new(secret.expose_secret().clone()))
             .with_external_migrations(vec![
@@ -629,3 +631,7 @@ mod tests;
 pub(crate) mod transparent_history_test_support;
 
 const TREASURY_SHIELDING_JOURNAL_ID: &str = "private-treasury-shielding-v1";
+
+#[cfg(test)]
+#[path = "../tests/unit/wallet/migration.rs"]
+mod migration_tests;

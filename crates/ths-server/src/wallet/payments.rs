@@ -14,6 +14,8 @@ pub enum PaymentError {
     TransparentMemo,
     #[error("wallet requires reconciliation before constructing a payment")]
     ScanRequired,
+    #[error("wallet funds need the chain to reach height {height} before a shielded spend")]
+    AnchorPending { height: u64 },
 }
 
 /// Spendable balance, fee, and maximum sendable amount for emptying one pool.
@@ -71,6 +73,61 @@ const MAX_TRANSPARENT_INPUTS: usize = zcash_protocol::constants::MAX_BLOCK_BYTES
     / zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_INPUT_SIZE;
 
 impl RealWallet {
+    fn pending_anchor_height<DbT>(
+        db: &DbT,
+        account_id: <DbT as InputSource>::AccountId,
+        available: u64,
+        required: u64,
+        only_txid: Option<&str>,
+    ) -> Result<Option<u64>>
+    where
+        DbT: ProposalDb,
+    {
+        let Some((target, anchor)) =
+            db.get_target_and_anchor_heights(ConfirmationsPolicy::MIN.trusted())?
+        else {
+            return Ok(None);
+        };
+        let tip = BlockHeight::from(target).saturating_sub(1);
+        if tip <= anchor {
+            return Ok(None);
+        }
+        // The SDK excludes locked or reserved notes. Only a receipt actually
+        // mined at this tip can become spendable after one more anchor block;
+        // unmined or orphaned credits must not defer an insufficient send.
+        let notes = db.select_unspent_notes(
+            account_id,
+            &[ShieldedPool::Ironwood],
+            target,
+            &[],
+            LockFilter::Policy(&LockedInputPolicy::Exclude),
+        )?;
+        let pending = notes
+            .ironwood()
+            .iter()
+            .filter(|note| {
+                note.mined_height() == Some(tip)
+                    && only_txid.is_none_or(|txid| note.txid().to_string() == txid)
+            })
+            .try_fold(0_u64, |total, note| {
+                total.checked_add(note.note().value().inner())
+            })
+            .context("pending Ironwood balance exceeds the maximum money supply")?;
+        let potential = available
+            .checked_add(pending)
+            .context("available Ironwood balance exceeds the maximum money supply")?;
+        Ok((pending > 0 && potential >= required).then_some(u64::from(u32::from(tip)) + 1))
+    }
+
+    pub(crate) async fn startup_anchor_height(&self, funding_txid: &str) -> Result<Option<u64>> {
+        let account_id = self.account_ids[0];
+        let funding_txid = funding_txid.to_owned();
+        self.with_db(move |db| {
+            Self::pending_anchor_height(db, account_id, 0, 1, Some(&funding_txid))
+        })
+        .await
+    }
+
     /// Builds the proposal a send would use, without signing or broadcasting.
     fn propose_send<DbT>(
         db: &mut DbT,
@@ -108,7 +165,7 @@ impl RealWallet {
             ShieldedPool::Ironwood,
             DustOutputPolicy::default(),
         );
-        let proposal = propose_transfer::<_, _, _, _, Infallible>(
+        match propose_transfer::<_, _, _, _, Infallible>(
             db,
             params,
             account_id,
@@ -119,19 +176,30 @@ impl RealWallet {
             &policy,
             None,
             None,
-        )
-        .map_err(|error| match error {
-            WalletError::InsufficientFunds {
+        ) {
+            Ok(proposal) => Ok(proposal),
+            Err(WalletError::InsufficientFunds {
                 available,
                 required,
-            } => anyhow::Error::new(PaymentError::InsufficientFunds {
-                available: u64::from(available),
-                required: u64::from(required),
-            }),
-            WalletError::ScanRequired => anyhow::Error::new(PaymentError::ScanRequired),
-            error => anyhow::anyhow!("proposing {source_pool} transaction: {error}"),
-        })?;
-        Ok(proposal)
+            }) => {
+                let (available, required) = (u64::from(available), u64::from(required));
+                if source_pool == "ironwood"
+                    && let Some(height) =
+                        Self::pending_anchor_height(db, account_id, available, required, None)?
+                {
+                    return Err(PaymentError::AnchorPending { height }.into());
+                }
+                Err(PaymentError::InsufficientFunds {
+                    available,
+                    required,
+                }
+                .into())
+            }
+            Err(WalletError::ScanRequired) => Err(PaymentError::ScanRequired.into()),
+            Err(error) => Err(anyhow::anyhow!(
+                "proposing {source_pool} transaction: {error}"
+            )),
+        }
     }
 
     fn send_input(

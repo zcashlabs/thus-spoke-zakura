@@ -658,3 +658,330 @@ fn transparent_quote_max_is_sendable_when_utxos_exceed_the_input_cap() {
     propose(quote.max_zatoshi).unwrap();
     assert!(propose(quote.max_zatoshi + 1).is_err());
 }
+
+#[test]
+fn nu7_construction_uses_target_height_plus_120_for_ordinary_payments() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 100_000_000);
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let usk = st.test_account().unwrap().usk().clone();
+    let params = *st.network();
+    let proposal = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "ironwood",
+        &recipient,
+        Zatoshis::const_from_u64(1_000_000),
+        None,
+    )
+    .unwrap();
+    let target = u32::from(BlockHeight::from(proposal.min_target_height()));
+    let prepared = RealWallet::build_and_serialize(
+        st.wallet_mut(),
+        &params,
+        usk,
+        &proposal,
+        "expiry regression",
+        "missing built transaction",
+    )
+    .unwrap();
+    assert_eq!(prepared.expiry_height, u64::from(target) + 120);
+    let decoded = Transaction::read(&prepared.raw_transaction[..], BranchId::Nu7).unwrap();
+    assert_eq!(decoded.txid().to_string(), prepared.txid);
+    assert_eq!(u32::from(decoded.expiry_height()), target + 120);
+}
+
+#[test]
+fn oversized_imported_ironwood_proposal_rolls_back_without_journal_or_input_locks() {
+    use zcash_client_backend::{
+        fees::{ChangeValue, TransactionBalance},
+        proposal::ProposalError,
+    };
+    use zcash_protocol::{PoolType, consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT};
+
+    let mut st = test_state();
+    fund_ironwood(&mut st, 100_000_000);
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let usk = st.test_account().unwrap().usk().clone();
+    let params = *st.network();
+    let base = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "ironwood",
+        &recipient,
+        Zatoshis::const_from_u64(1_000_000),
+        None,
+    )
+    .unwrap();
+    let step = base.steps().first();
+    let make_proposal = |payments: usize| {
+        let request = TransactionRequest::new(
+            (0..payments)
+                .map(|_| {
+                    Payment::new(
+                        recipient.to_zcash_address(&params),
+                        Some(Zatoshis::const_from_u64(1_000)),
+                        None,
+                        None,
+                        None,
+                        vec![],
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let fee = 5_000 * (payments as u64 + 1);
+        Proposal::single_step(
+            request,
+            (0..payments)
+                .map(|index| (index, PoolType::IRONWOOD))
+                .collect(),
+            vec![],
+            step.shielded_inputs().cloned(),
+            step.anchor_height().unwrap(),
+            TransactionBalance::new(
+                vec![ChangeValue::ironwood(
+                    Zatoshis::from_u64(100_000_000 - payments as u64 * 1_000 - fee).unwrap(),
+                    None,
+                )],
+                Zatoshis::from_u64(fee).unwrap(),
+            )
+            .unwrap(),
+            StandardFeeRule::Zip317,
+            base.min_target_height(),
+            base.confirmations_policy(),
+            false,
+            true,
+        )
+        .unwrap()
+    };
+    let fits = make_proposal(NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT - 1);
+    fits.validate_shielded_budget(&params).unwrap();
+    let oversized = make_proposal(NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT);
+    assert!(matches!(
+        oversized.validate_shielded_budget(&params),
+        Err(ProposalError::ShieldedBudget(_))
+    ));
+    let before = quote(&mut st, "ironwood", "ironwood").unwrap();
+    st.wallet().conn().execute_batch("CREATE TABLE ext_tsz_prepared_payments(activity_id TEXT PRIMARY KEY, txid TEXT NOT NULL, raw_transaction BLOB NOT NULL, expiry_height INTEGER NOT NULL)").unwrap();
+    let raw_count = |db: &rusqlite::Connection| -> u64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM transactions WHERE raw IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wallet.db");
+    st.wallet()
+        .conn()
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut db: Db = WalletDb::for_path(&path, params, SystemClock, UnwrapErr(SysRng)).unwrap();
+    let transactions_before = raw_count(&connection);
+    let result = db.transactionally_with_extension::<_, _, anyhow::Error>(|wallet, ext| {
+        let prepared = RealWallet::build_and_serialize(
+            wallet,
+            &params,
+            usk,
+            &oversized,
+            "budget regression",
+            "missing built transaction",
+        )?;
+        ext.execute(
+            "INSERT INTO ext_tsz_prepared_payments VALUES('oversized',?1,?2,?3)",
+            rusqlite::params![
+                prepared.txid,
+                prepared.raw_transaction,
+                prepared.expiry_height
+            ],
+        )?;
+        Ok(())
+    });
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("NU7"), "{error:#}");
+    assert_eq!(raw_count(&connection), transactions_before);
+    let journals: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM ext_tsz_prepared_payments",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(journals, 0);
+    let after = RealWallet::quote(&mut db, &params, account_id, "ironwood", &recipient).unwrap();
+    assert_eq!(after.available_zatoshi, before.available_zatoshi);
+    assert_eq!(after.max_zatoshi, before.max_zatoshi);
+}
+
+#[test]
+fn stale_unsigned_proposal_is_refused_without_spending_inputs() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 100_000_000);
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let usk = st.test_account().unwrap().usk().clone();
+    let params = *st.network();
+    let proposal = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "ironwood",
+        &recipient,
+        Zatoshis::const_from_u64(1_000_000),
+        None,
+    )
+    .unwrap();
+    add_empty_blocks(&mut st, 121);
+    let before = quote(&mut st, "ironwood", "ironwood").unwrap();
+    let error = RealWallet::build_and_serialize(
+        st.wallet_mut(),
+        &params,
+        usk,
+        &proposal,
+        "stale proposal regression",
+        "missing built transaction",
+    )
+    .err()
+    .expect("expired proposal must be refused");
+    assert!(
+        error.to_string().contains("below the candidate height"),
+        "{error:#}"
+    );
+    let after = quote(&mut st, "ironwood", "ironwood").unwrap();
+    assert_eq!(after.available_zatoshi, before.available_zatoshi);
+    assert_eq!(after.max_zatoshi, before.max_zatoshi);
+}
+
+#[test]
+fn tip_ironwood_receipt_waits_for_anchor_without_becoming_insufficient() {
+    let mut st = test_state();
+    let (other_account, _) = st.create_account_from_test_seed("other account");
+    add_empty_blocks(&mut st, 10);
+    let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+    let (height, _, _) = st.generate_next_block(
+        &fvk,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(100_000_000),
+    );
+    st.scan_cached_blocks(height, 1);
+    let recipient = recipient(&st, "ironwood");
+    let account = st.test_account().unwrap().id();
+    let params = *st.network();
+    for (source_account, pool, amount, pending) in [
+        (account, "ironwood", 1_000_000, true),
+        (account, "ironwood", 200_000_000, false),
+        (other_account, "ironwood", 1_000_000, false),
+        (account, "transparent", 1_000_000, false),
+    ] {
+        let error = RealWallet::propose_send(
+            st.wallet_mut(),
+            &params,
+            source_account,
+            pool,
+            &recipient,
+            Zatoshis::from_u64(amount).unwrap(),
+            None,
+        )
+        .unwrap_err();
+        if pending {
+            assert!(
+                matches!(error.downcast_ref(), Some(PaymentError::AnchorPending { height: target }) if *target == u64::from(u32::from(height)) + 1),
+                "{error:#}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error.downcast_ref(),
+                    Some(PaymentError::InsufficientFunds { .. })
+                ),
+                "{error:#}"
+            );
+        }
+    }
+    add_empty_blocks(&mut st, 1);
+    RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account,
+        "ironwood",
+        &recipient,
+        Zatoshis::const_from_u64(1_000_000),
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn unmined_ironwood_receipt_does_not_authorize_anchor_mining() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 100_000_000);
+    st.wallet().conn().execute("UPDATE transactions SET block=NULL,mined_height=NULL WHERE id_tx IN (SELECT transaction_id FROM ironwood_received_notes)", []).unwrap();
+    let recipient = recipient(&st, "ironwood");
+    let account = st.test_account().unwrap().id();
+    let params = *st.network();
+    let error = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account,
+        "ironwood",
+        &recipient,
+        Zatoshis::const_from_u64(1_000_000),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref(),
+            Some(PaymentError::InsufficientFunds { .. })
+        ),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn reserved_tip_receipt_cannot_request_another_anchor_block() {
+    let mut st = test_state();
+    add_empty_blocks(&mut st, 10);
+    let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(&st));
+    let (height, _, _) = st.generate_next_block(
+        &fvk,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(100_000_000),
+    );
+    st.scan_cached_blocks(height, 1);
+    let account = st.test_account().unwrap().id();
+    assert!(
+        RealWallet::pending_anchor_height(st.wallet(), account, 0, 1, None)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        RealWallet::pending_anchor_height(st.wallet(), account, 0, 1, Some(&"01".repeat(32)))
+            .unwrap()
+            .is_none()
+    );
+    // Model a retained signed spend's reservation, independently of the new
+    // proposal. It must never authorize mining for another payment's inputs.
+    st.wallet().conn().execute("INSERT INTO transactions(txid,min_observed_height,expiry_height,raw) VALUES(zeroblob(32),?1,?2,x'01')", rusqlite::params![u32::from(height),u32::from(height)+120]).unwrap();
+    let spending_transaction = st.wallet().conn().last_insert_rowid();
+    st.wallet()
+        .conn()
+        .execute(
+            "INSERT INTO ironwood_received_note_spends VALUES(1,?1)",
+            [spending_transaction],
+        )
+        .unwrap();
+    assert!(
+        RealWallet::pending_anchor_height(st.wallet(), account, 0, 1, None)
+            .unwrap()
+            .is_none()
+    );
+}

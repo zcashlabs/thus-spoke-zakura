@@ -23,11 +23,8 @@ jobs:
       - run: tests/install.sh
       - name: Verify Zakura-only primitive packages
         run: |
-          cargo metadata --format-version 1 | jq -e '
-            ([.packages[].name] | any(. == "zakura-keys")) and
-            ([.packages[].name] | any(. == "zakura-primitives")) and
-            ([.packages[].name] | any(. == "zcash_keys") | not) and
-            ([.packages[].name] | any(. == "zcash_primitives") | not)'
+          python3 -m unittest discover -s tests -p zakura_dependencies_test.py
+          cargo metadata --locked --format-version 1 | python3 tests/zakura_dependencies.py
 
   launcher-compatibility:
     strategy:
@@ -111,7 +108,7 @@ jobs:
       - name: Run Docker-free recovery helper tests
         run: cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
       - name: Pull pinned Zakura node image
-        run: docker pull zakuracore/zakura:1.6.0
+        run: docker pull zakuracore/zakura:1.7.0
       - name: Build pinned lightwalletd image
         run: docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
       - name: Run live activity recovery regressions
