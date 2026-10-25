@@ -133,19 +133,20 @@ for (const el of document.querySelectorAll('[data-reveal], [data-reveal-group]')
   reveal.observe(el);
 }
 
-const navLinks = new Map(
-  [...document.querySelectorAll('.site-nav a[href^="#"]')].map(a => [a.hash.slice(1), a]),
-);
+const navLinks = [...document.querySelectorAll('.site-nav a[href^="#"]')];
+const railLinks = [...document.querySelectorAll('.rail-item')];
 const visible = new Set();
 const spy = new IntersectionObserver(entries => {
   for (const entry of entries) {
     if (entry.isIntersecting) visible.add(entry.target.id);
     else visible.delete(entry.target.id);
   }
-  const current = [...navLinks.keys()].find(id => visible.has(id));
-  for (const [id, link] of navLinks) link.classList.toggle('active', id === current);
+  for (const [links, activeClass] of [[navLinks, 'active'], [railLinks, 'is-active']]) {
+    const current = links.find(link => visible.has(link.hash.slice(1)));
+    for (const link of links) link.classList.toggle(activeClass, link === current);
+  }
 }, { rootMargin: '-45% 0px -45%' });
-for (const id of navLinks.keys()) {
+for (const id of new Set([...navLinks, ...railLinks].map(link => link.hash.slice(1)))) {
   const section = document.getElementById(id);
   if (section) spy.observe(section);
 }
@@ -162,25 +163,6 @@ for (const card of document.querySelectorAll('.feature-list article')) {
    WebGL stage. Everything below is progressive: if three.js or GSAP fail to
    load the page keeps working exactly as it did without them.
    ------------------------------------------------------------------- */
-function startRail() {
-  const items = [...document.querySelectorAll('.rail-item')];
-  if (!items.length) return;
-  const byId = new Map(items.map(a => [a.hash.slice(1), a]));
-  const seen = new Set();
-  const railSpy = new IntersectionObserver(entries => {
-    for (const entry of entries) {
-      if (entry.isIntersecting) seen.add(entry.target.id);
-      else seen.delete(entry.target.id);
-    }
-    const current = [...byId.keys()].find(id => seen.has(id));
-    for (const [id, link] of byId) link.classList.toggle('is-active', id === current);
-  }, { rootMargin: '-45% 0px -45%' });
-  for (const id of byId.keys()) {
-    const section = document.getElementById(id);
-    if (section) railSpy.observe(section);
-  }
-}
-
 function startHud() {
   const readout = document.querySelector('#hud-readout');
   if (!readout) return;
@@ -200,7 +182,6 @@ async function startStage() {
   }
   scene.setTheme(root.dataset.theme);
   themeButton.addEventListener('click', () => scene.setTheme(root.dataset.theme));
-  startRail();
   startHud();
 
   if (typeof gsap === 'undefined' || typeof ScrollTrigger === 'undefined') return;

@@ -55,6 +55,9 @@ for (const width of [360, 390, 768, 1024, 1440]) {
         }
         await page.locator('.site-nav a[href="#how"]').click();
         assert.equal(new URL(page.url()).hash, '#how');
+        if (width > 900) {
+          await page.waitForFunction(() => document.querySelector('.site-nav a.active')?.hash === '#how' && document.querySelector('.rail-item.is-active')?.hash === '#how');
+        }
         assert.equal(await page.locator('.menu-toggle').getAttribute('aria-expanded'), 'false');
         await page.locator('[data-copy-install]').first().click();
         await page.waitForFunction(() => document.querySelector('[data-copy-install]').textContent === 'Copied');

@@ -16,7 +16,6 @@ if (!canvas || !supported()) throw new Error('webgl-unavailable');
 
 const PETALS = 5;
 const ROSE = 0xd4718c;
-const CORE = new THREE.Color(0xff9ec0);
 
 const scene = new THREE.Scene();
 const scrollGroup = new THREE.Group();
@@ -87,8 +86,7 @@ for (let i = 0; i < PETALS; i += 1) {
   pivot.add(mesh);
   blossom.add(pivot);
   petals.push({
-    pivot, mesh, angle, lift: 0,
-    outward: new THREE.Vector3(Math.sin(-angle), Math.cos(angle), 0.45).normalize(),
+    mesh, lift: 0,
     spin: (i % 2 ? 1 : -1) * (0.5 + Math.random() * 0.7),
     centre: new THREE.Vector3(Math.sin(-angle) * 1.42, Math.cos(angle) * 1.42, 0),
   });
@@ -154,13 +152,7 @@ addEventListener('pointermove', event => {
   pointer.y = -(event.clientY / innerHeight) * 2 + 1;
 }, { passive: true });
 
-const smoothstep = (a, b, v) => {
-  const t = Math.min(1, Math.max(0, (v - a) / (b - a)));
-  return t * t * (3 - 2 * t);
-};
-
 let running = true;
-let visible = true;
 const clock = new THREE.Clock();
 let last = 0;
 
@@ -189,7 +181,7 @@ function frame() {
 
   for (const petal of petals) {
     const distance = petal.centre.distanceTo(hover.point);
-    const target = (1 - smoothstep(0.6, 3.1, distance)) * hover.strength;
+    const target = (1 - THREE.MathUtils.smoothstep(distance, 0.6, 3.1)) * hover.strength;
     const speed = target > petal.lift ? 0.14 : 0.06;
     petal.lift += (target - petal.lift) * speed;
     const lift = petal.lift;
@@ -234,7 +226,6 @@ document.documentElement.classList.add('webgl-ready');
 export const sceneApi = {
   scrollGroup,
   blossom,
-  drift,
   setRunning(value) { running = value; },
   mirrorX() { return -2 * homeX; },
   setTheme(theme) {
@@ -251,6 +242,4 @@ export const sceneApi = {
     under.intensity = dark ? 0.9 : 0.25;
     coreMat.color.set(dark ? 0x6f2b40 : 0x8e3752);
   },
-  get visible() { return visible; },
-  set visible(v) { visible = v; blossom.visible = v; drift.visible = v; },
 };
