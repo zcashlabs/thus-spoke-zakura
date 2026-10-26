@@ -59,37 +59,13 @@ instance's databases remain intact. This is not an end-to-end exactly-once
 guarantee: a fresh key requests a new payment, and deleting the instance deletes
 its recovery records.
 
-### Freshly confirmed Ironwood and spend anchors
+### Spending newly confirmed Ironwood
 
-An Ironwood credit or change output can be confirmed and visible in the wallet
-while the SDK still needs the next block's anchor before spending it. This is
-a preparation prerequisite, not a new payment status. The existing intent stays
-`preparing` with its original key until an eligible anchor is available.
-
-In automatic mining mode, a Send can mine at most one prerequisite block and
-retry construction once. Manual and interval modes wait for normal chain
-progress instead of mining that block on the Send's behalf. Retained signed
-payments still reconcile their original transaction before replacement is
-considered. Unmined or orphaned credits do not qualify as confirmed funds
-waiting for an anchor.
-
-Faucet preparation checks whether existing treasury funds await an anchor
-before replenishing the treasury. It advances to the required height and
-retries once; if no progress is made or the anchor is still unavailable, the
-payment remains pending. Waiting for an anchor alone does not discover more
-coinbase rewards or start another shielding payment.
-
-If a pending Ironwood Send needs another block in manual or mempool mode,
-run `ths mine 1` for the same instance. An empty mempool alone does not advance
-the mempool miner. Interval mode supplies the next block on its schedule.
-Keep the original idempotency key while the operation resumes.
-
-### NU7 transaction construction
-
-New ordinary NU7 transactions use the SDK's 120-block expiry delta from the
-candidate inclusion height. An unsigned proposal that has become stale can be
-proposed again under the original intent. Construction refusal must leave no
-new committed transaction, prepared journal entry, or leaked input reservation.
+A newly confirmed Ironwood output may need another block before it can be spent.
+Automatic Sends mine at most one prerequisite block and retry once. In manual
+or mempool mode, use `ths mine 1`; interval mode supplies the next block on its
+schedule. While waiting, the operation stays `preparing` with its original key.
+New ordinary NU7 payments expire 120 blocks after their candidate inclusion height.
 
 ## HTTP admission and status
 

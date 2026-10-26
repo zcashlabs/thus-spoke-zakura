@@ -4,17 +4,12 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
-- **Zakura Common 4 migration:** The wallet uses Common 4.0.0 and backend/SQLite
-  0.1.0-rc9.4 with Zakura 1.7.0. The declared Rust minimum rises to 1.97;
-  the development and release toolchain remains 1.98.0. Update the launcher and
-  recreate the disposable instance with a fresh chain and wallet. New ordinary
-  NU7 transactions use the SDK's 120-block expiry delta from the candidate
-  inclusion height. Freshly confirmed Ironwood can need the next block's spend anchor:
-  automatic Sends mine at most one prerequisite block and retry once, while
-  manual and interval Sends wait. Existing treasury funds awaiting that anchor
-  do not trigger reward discovery or shielding. Operations retain their existing
-  pending statuses and keys. Cross-version database reuse is outside the supported
-  update flow. No new Sapling scenarios are included in this change.
+- **Zakura Common 4:** Upgrade the wallet to Common 4.0.0, backend/SQLite
+  0.1.0-rc9.4, and Zakura 1.7.0; raise the minimum Rust version to 1.97.
+  Recreate the disposable instance after updating to initialize a fresh chain
+  and wallet. Ordinary NU7 payments use a 120-block expiry delta. Newly confirmed
+  Ironwood may need another block before spending; automatic Sends advance once
+  and retry, while other mining modes wait for chain progress.
   [#436](https://github.com/zcashlabs/thus-spoke-zakura/issues/436)
 
 - **Docker failures name the failed command:** A Docker invocation that exited

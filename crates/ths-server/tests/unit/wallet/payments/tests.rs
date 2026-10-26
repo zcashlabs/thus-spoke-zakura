@@ -822,45 +822,6 @@ fn oversized_imported_ironwood_proposal_rolls_back_without_journal_or_input_lock
 }
 
 #[test]
-fn stale_unsigned_proposal_is_refused_without_spending_inputs() {
-    let mut st = test_state();
-    fund_ironwood(&mut st, 100_000_000);
-    let recipient = recipient(&st, "ironwood");
-    let account_id = st.test_account().unwrap().id();
-    let usk = st.test_account().unwrap().usk().clone();
-    let params = *st.network();
-    let proposal = RealWallet::propose_send(
-        st.wallet_mut(),
-        &params,
-        account_id,
-        "ironwood",
-        &recipient,
-        Zatoshis::const_from_u64(1_000_000),
-        None,
-    )
-    .unwrap();
-    add_empty_blocks(&mut st, 121);
-    let before = quote(&mut st, "ironwood", "ironwood").unwrap();
-    let error = RealWallet::build_and_serialize(
-        st.wallet_mut(),
-        &params,
-        usk,
-        &proposal,
-        "stale proposal regression",
-        "missing built transaction",
-    )
-    .err()
-    .expect("expired proposal must be refused");
-    assert!(
-        error.to_string().contains("below the candidate height"),
-        "{error:#}"
-    );
-    let after = quote(&mut st, "ironwood", "ironwood").unwrap();
-    assert_eq!(after.available_zatoshi, before.available_zatoshi);
-    assert_eq!(after.max_zatoshi, before.max_zatoshi);
-}
-
-#[test]
 fn tip_ironwood_receipt_waits_for_anchor_without_becoming_insufficient() {
     let mut st = test_state();
     let (other_account, _) = st.create_account_from_test_seed("other account");

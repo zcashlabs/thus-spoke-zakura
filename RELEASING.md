@@ -88,25 +88,3 @@ zakuracore/zakura:1.7.0
 resolution and never consumes `latest`. Contributor builds deliberately use
 the same exact local tags, allowing a source build to replace the matching
 images without changing runtime behavior.
-
-## Common 4 compatibility gate
-
-The coordinated runtime is Common 4.0.0, wallet backend/SQLite 0.1.0-rc9.4,
-and `zakuracore/zakura:1.7.0`. The declared Rust floor is 1.97; build with the
-existing 1.98.0 toolchain. A successful 1.98 build alone does not verify the
-1.97 floor. Keep the lightwalletd source version unless integration evidence
-requires a change, and publish a newly versioned launcher/app/lightwalletd set.
-Never overwrite an existing release tag to introduce this migration.
-
-Before release, record the locked dependency-graph audit, production server
-build, required Rust checks, both supported Linux image architectures, and
-fresh-instance startup through rebuilt launcher/app images. Run the
-existing transparent/Ironwood transfers, shielding, faucet, mining, reorg, and
-payment-recovery regressions. New Sapling scenarios are excluded from this
-migration's requested coverage; existing workspace tests remain required.
-These checks are release gates, not results established by the dependency bump.
-
-Users update the launcher and recreate a disposable instance. Successful cleanup
-deletes the old instance data; the next start initializes a fresh chain and
-wallet. Reusing databases across software versions is outside this release's
-supported update flow.

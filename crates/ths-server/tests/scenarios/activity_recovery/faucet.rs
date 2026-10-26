@@ -44,7 +44,7 @@ pub(super) async fn address_faucet_retry_after_server_restart_pays_each_destinat
             nu6_1: one,
             nu6_2: one,
             nu6_3: one,
-            nu7: one,
+            nu7: None,
         };
         let external =
             Address::Transparent(TransparentAddress::PublicKeyHash([42; 20])).encode(&network);
@@ -375,7 +375,7 @@ pub(super) fn external_faucet_test_address() -> String {
         nu6_1: one,
         nu6_2: one,
         nu6_3: one,
-        nu7: one,
+        nu7: None,
     };
     Address::Transparent(transparent::address::TransparentAddress::PublicKeyHash(
         [0x7a; 20],

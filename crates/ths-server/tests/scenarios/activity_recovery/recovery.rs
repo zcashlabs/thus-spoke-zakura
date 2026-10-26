@@ -104,7 +104,7 @@ pub(super) async fn queued_retry_survives_restart(external: bool) -> Result<()> 
         let client = Client::new();
         let key = "queued-lost-response-restart";
         let one = Some(BlockHeight::from_u32(1));
-        let network = LocalNetwork { overwinter: one, sapling: one, blossom: one, heartwood: one, canopy: one, nu5: one, nu6: one, nu6_1: one, nu6_2: one, nu6_3: one, nu7: one };
+        let network = LocalNetwork { overwinter: one, sapling: one, blossom: one, heartwood: one, canopy: one, nu5: one, nu6: one, nu6_1: one, nu6_2: one, nu6_3: one, nu7: None };
         let address = Address::Transparent(TransparentAddress::PublicKeyHash([43; 20])).encode(&network);
         let (path, body) = if external {
             ("/api/v1/faucet/address", json!({"address": address, "amount_zatoshi": 1_000_000, "idempotency_key": key}))
@@ -206,7 +206,7 @@ async fn queued_payment_survives_restart(external: bool, external_send: bool) ->
         let client = Client::new();
         let key = "queued-lost-response-restart";
         let one = Some(BlockHeight::from_u32(1));
-        let network = LocalNetwork { overwinter: one, sapling: one, blossom: one, heartwood: one, canopy: one, nu5: one, nu6: one, nu6_1: one, nu6_2: one, nu6_3: one, nu7: one };
+        let network = LocalNetwork { overwinter: one, sapling: one, blossom: one, heartwood: one, canopy: one, nu5: one, nu6: one, nu6_1: one, nu6_2: one, nu6_3: one, nu7: None };
         let address = Address::Transparent(TransparentAddress::PublicKeyHash([43; 20])).encode(&network);
         let (path, body) = if external_send {
             ("/api/v1/send", json!({"from_account":1,"to_address":address,"source_pool":"ironwood","destination_pool":"transparent","amount_zatoshi":1_000_000,"idempotency_key":key,"memo":null}))

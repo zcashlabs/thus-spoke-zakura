@@ -16,9 +16,8 @@ image.
 
 ## Build and start
 
-Use **Rust 1.98**, **Node 24**, and a running Docker daemon. The declared
-Rust minimum is 1.97; the pinned development toolchain remains 1.98.0. Run these
-from the repository root of the [recorded main checkout](README.md):
+Use **Rust 1.98**, **Node 24**, and a running Docker daemon. Run these from
+the repository root of the [recorded main checkout](README.md):
 
 ```console
 npm ci --prefix web
@@ -193,37 +192,3 @@ restart do not rebroadcast orphaned payments. Mempool absence is not that proof:
 Zakura's own RPC retry queue can re-admit an earlier submission even while the
 server is stopped. Canonical inclusion, balances, signed bytes, payment identity,
 and the reconciled wallet checkpoint are checked separately.
-
-## Ironwood anchor compatibility
-
-The Common 4 SDK can require another block before a newly confirmed Ironwood
-note or change output is eligible for a spend anchor. A confirmed balance
-therefore does not guarantee that construction can spend it at the same tip.
-Automatic Send progression mines at most one prerequisite block and retries
-construction once. Manual and interval modes leave the original operation
-pending until the chain advances. No public payment status is added.
-
-The focused treasury seam regressions in
-`crates/ths-server/tests/unit/payments/treasury/tests.rs` distinguish existing
-funds waiting for an anchor from a treasury deficit. They simulate reaching the
-required height, an anchor that stays unavailable after one retry, and a miner
-that makes no progress. Anchor waits must not discover rewards or shield more
-funds. These tests complement the wallet adapter's checks that the relevant
-notes are unspent, unlocked, and actually mined at the selected tip; unmined
-and orphaned credits cannot trigger prerequisite mining.
-
-The server explicitly selects the SDK's public transparent ledger mode alongside
-standard transaction enhancement, preserving its existing local RPC/lightwalletd
-sync path without a private receiver service.
-
-Audit the resolved dependency graph when updating the wallet family:
-
-```console
-cargo metadata --locked --format-version 1
-cargo tree --locked --duplicates
-```
-
-For the Common 4 migration, verify that each Common family crate resolves once
-at 4.x and that its upstream counterpart is absent, including replacement of
-`zcash_note_encryption` with `zakura-note-encryption`. Independent `zcash_script`,
-`zcash_encoding`, and `zcash_spec` packages keep their own versioning.

@@ -74,11 +74,6 @@ or startup failure. It reports success only after verifying cleanup.
 Zakura runs with `ZAKURA_STATE__CACHE_DIR=/data`, so its state uses the `chain`
 volume mounted at `/data` instead of the image's default cache directory.
 
-The current runtime couples Zakura 1.7.0 with Common 4.0.0 and wallet
-backend/SQLite 0.1.0-rc9.4. Users update the launcher and recreate their disposable
-instance. After successful cleanup, the next start creates a fresh chain and
-wallet; reusing databases across versions is outside the supported update flow.
-
 Recovery records allocation identities as well as resource names. A known
 original container ID can be checked and removed without adopting a same-name
 replacement.
