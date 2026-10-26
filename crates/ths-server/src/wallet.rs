@@ -631,7 +631,3 @@ mod tests;
 pub(crate) mod transparent_history_test_support;
 
 const TREASURY_SHIELDING_JOURNAL_ID: &str = "private-treasury-shielding-v1";
-
-#[cfg(test)]
-#[path = "../tests/unit/wallet/migration.rs"]
-mod migration_tests;

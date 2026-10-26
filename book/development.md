@@ -212,48 +212,6 @@ funds. These tests complement the wallet adapter's checks that the relevant
 notes are unspent, unlocked, and actually mined at the selected tip; unmined
 and orphaned credits cannot trigger prerequisite mining.
 
-## Retained-wallet upgrade regression
-
-The ignored `retained_rc7_payment_survives_common4_and_node_upgrade` case needs
-two source-built server executables. Build the baseline from commit
-`42dfcea09ee3cf696dcf6cd922bf370a10e9da77`, using that checkout's lockfile
-(Common 2.2.0 and wallet backend/SQLite rc7). Keep its binary separate from the
-current Cargo target directory and explicitly select it with
-`THS_UPGRADE_BASELINE_SERVER`. The test fails clearly if that variable is absent;
-it never substitutes the upgraded binary for baseline evidence.
-
-After the current implementation is complete, prepare and select the case:
-
-```console
-docker pull zakuracore/zakura:1.6.0
-docker pull zakuracore/zakura:1.7.0
-docker build -f docker/lightwalletd.Dockerfile -t ths-recovery-lightwalletd:local .
-THS_UPGRADE_BASELINE_SERVER=/absolute/path/to/rc7/ths-server cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery -- --ignored --exact retained_rc7_payment_survives_common4_and_node_upgrade --nocapture
-```
-
-The fixture initializes and funds six accounts with the baseline server and
-node 1.6.0, loses a Send admission response, and retains its signed broadcast
-payment while mining is rejected. It stops only its own server and node,
-replaces them with the Cargo-built upgraded server and node 1.7.0, and reuses
-the same app databases, chain volume, network, and loopback endpoints. The
-baseline fixture enables the node's existing synchronous state-backup test
-setting so the captured recent blocks are durable; its normal periodic backup
-can lag behind the visible tip at shutdown. The replacement node must restore
-the exact saved height and hash before the upgraded server starts. Replay
-must preserve the original activity, transaction ID, bytes, expiry and key;
-canonical inclusion and reconciled balances must show one payout. Accounts
-1–5 remain visible and the treasury remains hidden. Cleanup errors fail the
-scenario and cleanup remains scoped to its generated resources.
-
-Record both source revisions and binary paths, image identities, selected test
-count, chain inclusion, wallet outcomes, and cleanup when reporting a run. This
-host-server case does not validate the app-container path; also build current
-images and start one disposable named instance with the launcher. The migration
-includes transparent and Ironwood coverage and adds no new Sapling scenario.
-Do not infer successful compatibility from a compile or an unexecuted ignored
-test. Downgrades require a consistent pre-upgrade snapshot of affected app and
-node state; `ths stop` deletes instance data and is not such a snapshot.
-
 The server explicitly selects the SDK's public transparent ledger mode alongside
 standard transaction enhancement, preserving its existing local RPC/lightwalletd
 sync path without a private receiver service.

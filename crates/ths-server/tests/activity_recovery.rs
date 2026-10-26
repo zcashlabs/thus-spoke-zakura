@@ -17,8 +17,6 @@ mod send;
 mod transparent_history;
 #[path = "scenarios/activity_recovery/treasury.rs"]
 mod treasury;
-#[path = "scenarios/activity_recovery/upgrade.rs"]
-mod upgrade;
 
 use assertions::{
     assert_address_faucet_inclusion, assert_persisted_send_response, assert_read_only_persistence,
@@ -743,10 +741,4 @@ async fn insufficient_send_stays_failed_after_restart_and_later_funding() -> Res
 #[ignore = "requires Docker and prepared regtest images"]
 async fn dependent_payments_resume_in_admission_order_after_restart() -> Result<()> {
     recovery::dependent_payments_resume_in_admission_order_after_restart().await
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Docker, both node images, and THS_UPGRADE_BASELINE_SERVER"]
-async fn retained_rc7_payment_survives_common4_and_node_upgrade() -> Result<()> {
-    upgrade::retained_rc7_payment_survives_common4_and_node_upgrade().await
 }

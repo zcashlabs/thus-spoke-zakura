@@ -84,27 +84,12 @@ run `ths mine 1` for the same instance. An empty mempool alone does not advance
 the mempool miner. Interval mode supplies the next block on its schedule.
 Keep the original idempotency key while the operation resumes.
 
-## Retained payments across a wallet upgrade
-
-A forward wallet migration retains the original intent and idempotency mapping.
-Already signed payments keep their transaction ID, signed bytes, and stored
-expiry, including when the caller lost a response. Retry the original request
-with its original key and details. A new SDK validation error alone does not
-authorize a replacement of signed work: recovery must first reconcile the
-original transaction with the chain and mempool through the existing expiry
-checks.
+### NU7 transaction construction
 
 New ordinary NU7 transactions use the SDK's 120-block expiry delta from the
-candidate inclusion height. That new default does not rewrite an old signed
-transaction's expiry. An unsigned proposal that has become stale can be
+candidate inclusion height. An unsigned proposal that has become stale can be
 proposed again under the original intent. Construction refusal must leave no
 new committed transaction, prepared journal entry, or leaked input reservation.
-
-These guarantees require retained databases. The normal launcher cleanup
-removes instance data; `ths stop` followed by `ths start` does not demonstrate
-an existing-wallet upgrade. See the [retained live upgrade
-procedure](../development.md#retained-wallet-upgrade-regression) for development
-validation.
 
 ## HTTP admission and status
 

@@ -342,10 +342,10 @@ docker image rm ghcr.io/zcashlabs/thus-spoke-zakura-app:0.3.0 \
 ```
 
 The pinned node is Zakura 1.7.0, paired with Common 4.0.0 and wallet
-backend/SQLite 0.1.0-rc9.4. Wallet schemas migrate forward on open; retaining an
-old signed payment keeps its original bytes and expiry. No downgrade
-compatibility is promised without restoring a consistent pre-upgrade snapshot
-of app and node state.
+backend/SQLite 0.1.0-rc9.4. After updating the launcher, recreate the disposable
+instance. Successful cleanup deletes its old data, and the next start creates a
+fresh chain and wallet. Cross-version database reuse is outside the supported
+update flow.
 
 Inspect `$THS_CONFIG_DIR` separately before deleting configuration. Retained
 recovery records should be resolved before removing that directory. Executable,
