@@ -8,7 +8,9 @@ fresh chain with the same five accounts.
 
 The dashboard has **Wallet**, **Explorer**, and **Network** pages. Use `ths
 open` to bring it up. On desktop, the **Mine** button sits at the top of
-each page; on a narrow screen you can always use `ths mine`.
+each page; on a narrow screen you can always use `ths mine`. If the browser
+blocks clipboard access, a copy button shows a notification with the value to
+copy by hand.
 
 ## First, observe the starting state
 
@@ -21,9 +23,7 @@ history, supplies these balances.
 ![The Wallet page: a total balance banner over five account cards, each showing Ironwood and transparent balances, a truncated unified address, and Fund and Send buttons. Request and Send ZEC controls sit above the cards, Faucet and Mine are in the header, and Recent activity is below.](images/wallet.png)
 
 Select an account's name to open its detail page. The full unified address and
-transparent address each have a copy button. If the browser blocks clipboard
-access, a notification says so and shows the value to copy by hand. The unified
-full viewing key is
+transparent address each have a copy button. The unified full viewing key is
 also shown and copyable when the server supplies it; an older server that omits
 the key simply has no viewing-key row. These pages cover development accounts
 1–5 only.

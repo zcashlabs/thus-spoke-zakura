@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
 import { useToast } from './toast-context';
 
@@ -18,6 +18,7 @@ export function CopyButton({
 }) {
   const [copied, setCopied] = useState(false);
   const toast = useToast();
+  const dismissFailure = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!copied) return;
@@ -38,10 +39,15 @@ export function CopyButton({
           write = Promise.reject(error instanceof Error ? error : new Error(String(error)));
         }
         void write.then(
-          () => setCopied(true),
+          () => {
+            dismissFailure.current?.();
+            dismissFailure.current = null;
+            setCopied(true);
+          },
           () => {
             setCopied(false);
-            toast.error(
+            dismissFailure.current?.();
+            dismissFailure.current = toast.error(
               'Could not copy',
               `The browser blocked clipboard access. Copy it manually: ${value}`,
             );

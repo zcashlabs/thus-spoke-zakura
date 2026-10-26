@@ -45,6 +45,21 @@ describe('CopyButton', () => {
     expect(writeText).toHaveBeenCalledTimes(2);
     expect(writeText).toHaveBeenLastCalledWith('uregtest1example');
     await waitFor(() => expect(button).toHaveTextContent('Copied'));
+    expect(screen.queryByText('Could not copy')).not.toBeInTheDocument();
+  });
+
+  it('shows one failure notification however often copying fails', async () => {
+    const user = userEvent.setup();
+    clipboard(() => Promise.reject(new DOMException('Permission denied', 'NotAllowedError')));
+    renderCopy();
+    const button = screen.getByRole('button', { name: 'Copy address' });
+
+    await user.click(button);
+    expect(await screen.findByText('Could not copy')).toBeInTheDocument();
+    await user.click(button);
+    await user.click(button);
+
+    await waitFor(() => expect(screen.getAllByText('Could not copy')).toHaveLength(1));
   });
 
   it('reports a browser without clipboard access', async () => {
