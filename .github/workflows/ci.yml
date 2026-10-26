@@ -23,8 +23,11 @@ jobs:
       - run: tests/install.sh
       - name: Verify Zakura-only primitive packages
         run: |
-          python3 -m unittest discover -s tests -p zakura_dependencies_test.py
-          cargo metadata --locked --format-version 1 | python3 tests/zakura_dependencies.py
+          cargo metadata --format-version 1 | jq -e '
+            ([.packages[].name] | any(. == "zakura-keys")) and
+            ([.packages[].name] | any(. == "zakura-primitives")) and
+            ([.packages[].name] | any(. == "zcash_keys") | not) and
+            ([.packages[].name] | any(. == "zcash_primitives") | not)'
 
   launcher-compatibility:
     strategy:

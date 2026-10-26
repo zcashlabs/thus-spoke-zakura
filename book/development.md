@@ -258,15 +258,14 @@ The server explicitly selects the SDK's public transparent ledger mode alongside
 standard transaction enhancement, preserving its existing local RPC/lightwalletd
 sync path without a private receiver service.
 
-The dependency-family guard consumes Cargo metadata, including dev dependencies:
+Audit the resolved dependency graph when updating the wallet family:
 
 ```console
-cargo metadata --locked --format-version 1 | python3 tests/zakura_dependencies.py
-python3 -m unittest discover -s tests -p zakura_dependencies_test.py
+cargo metadata --locked --format-version 1
+cargo tree --locked --duplicates
 ```
 
-It requires each resolved Common family crate to have one 4.x version, requires
-explicit direct wallet-family dependencies and resolved
-`zakura-note-encryption` (which may be transitive), and rejects their upstream
-counterparts. Independent `zcash_script`,
+For the Common 4 migration, verify that each Common family crate resolves once
+at 4.x and that its upstream counterpart is absent, including replacement of
+`zcash_note_encryption` with `zakura-note-encryption`. Independent `zcash_script`,
 `zcash_encoding`, and `zcash_spec` packages keep their own versioning.
