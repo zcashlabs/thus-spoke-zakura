@@ -1,0 +1,397 @@
+name: Pull request preview
+
+# A preview is a throwaway Regtest environment for one pull request, so a
+# reviewer can test a change end to end without running the branch locally.
+#
+# The rules this workflow follows:
+#
+#   * Pull request code never runs with a secret. The build job has no secret
+#     and a read-only token, and it only runs after a maintainer approved the
+#     exact commit.
+#   * The approval is explicit. A maintainer comments `/preview approve` on
+#     the pull request, and the workflow binds that approval to the head
+#     commit at that moment. A later commit needs a later approval.
+#   * Every preview is isolated. It gets its own launcher instance, its own
+#     Docker network, volumes, and loopback ports, and it never shares them
+#     with production or with another preview.
+#   * Every preview is removed when the pull request closes, and the removal
+#     can be run again by hand.
+#
+# The access path, the isolation, the resource naming, the secrets, and the
+# cleanup are described in book/preview-deployments.md.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, closed, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number"
+        required: true
+        type: string
+      action:
+        description: "What the preview host should do"
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - teardown
+          - status
+
+# Least privilege at the top level. A job that needs more asks for it.
+permissions:
+  contents: read
+
+# One preview per pull request. A new commit cancels the run that is still
+# working on the old one, and a removal waits for a deployment to finish
+# before it cleans up. An unrelated comment cancels nothing, so a review
+# does not stop a deployment that is already running.
+concurrency:
+  group: >-
+    preview-pr-${{ github.event.pull_request.number
+      || github.event.issue.number
+      || inputs.pr }}
+  cancel-in-progress: >-
+    ${{ (github.event_name == 'pull_request_target' && github.event.action != 'closed')
+      || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/preview'))
+      || (github.event_name == 'workflow_dispatch' && inputs.action != 'teardown') }}
+
+jobs:
+  plan:
+    name: Plan the preview
+    # A comment that is not a preview command has nothing to plan, so the
+    # job never takes a runner for it.
+    if: >-
+      github.event_name != 'issue_comment'
+      || contains(github.event.comment.body, '/preview')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      pr: ${{ steps.plan.outputs.pr }}
+      sha: ${{ steps.plan.outputs.sha }}
+      reason: ${{ steps.plan.outputs.reason }}
+      approved_by: ${{ steps.plan.outputs.approved_by }}
+      instance: ${{ steps.plan.outputs.instance }}
+    steps:
+      # The tooling decides what happens, so it comes from the base branch and
+      # never from the pull request.
+      - name: Check out the trusted tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Decide what the payload asks for
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/preview/preview.py plan \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --event "$GITHUB_EVENT_PATH" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Tell the reviewers that the preview waits for approval
+        if: steps.plan.outputs.action == 'await-approval' && steps.plan.outputs.pr != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ steps.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state await-approval \
+            --sha "$PREVIEW_SHA"
+
+  build:
+    name: Build the pull request
+    needs: plan
+    if: needs.plan.outputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # This job runs the code of the pull request, so it may only read the
+    # repository. It has no secret, no environment, and no write scope.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the approved commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/pull/${{ needs.plan.outputs.pr }}/head
+          persist-credentials: false
+      - name: Check that the checkout is the approved commit
+        env:
+          APPROVED_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          checked_out="$(git rev-parse HEAD)"
+          if [ "$checked_out" != "$APPROVED_SHA" ]; then
+            echo "the checkout is $checked_out but $APPROVED_SHA was approved" >&2
+            exit 1
+          fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.0
+      - name: Build the launcher
+        run: cargo build --locked --release -p thus-spoke-zakura
+      - name: Build the runtime images
+        run: ./target/release/ths build --dev
+      - name: Export the build
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          zakura="$(sed -n 's/^pub\(crate\)\? *const ZAKURA_IMAGE: &str = "\(.*\)";$/\2/p' \
+            crates/ths-cli/src/runtime/images.rs)"
+          test -n "$version"
+          test -n "$zakura"
+          mkdir -p preview-artifact
+          cp target/release/ths preview-artifact/ths
+          docker save "ghcr.io/zcashlabs/thus-spoke-zakura-app:$version" -o preview-artifact/app.tar
+          docker save "ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:$version" \
+            -o preview-artifact/lightwalletd.tar
+          docker save "$zakura" -o preview-artifact/zakura.tar
+      - name: Upload the build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-${{ needs.plan.outputs.pr }}-${{ needs.plan.outputs.sha }}
+          path: preview-artifact
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy the preview
+    needs: [plan, build]
+    if: needs.plan.outputs.action == 'deploy'
+    # The preview host is a runner that the maintainers control. It holds
+    # Docker, and it is separate from the machines that run production.
+    runs-on: [self-hosted, preview]
+    environment: preview
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the trusted tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check that the approval still holds
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          python3 tools/preview/preview.py verify \
+            --pr "$PREVIEW_PR" \
+            --sha "$PREVIEW_SHA"
+      - name: Download the build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: preview-${{ needs.plan.outputs.pr }}-${{ needs.plan.outputs.sha }}
+          path: preview-artifact
+      - name: Load the images
+        run: |
+          docker load --input preview-artifact/app.tar
+          docker load --input preview-artifact/lightwalletd.tar
+          docker load --input preview-artifact/zakura.tar
+          chmod +x preview-artifact/ths
+      - name: Stop the previous preview
+        env:
+          INSTANCE: ${{ needs.plan.outputs.instance }}
+        run: |
+          # A new commit replaces the preview of the same pull request, and the
+          # old one has to let go of its ports first.
+          "$PWD/preview-artifact/ths" --name "$INSTANCE" stop || \
+            echo "there was no running preview to replace" >&2
+      - name: Record the preview state
+        id: configure
+        env:
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ needs.plan.outputs.sha }}
+          PREVIEW_BASE_URL: ${{ vars.PREVIEW_BASE_URL }}
+        run: |
+          if [ -z "$PREVIEW_BASE_URL" ]; then
+            echo "PREVIEW_BASE_URL is not set, so the preview has no address" >&2
+            exit 1
+          fi
+          python3 tools/preview/preview.py configure \
+            --pr "$PREVIEW_PR" \
+            --template "$PREVIEW_BASE_URL" \
+            --sha "$PREVIEW_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Record the approval before anything is deployed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ needs.plan.outputs.sha }}
+          PREVIEW_APPROVED_BY: ${{ needs.plan.outputs.approved_by }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state approved \
+            --sha "$PREVIEW_SHA" \
+            --approved-by "$PREVIEW_APPROVED_BY"
+      - name: Start the instance
+        env:
+          INSTANCE: ${{ steps.configure.outputs.instance }}
+          PORT_OFFSET: ${{ steps.configure.outputs.port_offset }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ths-preview"
+          # The launcher stays alive after this job ends, so the preview keeps
+          # running between commits.
+          setsid nohup "$PWD/preview-artifact/ths" \
+            --name "$INSTANCE" \
+            start --port-offset "$PORT_OFFSET" --no-open \
+            > "$RUNNER_TEMP/ths-preview/$INSTANCE.log" 2>&1 &
+      - name: Wait for the dashboard
+        env:
+          INSTANCE: ${{ steps.configure.outputs.instance }}
+        run: |
+          "$PWD/preview-artifact/ths" --name "$INSTANCE" wait --timeout 300
+      - name: Check that the preview answers
+        env:
+          DASHBOARD_PORT: ${{ steps.configure.outputs.dashboard_port }}
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$DASHBOARD_PORT/api/v1/accounts" > /dev/null; then
+              echo "the preview answers on 127.0.0.1:$DASHBOARD_PORT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "the preview did not answer on 127.0.0.1:$DASHBOARD_PORT" >&2
+          exit 1
+      - name: Publish the ingress route
+        env:
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_PROXY_DIR: ${{ vars.PREVIEW_PROXY_DIR }}
+          PREVIEW_ROUTE_TEMPLATE: ${{ vars.PREVIEW_ROUTE_TEMPLATE }}
+          PREVIEW_PROXY_RELOAD: ${{ vars.PREVIEW_PROXY_RELOAD }}
+        run: |
+          if [ -z "$PREVIEW_PROXY_DIR" ]; then
+            echo "PREVIEW_PROXY_DIR is not set, so the preview stays on the preview host" >&2
+            exit 0
+          fi
+          python3 tools/preview/preview.py route \
+            --pr "$PREVIEW_PR" \
+            --directory "$PREVIEW_PROXY_DIR" \
+            --template "$PREVIEW_ROUTE_TEMPLATE"
+          if [ -n "$PREVIEW_PROXY_RELOAD" ]; then
+            sh -c "$PREVIEW_PROXY_RELOAD"
+          fi
+      - name: Report the preview
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ needs.plan.outputs.sha }}
+          PREVIEW_URL: ${{ steps.configure.outputs.url }}
+          PREVIEW_APPROVED_BY: ${{ needs.plan.outputs.approved_by }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state deployed \
+            --sha "$PREVIEW_SHA" \
+            --url "$PREVIEW_URL" \
+            --approved-by "$PREVIEW_APPROVED_BY"
+      - name: Report the failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_SHA: ${{ needs.plan.outputs.sha }}
+          PREVIEW_RUN: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state failed \
+            --sha "$PREVIEW_SHA" \
+            --error "The preview did not deploy. See $PREVIEW_RUN for the log."
+
+  teardown:
+    name: Remove the preview
+    needs: plan
+    if: needs.plan.outputs.action == 'teardown'
+    runs-on: [self-hosted, preview]
+    environment: preview
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the trusted tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Ask the launcher to stop the instance
+        env:
+          INSTANCE: ${{ needs.plan.outputs.instance }}
+        run: |
+          if [ -x "$PWD/preview-artifact/ths" ]; then
+            launcher="$PWD/preview-artifact/ths"
+          elif command -v ths > /dev/null; then
+            launcher="$(command -v ths)"
+          else
+            echo "no launcher is available, so the labelled cleanup below does the work" >&2
+            exit 0
+          fi
+          "$launcher" --name "$INSTANCE" stop || \
+            echo "the launcher could not stop the instance, so the labelled cleanup below does the work" >&2
+      - name: Remove the preview resources
+        env:
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+        run: python3 tools/preview/preview.py teardown --pr "$PREVIEW_PR"
+      - name: Remove the ingress route
+        env:
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_PROXY_DIR: ${{ vars.PREVIEW_PROXY_DIR }}
+          PREVIEW_PROXY_RELOAD: ${{ vars.PREVIEW_PROXY_RELOAD }}
+        run: |
+          if [ -z "$PREVIEW_PROXY_DIR" ]; then
+            exit 0
+          fi
+          python3 tools/preview/preview.py route \
+            --pr "$PREVIEW_PR" \
+            --directory "$PREVIEW_PROXY_DIR" \
+            --remove
+          if [ -n "$PREVIEW_PROXY_RELOAD" ]; then
+            sh -c "$PREVIEW_PROXY_RELOAD"
+          fi
+      - name: Report the removal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state removed
+
+  status:
+    name: Report the preview status
+    needs: plan
+    if: needs.plan.outputs.action == 'status' || needs.plan.outputs.action == 'deny'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the trusted tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Report the status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_PR: ${{ needs.plan.outputs.pr }}
+          PREVIEW_STATE: ${{ needs.plan.outputs.action }}
+        run: |
+          python3 tools/preview/preview.py report \
+            --pr "$PREVIEW_PR" \
+            --state "$PREVIEW_STATE"

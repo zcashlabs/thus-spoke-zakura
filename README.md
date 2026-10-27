@@ -67,5 +67,6 @@ if cleanup fails, keep any recovery files that exist and follow the
 - [CLI reference](book/cli.md)
 - [Develop from source and run tests](book/development.md)
 - [Troubleshooting](book/troubleshooting.md)
+- [Pull request previews](book/preview-deployments.md)
 
 [Contributing](CONTRIBUTING.md) · [Releases](https://github.com/zcashlabs/thus-spoke-zakura/releases) · [MIT license](LICENSE)

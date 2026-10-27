@@ -46,6 +46,7 @@ npm run lint --prefix web
 npm run format:check --prefix web
 npm test --prefix web
 npm run build --prefix web
+python3 tests/preview_workflow.py
 ```
 
 Rust tests are grouped in `crates/ths-cli/tests/` and `crates/ths-server/tests/`.

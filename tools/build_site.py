@@ -57,9 +57,11 @@ PAGES = {
                     "Build the images from source and run the checks"),
     "troubleshooting": ("Appendix C: troubleshooting",
                         "Work down the layers, from Docker to an uncertain payment"),
+    "preview-deployments": ("Appendix D: pull request previews",
+                            "Approve, deploy, reach, and remove a preview of a pull request"),
 }
 
-REFERENCE = {"cli", "development", "troubleshooting"}
+REFERENCE = {"cli", "development", "troubleshooting", "preview-deployments"}
 
 
 def summary_order() -> list[str]:

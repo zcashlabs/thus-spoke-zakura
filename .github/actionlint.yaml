@@ -1,0 +1,6 @@
+# The preview workflow runs on a self-hosted runner that the maintainers
+# label `preview`. actionlint checks the workflow files with this label
+# known, so the check does not report it as a typo.
+self-hosted-runner:
+  labels:
+    - preview
