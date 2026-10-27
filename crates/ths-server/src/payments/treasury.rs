@@ -606,6 +606,7 @@ where
 {
     runtime.resume_shielding().await?;
     let mut reconciled_after_scan_required = false;
+    let mut advanced_anchor = false;
     loop {
         match runtime
             .prepare_payment(
@@ -620,6 +621,20 @@ where
         {
             Ok(prepared) => return Ok(prepared),
             Err(error) => {
+                if let Some(PaymentError::AnchorPending { height }) = error.downcast_ref() {
+                    if advanced_anchor {
+                        return Err(error);
+                    }
+                    if runtime.chain_height().await? < *height {
+                        runtime.mine_and_sync(1).await?;
+                    }
+                    if runtime.chain_height().await? < *height {
+                        return Err(error);
+                    }
+                    runtime.synchronize_latest().await?;
+                    advanced_anchor = true;
+                    continue;
+                }
                 if matches!(error.downcast_ref(), Some(PaymentError::ScanRequired)) {
                     if !reconciled_after_scan_required {
                         runtime.synchronize_latest().await?;
@@ -791,6 +806,14 @@ pub(crate) async fn provision_initial_balance_with_history(
     already_provisioned: bool,
 ) -> anyhow::Result<()> {
     let existing = state.0.store.activity_for_key(INITIAL_FUNDING_KEY)?;
+    // A deliberate rollback of completed provisioning must not fund Account 1
+    // again or prevent the restarted environment from becoming ready.
+    if existing
+        .as_ref()
+        .is_some_and(|activity| activity.status == "unconfirmed")
+    {
+        return Ok(());
+    }
     state
         .0
         .store
@@ -841,6 +864,30 @@ pub(crate) async fn provision_initial_balance_with_history(
         .synchronize_wallet(None)
         .await
         .context("synchronizing confirmed startup funding")?;
+    // A tip-level receipt is confirmed but has no spendable NU7 anchor yet.
+    // Recheck on every startup, including after a failed maturation attempt;
+    // the SDK excludes funding already reserved by a retained signed payment.
+    if state
+        .0
+        .wallet
+        .startup_anchor_height(&funding.txid)
+        .await?
+        .is_some()
+    {
+        attempt
+            .mine_and_sync(1)
+            .await
+            .context("advancing the startup funding anchor")?;
+        if state
+            .0
+            .wallet
+            .startup_anchor_height(&funding.txid)
+            .await?
+            .is_some()
+        {
+            return Err(crate::bootstrap::ReadinessError::FundingPending.into());
+        }
+    }
     // Completed provisioning survives user spending. The five-ZEC balance is
     // an initial readiness invariant, not a permanent account restriction.
     if already_provisioned {

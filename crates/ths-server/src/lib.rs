@@ -1,6 +1,7 @@
 mod api;
 mod args;
 mod bootstrap;
+mod chain;
 mod db;
 mod mining;
 mod network;

@@ -25,7 +25,8 @@ Keep `ths` running in one terminal. In another:
 ths endpoints --json
 ```
 
-For a named instance, use `ths --name alice endpoints --json`:
+For a named instance, use `ths --name alice endpoints --json` instead. The
+default instance reports:
 
 ```json
 {
@@ -38,10 +39,10 @@ For a named instance, use `ths --name alice endpoints --json`:
 }
 ```
 
-The dashboard Network page shows the same addresses, while
-`GET /api/v1/status` calls the RPC field `zakura_rpc`. That naming
-difference is a property of the two current responses, not two different
-nodes.
+The dashboard Network page shows the same fields for the selected instance.
+Use the URLs reported for your running instance.
+`GET /api/v1/status` calls the RPC field `zakura_rpc`. That naming difference
+is a property of the two current responses, not two different nodes.
 
 ![The Network page: Height, Accounts, Verification and Chain tiles above a Node details panel listing the instance, network Regtest, height, and best block hash, and a Runtime endpoints panel listing the dashboard, Zakura RPC, lightwalletd, and P2P addresses with copy buttons. The Chain tile reads Regtest.](images/network.png)
 
@@ -106,8 +107,11 @@ prints only user Accounts 1–5. `100000000` zatoshi is 1 ZEC.
 `GET /api/v1/accounts` carries more than balances. Each account object also
 has `name`, `unified_address`, `transparent_address`, and
 `unified_full_viewing_key`. The addresses are what you pay from outside the
-dashboard; the viewing key is the only way to read an Ironwood memo this
-environment sent, since nothing in the API or UI shows one back. Because the
+dashboard; the viewing key lets an external wallet read the Ironwood memos
+sent to that account. Inside this environment, the Explorer's
+**Decrypt actions** button and
+[`GET /api/v1/transactions/{txid}/wallet`](#read-what-the-wallet-recorded-about-a-transaction)
+show the memos the wallet recorded. Because the
 seed is fixed (see [Chapter 3](accounts-and-balances.md#an-account-is-a-wallet-identity)),
 these values are identical in every instance — convenient for fixtures, and
 a reason never to reuse them anywhere real.
@@ -141,8 +145,8 @@ curl -N "$DASHBOARD_URL/api/v1/events"
 Leave it running, perform a faucet or mine in another terminal, and watch
 for `update` events. Press Ctrl+C to stop the stream. Your client should
 read the relevant HTTP endpoint after an event; it should also fetch
-initial state when it connects, since a stream starts with no full
-snapshot. A `mining` event prompts a job-status refresh. A `resync` event means
+fresh state on each connection, cancelling pending older reads first.
+The stream has no replay. A `mining` event prompts a job-status refresh. A `resync` event means
 updates were missed; refetch the state your client uses.
 
 ## Read chain state directly
@@ -180,6 +184,67 @@ same `ths endpoints --json` that gave you the address reports `"tls": false`
 alongside it. Some clients expect `host:port` rather than an `http://` URL;
 use the form your client library requires.
 
+## Read what the wallet recorded about a transaction
+
+The explorer routes return public chain data, which never includes memo
+plaintext or Ironwood recipients. To check that a payment between development
+accounts arrived with the right amount and memo, read the local wallet's
+record of it:
+
+```console
+curl -fsS "$DASHBOARD_URL/api/v1/transactions/$TXID/wallet?account=2"
+```
+
+```json
+{
+  "txid": "…",
+  "status": "confirmed",
+  "mined_height": 107,
+  "confirmations": 1,
+  "fee_zatoshi": 10000,
+  "details": "complete",
+  "outputs": [
+    { "pool": "ironwood", "index": 0, "value_zatoshi": 10000000,
+      "from": 1, "to": 2, "to_address": "uregtest1…",
+      "change": false, "memo": { "text": "order 42" } }
+  ],
+  "spends": []
+}
+```
+
+- `account` is optional. Without it, the response covers every development
+  account involved; with it, only the outputs where `from` or `to` is that
+  account, and the notes it spent. Any value other than 1–5, or any other
+  query parameter, returns 400.
+- A transaction ID the node doesn't know returns 404. A transaction no
+  development account is involved in returns 200 with empty `outputs` and
+  `spends`.
+- `from` and `to` are an account number, `"faucet"` for an output the faucet
+  paid, or `null` for an address outside the development accounts. The
+  faucet's own change and spends are never returned.
+- `to_address` is the address the wallet recorded when it built the output, or
+  the receiving account's address for an output it only received.
+- `change` is true only for change returned to the account that sent it.
+- `memo` is `{"text": …}` for a text memo (`{"text": ""}` for an explicit
+  empty text memo), `{"hex": …}` with the stored bytes for any other memo, or
+  `null` for no memo (`0xF6`) or a transparent output.
+- `status`, `mined_height` and `confirmations` come from the node: `"pending"`,
+  `null` and `0` while the transaction is in the mempool.
+- `fee_zatoshi` is the fee the wallet stored, or `null`.
+
+`details` says whether memos and change flags are final:
+
+| `details` | Meaning |
+| --- | --- |
+| `complete` | The wallet has the full transaction. Also `complete` when nothing can be missing: the wallet has no record of the transaction for accounts 1–5, or every output and spend is transparent. |
+| `pending` | The wallet found the transaction by scanning and still has to fetch it in full, so `memo` can be `null` until then. An Ironwood transaction stays `pending` while the wallet keeps retrying. |
+| `unavailable` | The wallet gave up fetching the full transaction, so memos may be missing. |
+
+The wallet records a transaction it built as soon as it builds it. A payment
+from outside the development accounts appears only after it is mined and the
+wallet has scanned its block; before that, the response has empty `outputs`
+and `spends`.
+
 ## The rest of the API surface
 
 These are every route the server serves today, from
@@ -187,23 +252,27 @@ These are every route the server serves today, from
 
 | Route | Notes |
 | --- | --- |
-| `GET /api/v1/health` | 200 after startup finishes, Zakura answers, and the wallet has published at least one snapshot; 503 otherwise. The natural readiness probe. |
+| `GET /api/v1/health` | 200 after startup finishes, Zakura and lightwalletd answer, and the wallet has published at least one snapshot; 503 otherwise. The natural readiness probe. |
 | `GET /api/v1/status` | Node tip, account count, network, endpoints, `wallet_sync`, and settlement status. |
 | `GET /api/v1/accounts` | Accounts 1–5 with balances, addresses, and viewing keys. |
-| `GET /api/v1/activity` | Recorded development payments; see [Chapter 6](architecture/operations.md#call-the-api-with-a-deliberate-key) for the object's thirteen fields. |
+| `GET /api/v1/activity` | Unified development-wallet history. Each transaction appears once; account arrays retain every affected user account and treasury outputs are hidden. See [Chapter 6](architecture/operations.md#call-the-api-with-a-deliberate-key). |
 | `GET /api/v1/activity?idempotency_key=<key>` | Read one payment's stored activity as a one-item array, or `[]`; the read does not resume it. |
-| `POST /api/v1/send/quote` | Dry run: `available_zatoshi`, `fee_zatoshi`, `max_zatoshi` for one account and pool pair. Builds and broadcasts nothing. Check an intended amount against `max_zatoshi` before calling `send`. |
+| `POST /api/v1/send/quote` | Dry run: `available_zatoshi`, `fee_zatoshi`, `max_zatoshi` for one account and pool pair. Builds and broadcasts nothing. Check an intended amount against `max_zatoshi` before calling `send`. Returns 503 while the environment is still starting, like `send` and `faucet`. |
 | `POST /api/v1/send` | Payment to a user account or supported Regtest address. Needs an idempotency key. |
 | `POST /api/v1/faucet` | Treasury payment to an account. Needs an idempotency key. |
 | `POST /api/v1/faucet/address` | Treasury payment to a supported Regtest address. Needs an idempotency key; external recipients have a separate stored faucet record. |
 | `GET /api/v1/faucet/address?idempotency_key=<key>` | Read an internal or external address-faucet result, or 404 if none is stored. |
 | `POST /api/v1/mine` | Generate 1–10,000 blocks and wait for wallet synchronization. Each call uses a fresh internal key. |
+| `POST /api/v1/reorg` | `{depth, keep_txs?}` removes recent blocks and mines replacements. Returns old/new tips, block hashes, and best-effort transaction-retention results. |
+| `POST /api/v1/rollback` | `{depth}` removes recent blocks without replacements and reconciles the wallet. Neither chain-changing POST is automatically retried. |
 | `POST /api/v1/mining/jobs` | Start a keyed mining job with `{blocks,idempotency_key}`; returns HTTP 202 and the job. |
 | `GET /api/v1/mining/jobs`, `/mining/jobs/{id}` | Read the latest job or a specific job; see [Chapter 5](mining-and-sync.md). |
 | `POST /api/v1/zip321/parse` | Parse one Regtest payment URI into its address, pool, optional amount, and memo; moves no funds. |
 | `POST /api/v1/zip321/request` | Generate a payment URI from `{account_id}` and an optional amount and memo; moves no funds. |
+| `POST /api/v1/transactions/decode` | Decode one raw transaction from `{hex}` into its txid, version, branch ID, expiry height, transparent inputs and outputs, and shielded counts and value balances; broadcasts nothing. |
 | `POST /api/v1/dev/seed` | Returns the raw seed hex. Refuses unless the body carries `"confirmation": "I understand this seed is for regtest only"`. |
-| `GET /api/v1/blocks`, `/blocks/{id}`, `/transactions/{txid}`, `/mempool`, `/addresses/{address}`, `/search` | Read-only explorer views of public chain data. |
+| `GET /api/v1/blocks`, `/blocks/{id}`, `/transactions/{txid}`, `/mempool`, `/addresses/{address}`, `/search` | Read-only explorer views of public chain data. An empty or whitespace-only `/search` query is HTTP 400 and is not sent to Zakura. An address with surrounding whitespace is HTTP 400 from `/addresses/{address}` and from `/search`. |
+| `GET /api/v1/transactions/{txid}/wallet[?account=N]` | What the local wallet recorded about one transaction for accounts 1–5: outputs, change, memos, spends, and fee. See [above](#read-what-the-wallet-recorded-about-a-transaction). |
 | `GET /api/v1/events` | The server-sent stream described above. |
 
 Accepted payment intents now progress in the background, including payments

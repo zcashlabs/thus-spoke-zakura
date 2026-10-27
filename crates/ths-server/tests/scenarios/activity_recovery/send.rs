@@ -579,7 +579,11 @@ pub(super) async fn expired_unseen_send_replaces_once_under_the_original_key() -
             rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
         let blocks = original.expiry_height.saturating_sub(chain.blocks) + 1;
         anyhow::ensure!(
-            blocks > 0 && blocks <= 100,
+            blocks > 0
+                && blocks
+                    <= u64::from(
+                        zcash_primitives::transaction::builder::NU7_DEFAULT_TX_EXPIRY_DELTA
+                    ) + 2,
             "unexpected expiry distance: {blocks}"
         );
         let _: serde_json::Value = rpc_with_timeout(

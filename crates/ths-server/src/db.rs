@@ -21,6 +21,7 @@ mod address_faucet;
 mod schema;
 
 pub use accounts::{Account, DevelopmentAccountSecret, DevelopmentSecrets};
+pub(crate) use activity::ActivityRecovery;
 pub use activity::{Activity, ActivityIntent, PreparedTransaction, Recipient};
 pub use address_faucet::AddressFaucet;
 

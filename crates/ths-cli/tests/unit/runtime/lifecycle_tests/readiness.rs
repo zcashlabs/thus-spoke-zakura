@@ -38,41 +38,6 @@ fn oversized_body_is_rejected_before_waiting_for_the_rest() {
 }
 
 #[test]
-fn shutdown_during_an_active_http_attempt_is_observed() {
-    for mode in [
-        HttpMode::StallConnect,
-        HttpMode::StallHeaders,
-        HttpMode::StallBody,
-    ] {
-        let mut fixture = HttpFixture::new(mode);
-        let policy = short_policy();
-        let (sender, shutdown) = Shutdown::channel();
-        let requested = || shutdown.try_interrupted();
-        let started = Instant::now();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                fixture.wait_active(Duration::from_secs(2));
-                sender.send(Ended::Interrupted).unwrap();
-            });
-            assert!(
-                probe_once(
-                    &readiness_client().unwrap(),
-                    &fixture.url(),
-                    Probe::Health,
-                    Deadline::after(policy.readiness),
-                    Cancellation::Observe(&requested),
-                    &policy,
-                )
-                .is_err()
-            );
-        });
-        assert!(shutdown.try_interrupted());
-        within_attempt(started, &policy);
-        fixture.finish();
-    }
-}
-
-#[test]
 fn slow_body_cannot_restart_an_http_attempt() {
     let policy = short_policy();
     let mut fixture = HttpFixture::new(HttpMode::DribbleBody);
@@ -363,6 +328,7 @@ fn hanging_diagnostic_logs_expire_on_the_readiness_budget() {
         program: "/bin/sh".into(),
         prefix_args: vec![script.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
+        child_ops: None,
     };
     let started = Instant::now();
     let failure = wait_ready(

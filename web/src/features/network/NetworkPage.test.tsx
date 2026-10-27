@@ -73,6 +73,7 @@ const BASE = {
   instance: 'dash',
   node: { chain: 'test', blocks: 104, bestblockhash: 'ab'.repeat(32), verificationprogress: 1 },
   account_count: 5,
+  mining_mode: 'auto',
   auto_mine: true,
   network: 'Regtest',
 };
@@ -112,6 +113,18 @@ describe('NetworkPage', () => {
     // The rest of the page must survive the field being absent entirely.
     expect(await screen.findByText('Node details')).toBeInTheDocument();
     expect(screen.queryByText('Runtime endpoints')).not.toBeInTheDocument();
+  });
+
+  it('names the exact block-production rule for each mining mode', async () => {
+    renderNetwork({ ...BASE, mining_mode: 'interval', block_time: 5 });
+    expect(await screen.findByText('Mining a block every 5 seconds')).toBeInTheDocument();
+  });
+
+  it('falls back to the legacy auto_mine flag without a mining_mode', async () => {
+    const legacy: Record<string, unknown> = { ...BASE };
+    delete legacy.mining_mode;
+    renderNetwork({ ...legacy, auto_mine: false });
+    expect(await screen.findByText('Mining only on demand')).toBeInTheDocument();
   });
 
   it('claims all systems operational only when the node is reachable and the wallet is ready', async () => {

@@ -5,6 +5,7 @@ use crate::{
     state::{WalletSyncStatus, now_unix, wallet_matches_tip},
     wallet::WALLET_BIRTHDAY_HEIGHT,
 };
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::Instant;
 impl AppState {
@@ -31,10 +32,20 @@ impl AppState {
         notify(self, "sync");
 
         let result = async {
-            if let Some(target) = target_height {
+            if let Some(height) = target_height {
+                let hash = crate::reconcile::within_deadline(
+                    deadline,
+                    "reading the mined block hash",
+                    self.0.rpc.block_hash(u32::try_from(height)?),
+                )
+                .await?;
                 self.0
                     .wallet
-                    .wait_for_height(target, deadline.saturating_duration_since(Instant::now()))
+                    .wait_for_block(
+                        &ChainCheckpoint { height, hash },
+                        deadline.saturating_duration_since(Instant::now()),
+                        |height| self.0.rpc.canonical_hash(height),
+                    )
                     .await?;
             }
             let target = crate::reconcile::within_deadline(
@@ -77,7 +88,10 @@ impl AppState {
     }
 
     pub(crate) async fn sync_if_chain_advanced(&self) -> anyhow::Result<()> {
-        let observed = self.0.rpc.checkpoint().await?;
+        let (observed, lightwalletd) =
+            tokio::join!(self.0.rpc.checkpoint(), self.0.wallet.latest_checkpoint());
+        self.record_lightwalletd_reachability(lightwalletd.is_ok());
+        let observed = observed?;
         let status = self.0.wallet_snapshot.read().await.status.clone();
         let settled = wallet_matches_tip(&status, &observed);
         {
@@ -90,6 +104,18 @@ impl AppState {
             notify(self, "chain");
         }
         Ok(())
+    }
+
+    /// The status handler probes lightwalletd itself; this only tells subscribers to ask again
+    /// when the probe's answer changed while the chain stayed idle.
+    fn record_lightwalletd_reachability(&self, reachable: bool) {
+        let previous = self
+            .0
+            .lightwalletd_reachable
+            .swap(reachable, Ordering::AcqRel);
+        if previous != reachable {
+            notify(self, "sync");
+        }
     }
 }
 

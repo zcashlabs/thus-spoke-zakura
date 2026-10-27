@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { QueryClient } from '@tanstack/react-query';
 import {
   renderWithProviders,
@@ -99,6 +99,7 @@ function mockWalletApis(status = 'confirmed') {
       instance: 'default',
       node: null,
       account_count: 5,
+      mining_mode: 'auto',
       auto_mine: true,
       network: 'regtest',
     });
@@ -115,6 +116,11 @@ function renderWallet(status = 'confirmed') {
       </WalletActionsProvider>
     </MemoryRouter>,
   );
+}
+
+function CurrentPath() {
+  const { pathname } = useLocation();
+  return <output aria-label="Current path">{pathname}</output>;
 }
 
 function savedFaucet(
@@ -207,6 +213,53 @@ afterEach(() => {
 });
 
 describe('WalletPage', () => {
+  it('closes Payments when following a confirmed payment transaction link', async () => {
+    mockWalletApis();
+    savedFaucet('confirmed-faucet-key', 1, 'confirmed');
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/wallet']}>
+        <WalletActionsProvider>
+          <PaymentUpdates />
+          <CurrentPath />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+    const payments = await screen.findByRole('dialog', { name: 'Payments' });
+    await userEvent.click(within(payments).getByRole('link', { name: 'View transaction' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Current path')).toHaveTextContent(`/explorer/tx/${TXID}`),
+    );
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Payments' })).toBeNull());
+  });
+
+  it.each(['ctrlKey', 'metaKey', 'shiftKey'] as const)(
+    'keeps Payments open when opening a confirmed transaction in another context with %s',
+    async (modifier) => {
+      mockWalletApis();
+      savedFaucet('confirmed-faucet-key', 1, 'confirmed');
+      renderWithProviders(
+        <MemoryRouter initialEntries={['/wallet']}>
+          <WalletActionsProvider>
+            <PaymentUpdates />
+            <CurrentPath />
+          </WalletActionsProvider>
+        </MemoryRouter>,
+      );
+
+      await userEvent.click(await screen.findByRole('button', { name: /View payments/ }));
+      const payments = await screen.findByRole('dialog', { name: 'Payments' });
+      fireEvent.click(within(payments).getByRole('link', { name: 'View transaction' }), {
+        [modifier]: true,
+      });
+
+      expect(screen.getByRole('dialog', { name: 'Payments' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Current path')).toHaveTextContent('/wallet');
+    },
+  );
+
   it.each(['confirmed', 'failed', 'broadcast'])(
     'restores %s outside the dialogs using GET only',
     async (status) => {

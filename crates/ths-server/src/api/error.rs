@@ -14,6 +14,7 @@ use axum::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use zcash_protocol::value::MAX_MONEY;
+/// Zakura answers an unknown or unparseable block or transaction with -5 or -8.
 pub(crate) fn not_found(error: anyhow::Error, message: &str) -> ApiError {
     match error.downcast_ref::<RpcError>().map(|error| error.code) {
         Some(-5 | -8) => ApiError {
@@ -44,7 +45,9 @@ impl From<MiningAdmissionError> for ApiError {
             MiningAdmissionError::InvalidBlocks | MiningAdmissionError::InvalidKey => {
                 StatusCode::BAD_REQUEST
             }
-            MiningAdmissionError::KeyConflict | MiningAdmissionError::Busy => StatusCode::CONFLICT,
+            MiningAdmissionError::KeyConflict
+            | MiningAdmissionError::Busy
+            | MiningAdmissionError::ChainBusy => StatusCode::CONFLICT,
             MiningAdmissionError::Capacity => StatusCode::SERVICE_UNAVAILABLE,
         };
         Self {
@@ -55,11 +58,17 @@ impl From<MiningAdmissionError> for ApiError {
 }
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
-        let status = if error.downcast_ref::<IdempotencyConflict>().is_some() {
+        let status = if let Some(error) = error.downcast_ref::<crate::chain::ChainChangeError>() {
+            match error {
+                crate::chain::ChainChangeError::InvalidDepth => StatusCode::BAD_REQUEST,
+                crate::chain::ChainChangeError::Busy => StatusCode::CONFLICT,
+            }
+        } else if error.downcast_ref::<IdempotencyConflict>().is_some() {
             StatusCode::CONFLICT
         } else {
             match error.downcast_ref::<PaymentError>() {
                 Some(PaymentError::TreasuryExhausted) => StatusCode::SERVICE_UNAVAILABLE,
+                Some(PaymentError::ScanRequired) => StatusCode::SERVICE_UNAVAILABLE,
                 Some(PaymentError::InsufficientFunds { .. }) => StatusCode::UNPROCESSABLE_ENTITY,
                 Some(PaymentError::TransparentMemo) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -160,6 +169,9 @@ fn json_api_error(rejection: JsonRejection, path: &str) -> ApiError {
             "Content-Type must be application/json".to_owned()
         }
         JsonRejection::JsonSyntaxError(_) => "request body must be valid JSON".to_owned(),
+        JsonRejection::BytesRejection(_) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            "request body exceeds the maximum allowed size".to_owned()
+        }
         JsonRejection::BytesRejection(_) => "request body could not be read".to_owned(),
         JsonRejection::JsonDataError(_) => friendly_parse_message(&rejection.body_text(), path),
         _ => friendly_parse_message(&rejection.body_text(), path),

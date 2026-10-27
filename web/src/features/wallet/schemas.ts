@@ -5,6 +5,9 @@ import { parseZec, ZATOSHIS_PER_ZEC } from '@/lib/money';
 /** Server-side faucet ceiling (`api.rs`: `5 * ZATOSHIS_PER_ZEC`). */
 export const FAUCET_MAX_ZATOSHI = 5n * ZATOSHIS_PER_ZEC;
 
+/** Consensus supply ceiling (`zcash_protocol::value::MAX_MONEY`). */
+export const MAX_MONEY_ZATOSHI = 21_000_000n * ZATOSHIS_PER_ZEC;
+
 /** Server-side mining bounds (`api.rs`: `(1..=10_000)`). */
 export const MINE_MIN_BLOCKS = 1;
 export const MINE_MAX_BLOCKS = 10_000;
@@ -30,6 +33,13 @@ const amountField = z
     }
     if (zatoshi <= 0n) {
       ctx.addIssue({ code: 'custom', message: 'Amount must be greater than zero.' });
+      return z.NEVER;
+    }
+    if (zatoshi > MAX_MONEY_ZATOSHI) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Amount must not exceed 21,000,000 ZEC.',
+      });
       return z.NEVER;
     }
     return zatoshi;
@@ -96,14 +106,20 @@ export const requestSchema = z.object({
 export type RequestInput = z.input<typeof requestSchema>;
 export type RequestValues = z.output<typeof requestSchema>;
 
-export const faucetSchema = z.object({
-  account_id: accountIdField,
-  pool: poolSchema,
-  amount: amountField.refine(
-    (zatoshi) => zatoshi <= FAUCET_MAX_ZATOSHI,
-    'The faucet is limited to 5 ZEC per request.',
-  ),
-});
+export const faucetSchema = z
+  .object({
+    account_id: z.union([accountIdField, z.literal(ADDRESS_DESTINATION)]),
+    to_address: z.string().trim().default(''),
+    pool: poolSchema,
+    amount: amountField.refine(
+      (zatoshi) => zatoshi <= FAUCET_MAX_ZATOSHI,
+      'The faucet is limited to 5 ZEC per request.',
+    ),
+  })
+  .refine((values) => values.account_id !== ADDRESS_DESTINATION || values.to_address !== '', {
+    message: 'Enter a Regtest address.',
+    path: ['to_address'],
+  });
 export type FaucetInput = z.input<typeof faucetSchema>;
 export type FaucetValues = z.output<typeof faucetSchema>;
 
@@ -112,11 +128,12 @@ export const mineSchema = z.object({
     .string()
     .min(1, 'Enter a number of blocks.')
     .transform((value, ctx) => {
-      const blocks = Number(value);
-      if (!Number.isInteger(blocks)) {
+      // Number() accepts exponent, hex, binary, and octal forms (1e4, 0x10, 0b11, 0o10).
+      if (!/^\d+$/.test(value)) {
         ctx.addIssue({ code: 'custom', message: 'Enter a whole number of blocks.' });
         return z.NEVER;
       }
+      const blocks = Number(value.replace(/^0+/, '') || '0');
       if (blocks < MINE_MIN_BLOCKS || blocks > MINE_MAX_BLOCKS) {
         ctx.addIssue({
           code: 'custom',

@@ -43,6 +43,191 @@ afterEach(() => {
 });
 
 describe('FaucetDialog', () => {
+  async function chooseExternalAddress() {
+    Object.assign(Element.prototype, {
+      hasPointerCapture: () => false,
+      releasePointerCapture: () => undefined,
+      scrollIntoView: () => undefined,
+    });
+    await userEvent.click(screen.getByLabelText('Destination'));
+    await userEvent.click(await screen.findByRole('option', { name: 'External address' }));
+  }
+
+  it('resumes an external faucet payment with the same key after a lost response', async () => {
+    const address = 'tmAg2wTARgKBHA9mFouqR727cU98MJmfjSq';
+    let posted = false;
+    const result = (status: string) => ({
+      address,
+      amount_zatoshi: 100_000_000,
+      txid: 'f'.repeat(64),
+      block_hash: status === 'confirmed' ? 'b'.repeat(64) : null,
+      status,
+      last_error: null,
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/zip321/parse'))
+        return Promise.resolve(
+          Response.json({
+            address,
+            destination_pool: 'transparent',
+            to_account: null,
+            amount_zatoshi: null,
+            memo: null,
+          }),
+        );
+      if (url.endsWith('/faucet/address') && init?.method === 'POST') {
+        if (!posted) {
+          posted = true;
+          return Promise.reject(new TypeError('response lost'));
+        }
+        return Promise.resolve(Response.json(result('confirmed')));
+      }
+      if (url.includes('/faucet/address?idempotency_key='))
+        return Promise.resolve(Response.json(result(posted ? 'broadcast' : 'preparing')));
+      if (url.endsWith('/accounts') || url.includes('/activity?'))
+        return Promise.resolve(Response.json([]));
+      if (url.endsWith('/mining/jobs')) return Promise.resolve(Response.json({ job: null }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const addressPosts = () =>
+      fetchSpy.mock.calls.filter(
+        ([input, init]) => requestUrl(input).endsWith('/faucet/address') && init?.method === 'POST',
+      );
+    const first = renderWithProviders(
+      <FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />,
+    );
+    await chooseExternalAddress();
+    await userEvent.type(screen.getByLabelText('Destination address'), address);
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    await waitFor(() => expect(addressPosts()).toHaveLength(1));
+    expect(
+      await screen.findByText(/A saved payment has these details \(broadcast\)/),
+    ).toBeInTheDocument();
+    const firstKey = key(addressPosts()[0]);
+    expect(firstKey).toHaveLength(36);
+    first.unmount();
+    sessionStorage.clear();
+
+    renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await chooseExternalAddress();
+    await userEvent.type(screen.getByLabelText('Destination address'), address);
+    await userEvent.click(await screen.findByRole('button', { name: 'Resume payment' }));
+    await waitFor(() => expect(addressPosts()).toHaveLength(2));
+    expect(key(addressPosts()[1])).toBe(firstKey);
+    expect(
+      fetchSpy.mock.calls.some(([input]) =>
+        requestUrl(input).includes(`/faucet/address?idempotency_key=${firstKey}`),
+      ),
+    ).toBe(true);
+  });
+
+  it('submits a unified Regtest address to the address faucet', async () => {
+    const address = 'uregtest1externalrecipient';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/zip321/parse'))
+        return Promise.resolve(
+          Response.json({
+            address,
+            destination_pool: 'ironwood',
+            to_account: null,
+            amount_zatoshi: null,
+            memo: null,
+          }),
+        );
+      if (url.endsWith('/faucet/address') && init?.method === 'POST')
+        return Promise.resolve(
+          Response.json({
+            address,
+            amount_zatoshi: 100_000_000,
+            txid: 'f'.repeat(64),
+            block_hash: 'b'.repeat(64),
+            status: 'confirmed',
+            last_error: null,
+          }),
+        );
+      if (url.endsWith('/accounts') || url.includes('/activity?'))
+        return Promise.resolve(Response.json([]));
+      if (url.endsWith('/mining/jobs')) return Promise.resolve(Response.json({ job: null }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await chooseExternalAddress();
+    await userEvent.type(screen.getByLabelText('Destination address'), address);
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    await waitFor(() =>
+      expect(
+        fetchSpy.mock.calls.some(
+          ([input, init]) =>
+            requestUrl(input).endsWith('/faucet/address') && init?.method === 'POST',
+        ),
+      ).toBe(true),
+    );
+    const call = fetchSpy.mock.calls.find(
+      ([input, init]) => requestUrl(input).endsWith('/faucet/address') && init?.method === 'POST',
+    );
+    expect(call).toBeDefined();
+    const request = JSON.parse(typeof call?.[1]?.body === 'string' ? call[1].body : '{}') as {
+      address: string;
+      amount_zatoshi: number;
+      idempotency_key: string;
+    };
+    expect(request).toMatchObject({ address, amount_zatoshi: 100_000_000 });
+    expect(request.idempotency_key).toHaveLength(36);
+  });
+
+  it.each(['invalid', 't1wrongnetworkaddress'])(
+    'rejects %s before funding an address',
+    async (address) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+        requestUrl(input).endsWith('/zip321/parse')
+          ? Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  error: { message: 'Not a valid Regtest address', status: 400 },
+                }),
+                { status: 400 },
+              ),
+            )
+          : Promise.resolve(Response.json([])),
+      );
+      renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+      await chooseExternalAddress();
+      await userEvent.type(screen.getByLabelText('Destination address'), address);
+      await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+      expect(await screen.findByText('Not a valid Regtest address')).toBeInTheDocument();
+      expect(
+        fetchSpy.mock.calls.some(([input]) => requestUrl(input).endsWith('/faucet/address')),
+      ).toBe(false);
+    },
+  );
+  it('routes a development-account address through the account faucet', async () => {
+    const address = 'tmAg2wTARgKBHA9mFouqR727cU98MJmfjSq';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+      requestUrl(input).endsWith('/zip321/parse')
+        ? Promise.resolve(
+            Response.json({
+              address,
+              destination_pool: 'transparent',
+              to_account: 2,
+              amount_zatoshi: null,
+              memo: null,
+            }),
+          )
+        : Promise.resolve(Response.json([])),
+    );
+    renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await chooseExternalAddress();
+    await userEvent.type(screen.getByLabelText('Destination address'), address);
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    expect(
+      await screen.findByText("This is Account 2's address. Choose Account 2 as the destination."),
+    ).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.some(([input]) => requestUrl(input).endsWith('/faucet/address')),
+    ).toBe(false);
+  });
   it('exposes modal semantics the previous hand-rolled dialog lacked', () => {
     renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
 
@@ -52,10 +237,10 @@ describe('FaucetDialog', () => {
     const labelId = dialog.getAttribute('aria-labelledby');
     const descriptionId = dialog.getAttribute('aria-describedby');
     expect(labelId).toBeTruthy();
-    expect(document.getElementById(labelId!)).toHaveTextContent('Fund an account');
+    expect(document.getElementById(labelId!)).toHaveTextContent('Fund an account or address');
     expect(descriptionId).toBeTruthy();
     expect(document.getElementById(descriptionId!)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Fund an account' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Fund an account or address' })).toBeInTheDocument();
   });
 
   it('moves focus into the dialog on open', () => {

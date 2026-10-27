@@ -1,24 +1,243 @@
 use super::*;
 
 #[test]
-fn responses_decode_or_report_their_status_and_body() {
-    let (url, _requests) = serve(vec![
+fn explorer_reads_detail_routes_and_preserves_every_field() {
+    let body = serde_json::json!({
+        "txid": "transaction", "hash": "block", "height": 100, "confirmations": 2,
+        "vin": [{"txid": "previous", "vout": 0, "valueZat": 100_000,
+            "scriptPubKey": {"addresses": ["tmInput"]}}],
+        "vout": [{"n": 0, "valueZat": 90_000, "scriptPubKey": {"addresses": ["tmOutput"]}}],
+        "ironwood": {"actions": [{"nullifier": "nf"}]}, "finalironwoodroot": "root",
+        "future_server_field": {"large_integer": u64::MAX, "optional": null}
+    });
+    for (resource, id) in [
+        ("transactions", "transaction"),
+        ("blocks", "0"),
+        ("blocks", "block"),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", body.to_string())]);
+        let value =
+            explorer_data(&url, &reqwest::blocking::Client::new(), resource, Some(id)).unwrap();
+        assert_eq!(value, body);
+        assert_eq!(
+            requests.recv().unwrap().0,
+            format!("GET /api/v1/{resource}/{id} HTTP/1.1")
+        );
+        assert!(requests.try_recv().is_err());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&render_explorer(&value, true).unwrap())
+                .unwrap(),
+            body
+        );
+        let human = render_explorer(&value, false).unwrap();
+        for (key, field) in body.as_object().unwrap() {
+            assert!(
+                human.contains(&format!(
+                    "{key}: {}",
+                    serde_json::to_string_pretty(field).unwrap()
+                )),
+                "{human}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explorer_block_without_id_looks_up_the_node_tip_by_hash() {
+    let (url, requests) = serve(vec![
         (
             "200 OK",
-            r#"{"id":"job-1","requested_blocks":1,"completed_blocks":1,"state":"completed","error":null,"progress_uncertain":false,"hashes":["tip"]}"#,
+            r#"{"node":{"blocks":100,"bestblockhash":"tip"},"wallet_sync":{"state":"syncing"}}"#,
         ),
-        ("409 Conflict", "already claimed"),
-        ("200 OK", "not json"),
+        (
+            "200 OK",
+            r#"{"hash":"tip","height":100,"finalironwoodroot":"root"}"#,
+        ),
     ]);
-    let client = reqwest::blocking::Client::new();
-    let get = || client.get(&url).send().unwrap();
+    let value = explorer_data(&url, &reqwest::blocking::Client::new(), "blocks", None).unwrap();
+    assert_eq!(value["hash"], "tip");
+    assert_eq!(value["finalironwoodroot"], "root");
+    assert_eq!(requests.recv().unwrap().0, "GET /api/v1/status HTTP/1.1");
+    assert_eq!(
+        requests.recv().unwrap().0,
+        "GET /api/v1/blocks/tip HTTP/1.1"
+    );
+}
 
-    let job: MiningJob = decode_response(get()).unwrap();
-    assert_eq!(job.state, MiningJobState::Completed);
-    let rejected = decode_response::<MiningJob>(get()).unwrap_err().to_string();
-    assert_eq!(rejected, "rejected (409 Conflict): already claimed");
-    let malformed = format!("{:#}", decode_response::<MiningJob>(get()).unwrap_err());
-    assert!(malformed.starts_with("decoding response: "), "{malformed}");
+#[test]
+fn explorer_preserves_server_not_found_messages_and_other_failures() {
+    for (resource, message) in [
+        (
+            "transactions",
+            "No transaction with that ID on this chain. It may not have been mined yet.",
+        ),
+        ("blocks", "No block at that height or hash on this chain."),
+    ] {
+        let body = serde_json::json!({"error":{"message":message,"status":404}}).to_string();
+        let (url, requests) = serve(vec![("404 Not Found", body.clone())]);
+        let error = explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            resource,
+            Some("unknown"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("rejected (404 Not Found): {body}")
+        );
+        assert_eq!(requests.try_iter().count(), 1);
+    }
+    for (status, body, expected) in [
+        (
+            "500 Internal Server Error",
+            "node unavailable",
+            "rejected (500 Internal Server Error): node unavailable",
+        ),
+        ("200 OK", "not JSON", "decoding response"),
+        ("drop", "", "error sending request"),
+    ] {
+        let (url, _requests) = serve(vec![(status, body)]);
+        let error = explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            "transactions",
+            Some("txid"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+}
+
+#[test]
+fn chain_changes_forward_the_command_and_report_retention_failures_in_both_outputs() {
+    let response = serde_json::json!({
+        "depth":3,"old_tip":{"height":108,"hash":"old-tip"},
+        "new_tip":{"height":108,"hash":"new-tip"},
+        "removed_hashes":["a","b","c"],"replacement_hashes":["d","e","f"],
+        "retained_txids":["kept"],"failed_transactions":[{"txid":"dropped","error":"invalid anchor"}]
+    });
+    for (operation, keep_txs, body) in [
+        (
+            "reorg",
+            true,
+            serde_json::json!({"depth":3,"keep_txs":true}),
+        ),
+        (
+            "reorg",
+            false,
+            serde_json::json!({"depth":3,"keep_txs":false}),
+        ),
+        ("rollback", false, serde_json::json!({"depth":3})),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", response.to_string())]);
+        let result = change_chain(
+            &url,
+            &reqwest::blocking::Client::new(),
+            operation,
+            3,
+            keep_txs,
+        )
+        .unwrap();
+        let (request_line, request_body) = requests.recv().unwrap();
+        assert_eq!(request_line, format!("POST /api/v1/{operation} HTTP/1.1"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request_body).unwrap(),
+            body
+        );
+        let json = render_chain_change(&result, &name("alpha"), operation, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            response
+        );
+        let text = render_chain_change(&result, &name("alpha"), operation, false).unwrap();
+        assert!(text.contains("3 blocks on alpha"));
+        assert!(text.contains("New tip: 108 (new-tip)"));
+        assert!(text.contains("Not retained: dropped: invalid anchor"));
+        assert!(text.starts_with(if operation == "reorg" {
+            "Reorganized"
+        } else {
+            "Rolled back"
+        }));
+    }
+}
+
+#[test]
+fn explorer_tip_lookup_fails_without_fetching_another_block() {
+    for (status, body, expected) in [
+        (
+            "200 OK",
+            r#"{"node":null}"#,
+            "the environment did not report a node tip",
+        ),
+        (
+            "200 OK",
+            r#"{"node":{}}"#,
+            "the environment did not report a node tip",
+        ),
+        (
+            "503 Service Unavailable",
+            "still starting",
+            "rejected (503 Service Unavailable): still starting",
+        ),
+    ] {
+        let (url, requests) = serve(vec![(status, body)]);
+        let error =
+            explorer_data(&url, &reqwest::blocking::Client::new(), "blocks", None).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(requests.recv().unwrap().0, "GET /api/v1/status HTTP/1.1");
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[test]
+fn chain_changes_do_not_retry_rejected_or_lost_responses() {
+    for status in ["409 Conflict", "drop"] {
+        let (url, requests) = serve(vec![(status, "busy")]);
+        let error =
+            change_chain(&url, &reqwest::blocking::Client::new(), "reorg", 3, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inspect the current tip before retrying")
+        );
+        assert_eq!(requests.recv().unwrap().0, "POST /api/v1/reorg HTTP/1.1");
+        assert!(requests.try_recv().is_err());
+    }
+}
+
+#[test]
+fn explorer_rejects_dot_only_ids_without_a_request() {
+    for resource in ["blocks", "transactions"] {
+        for id in [".", ".."] {
+            let (url, requests) = serve(vec![("200 OK", r#"{"blocks":[],"next_before":null}"#)]);
+            let error = explorer_data(&url, &reqwest::blocking::Client::new(), resource, Some(id))
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("invalid explorer identifier: {id:?}")
+            );
+            assert!(requests.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn explorer_encodes_ids_as_a_single_path_segment() {
+    let (url, requests) = serve(vec![("404 Not Found", "missing")]);
+    assert!(
+        explorer_data(
+            &url,
+            &reqwest::blocking::Client::new(),
+            "transactions",
+            Some("a/b?c#d")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        requests.recv().unwrap().0,
+        "GET /api/v1/transactions/a%2Fb%3Fc%23d HTTP/1.1"
+    );
 }
 
 /// Mining journals do real file locking, so tests need an isolated root
@@ -470,6 +689,65 @@ fn activity_output_handles_empty_history_and_preserves_json_fields() {
 }
 
 #[test]
+fn activity_output_renders_external_incoming_transactions() {
+    let activity = vec![serde_json::json!({
+        "id": "wallet:incoming:2",
+        "kind": "transaction",
+        "direction": "incoming",
+        "from_account": null,
+        "to_account": 2,
+        "to_address": null,
+        "source_pool": null,
+        "destination_pool": "ironwood",
+        "source_pools": [],
+        "destination_pools": ["ironwood"],
+        "amount_zatoshi": 100_000_000,
+        "txid": "incoming",
+        "block_hash": "block",
+        "mined_height": 121,
+        "status": "confirmed",
+        "created_at": null,
+        "last_error": null,
+    })];
+
+    let output = activity_lines(&activity).unwrap();
+    assert!(output.contains("receive  confirmed  1 ZEC"), "{output}");
+    assert!(
+        output.contains("Route: external (unknown pool) -> account 2 (ironwood)"),
+        "{output}"
+    );
+    assert!(output.contains("Mined at height: 121"), "{output}");
+}
+
+#[test]
+fn activity_output_preserves_multi_account_routes() {
+    let activity = vec![serde_json::json!({
+        "id": "wallet:multi-account",
+        "kind": "transaction",
+        "direction": "incoming",
+        "from_account": null,
+        "to_account": null,
+        "from_accounts": [],
+        "to_accounts": [2, 3],
+        "to_address": null,
+        "source_pool": null,
+        "destination_pool": "ironwood",
+        "amount_zatoshi": 300_000_000,
+        "txid": "multi-account",
+        "block_hash": "block",
+        "status": "confirmed",
+        "created_at": null,
+        "last_error": null,
+    })];
+
+    let output = activity_lines(&activity).unwrap();
+    assert!(
+        output.contains("Route: external (unknown pool) -> accounts 2, 3 (ironwood)"),
+        "{output}"
+    );
+}
+
+#[test]
 fn activity_history_forwards_only_explicit_limits() {
     for (limit, expected_request) in [
         (None, "GET /api/v1/activity HTTP/1.1"),
@@ -613,6 +891,150 @@ fn balances_reject_syncing_and_failed_wallets_before_reading_accounts() {
 
         assert_eq!(error.to_string(), expected);
         assert_eq!(requests.try_iter().count(), 1);
+    }
+}
+
+const READY: &str = r#"{"wallet_sync":{"state":"ready","error":null}}"#;
+
+fn quote_with(
+    runtime: &Runtime,
+    instance: &InstanceName,
+    url: &str,
+    source_pool: &str,
+    destination_pool: &str,
+    json: bool,
+) -> (Result<()>, String) {
+    let mut out = Vec::new();
+    let result = runtime.wallet_quote_with(
+        instance,
+        url,
+        &reqwest::blocking::Client::new(),
+        &mut out,
+        2,
+        source_pool,
+        destination_pool,
+        json,
+    );
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn quote_prints_the_route_and_server_fields_without_submitting_a_payment() {
+    let (_dir, runtime, _) = payment_runtime();
+    let demo = name("demo");
+    fs::create_dir_all(runtime.instance_dir(&demo)).unwrap();
+    const QUOTE: &str =
+        r#"{"available_zatoshi":500000000,"fee_zatoshi":15000,"max_zatoshi":499985000}"#;
+
+    let (url, requests) = serve(vec![("200 OK", READY), ("200 OK", QUOTE)]);
+    let (result, out) = quote_with(&runtime, &demo, &url, "ironwood", "transparent", true);
+    result.unwrap();
+    assert_eq!(
+        json_stdout(out.as_bytes()),
+        serde_json::json!({
+            "from_account": 2,
+            "source_pool": "ironwood",
+            "destination_pool": "transparent",
+            "available_zatoshi": 500_000_000,
+            "fee_zatoshi": 15_000,
+            "max_zatoshi": 499_985_000,
+        })
+    );
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].0, "GET /api/v1/status HTTP/1.1");
+    assert_eq!(requests[1].0, "POST /api/v1/send/quote HTTP/1.1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].1).unwrap(),
+        serde_json::json!({
+            "from_account": 2,
+            "source_pool": "ironwood",
+            "destination_pool": "transparent",
+        })
+    );
+    assert_eq!(
+        fs::read_dir(runtime.instance_dir(&demo)).unwrap().count(),
+        0
+    );
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", QUOTE)]);
+    let (result, out) = quote_with(&runtime, &demo, &url, "ironwood", "transparent", false);
+    result.unwrap();
+    assert_eq!(
+        out,
+        "Maximum-spend quote for account 2 (ironwood -> transparent) on demo\n  \
+         Available     5 ZEC\n  \
+         Fee           0.00015 ZEC\n  \
+         Maximum send  4.99985 ZEC\n\
+         This is a snapshot of the current wallet, not a reservation. Nothing was sent.\n"
+    );
+}
+
+#[test]
+fn quote_of_an_empty_pool_is_informational_and_succeeds() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    const EMPTY: &str = r#"{"available_zatoshi":0,"fee_zatoshi":10000,"max_zatoshi":0}"#;
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", EMPTY)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "transparent", "ironwood", true);
+    result.unwrap();
+    assert_eq!(json_stdout(out.as_bytes())["max_zatoshi"], 0);
+    assert_eq!(json_stdout(out.as_bytes())["available_zatoshi"], 0);
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", EMPTY)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "transparent", "ironwood", false);
+    result.unwrap();
+    for expected in [
+        "  Available     0 ZEC\n",
+        "  Fee           0.0001 ZEC\n",
+        "  Maximum send  0 ZEC\n",
+        "Account 2 has nothing spendable in the transparent pool after the fee.\n",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}` from {out}");
+    }
+}
+
+#[test]
+fn quote_refuses_a_stale_wallet_and_reports_server_failures() {
+    let (_dir, runtime, alpha) = payment_runtime();
+
+    let (url, requests) = serve(vec![(
+        "200 OK",
+        r#"{"wallet_sync":{"state":"syncing","error":null}}"#,
+    )]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", true);
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "wallet for environment alpha is still syncing; try again later"
+    );
+    assert!(out.is_empty());
+    assert_eq!(requests.try_iter().count(), 1);
+
+    for (status, body, expected) in [
+        (
+            "400 Bad Request",
+            r#"{"error":{"message":"source_pool must be transparent or ironwood","status":400}}"#,
+            "rejected (400 Bad Request)",
+        ),
+        (
+            "500 Internal Server Error",
+            r#"{"error":{"message":"proposing max spend: failed","status":500}}"#,
+            "rejected (500 Internal Server Error)",
+        ),
+        ("200 OK", r#"{"max_zatoshi":1}"#, "decoding response"),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", READY), (status, body)]);
+        let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", true);
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(
+            error.starts_with(
+                "asking environment alpha to quote account 2 from ironwood to ironwood: "
+            ),
+            "{error}"
+        );
+        assert!(error.contains(expected), "{error}");
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(requests.try_iter().count(), 2);
     }
 }
 
@@ -1439,4 +1861,580 @@ pub(super) fn send_interruption_probe() {
         &send_intent(Some("")),
     );
     panic!("the interrupted send finished before it was killed: {finished:?}");
+}
+
+/// Fails either before any output or after a prefix was already delivered.
+struct PaymentResultWriter {
+    remaining: usize,
+    written: Vec<u8>,
+}
+
+impl PaymentResultWriter {
+    fn new(remaining: usize) -> Self {
+        Self {
+            remaining,
+            written: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for PaymentResultWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "payment result pipe closed",
+            ));
+        }
+        let count = self.remaining.min(bytes.len());
+        self.written.extend_from_slice(&bytes[..count]);
+        self.remaining -= count;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_payment_output_error(error: anyhow::Error) {
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn send_retains_identity_when_reporting_a_terminal_result_fails() {
+    for (json, status) in [(true, "confirmed"), (false, "confirmed"), (true, "failed")] {
+        for prefix in [0, 32] {
+            let (_dir, runtime, alpha) = payment_runtime();
+            let intent = send_intent(Some("memo"));
+            let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+            let unrelated = journal.key_for("unrelated").unwrap();
+            drop(journal);
+            let response = activity_json(status, "original-tx", Some("stored failure"));
+            let (url, requests) = serve(vec![("200 OK", response); 3]);
+            let client = reqwest::blocking::Client::new();
+            let mut failed_output = PaymentResultWriter::new(prefix);
+            let error = runtime
+                .submit_send(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut failed_output,
+                    Instant::now() + Duration::from_secs(5),
+                    1,
+                    intent.clone(),
+                    Some("memo"),
+                    json,
+                )
+                .unwrap_err();
+            assert_payment_output_error(error);
+            assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+            let original_key = sent_key(&requests.recv().unwrap());
+            assert_eq!(
+                saved_send_key(&runtime, &alpha, &intent),
+                Some(original_key.clone())
+            );
+
+            // A new command invocation reopens the journal and recovers this exact payment.
+            for retry in [true, false] {
+                let mut out = Vec::new();
+                let result = runtime.submit_send(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut out,
+                    Instant::now() + Duration::from_secs(5),
+                    1,
+                    intent.clone(),
+                    Some("memo"),
+                    json,
+                );
+                assert_eq!(result.is_err(), status == "failed");
+                if json {
+                    assert_eq!(json_stdout(&out)["txid"], "original-tx");
+                } else {
+                    assert!(
+                        String::from_utf8(out)
+                            .unwrap()
+                            .contains("Transaction: original-tx")
+                    );
+                }
+                assert_eq!(sent_key(&requests.recv().unwrap()) == original_key, retry);
+                assert_eq!(saved_send_key(&runtime, &alpha, &intent), None);
+            }
+            let journal = IntentJournal::open(&runtime.instance_dir(&alpha), "send").unwrap();
+            assert_eq!(journal.read().unwrap().get("unrelated"), Some(&unrelated));
+        }
+    }
+}
+
+fn address_result_json(status: &str) -> String {
+    serde_json::json!({
+        "address": "utest", "amount_zatoshi": 100, "txid": "original-address-tx",
+        "block_hash": (status == "confirmed").then_some("block"),
+        "status": status, "last_error": "stored failure",
+    })
+    .to_string()
+}
+
+#[test]
+fn address_faucet_retains_identity_when_reporting_a_terminal_result_fails() {
+    for (json, status) in [(true, "confirmed"), (false, "confirmed"), (true, "failed")] {
+        for prefix in [0, 32] {
+            let (_dir, runtime, alpha) = payment_runtime();
+            let response = address_result_json(status);
+            let (url, requests) = serve(vec![("200 OK", response); 3]);
+            let client = reqwest::blocking::Client::new();
+            let mut failed_output = PaymentResultWriter::new(prefix);
+            let error = runtime
+                .faucet_with(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut failed_output,
+                    Instant::now() + Duration::from_secs(5),
+                    "utest",
+                    100,
+                    json,
+                )
+                .unwrap_err();
+            assert_payment_output_error(error);
+            assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+            let original_key = sent_key(&requests.recv().unwrap());
+            let saved = || {
+                IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+                    .unwrap()
+                    .read()
+                    .unwrap()
+            };
+            assert_eq!(saved().get("address:utest:100"), Some(&original_key));
+            for retry in [true, false] {
+                let mut out = Vec::new();
+                let result = runtime.faucet_with(
+                    &alpha,
+                    &url,
+                    &client,
+                    &mut out,
+                    Instant::now() + Duration::from_secs(5),
+                    "utest",
+                    100,
+                    json,
+                );
+                assert_eq!(result.is_err(), status == "failed");
+                if json {
+                    assert_eq!(json_stdout(&out)["txid"], "original-address-tx");
+                } else {
+                    assert!(
+                        String::from_utf8(out)
+                            .unwrap()
+                            .contains("Transaction: original-address-tx")
+                    );
+                }
+                assert_eq!(sent_key(&requests.recv().unwrap()) == original_key, retry);
+                assert!(saved().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn wallet_faucet_retains_every_identity_when_reporting_terminal_results_fails() {
+    for json in [true, false] {
+        for prefix in [0, 32] {
+            for second_status in ["confirmed", "failed"] {
+                let (_dir, runtime, alpha) = payment_runtime();
+                let faucet_result = |account: u8, status: &str, txid: &str| {
+                    let mut result: serde_json::Value =
+                        serde_json::from_str(&activity_json(status, txid, Some("stored failure")))
+                            .unwrap();
+                    result["id"] = format!("faucet-{account}").into();
+                    result["kind"] = "faucet".into();
+                    result["from_account"] = serde_json::Value::Null;
+                    result["to_account"] = account.into();
+                    result.to_string()
+                };
+                let confirmed = faucet_result(1u8, "confirmed", "first-tx");
+                let second = faucet_result(2u8, second_status, "second-tx");
+                let (url, requests) = serve(vec![
+                    ("200 OK", confirmed.clone()),
+                    ("200 OK", second.clone()),
+                    ("200 OK", confirmed.clone()),
+                    ("200 OK", second.clone()),
+                    ("200 OK", confirmed),
+                    ("200 OK", second),
+                ]);
+                let client = reqwest::blocking::Client::new();
+                let mut failed_output = PaymentResultWriter::new(prefix);
+                let error = runtime
+                    .wallet_faucet_with(
+                        &alpha,
+                        &url,
+                        &client,
+                        &mut failed_output,
+                        Instant::now() + Duration::from_secs(5),
+                        &[1, 2],
+                        100,
+                        "ironwood",
+                        json,
+                    )
+                    .unwrap_err();
+                assert_payment_output_error(error);
+                assert_eq!(!failed_output.written.is_empty(), prefix != 0);
+                let originals = [
+                    sent_key(&requests.recv().unwrap()),
+                    sent_key(&requests.recv().unwrap()),
+                ];
+                let saved = || {
+                    IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+                        .unwrap()
+                        .read()
+                        .unwrap()
+                };
+                let entries = saved();
+                assert_eq!(entries.len(), 2);
+                for (index, key) in originals.iter().enumerate() {
+                    assert_eq!(
+                        entries.get(&format!("wallet:ironwood:100:1,2:{}", index + 1)),
+                        Some(key)
+                    );
+                }
+                for retry in [true, false] {
+                    let mut out = Vec::new();
+                    let result = runtime.wallet_faucet_with(
+                        &alpha,
+                        &url,
+                        &client,
+                        &mut out,
+                        Instant::now() + Duration::from_secs(5),
+                        &[1, 2],
+                        100,
+                        "ironwood",
+                        json,
+                    );
+                    assert_eq!(result.is_err(), second_status == "failed");
+                    assert!(!out.is_empty());
+                    for key in &originals {
+                        assert_eq!(sent_key(&requests.recv().unwrap()) == *key, retry);
+                    }
+                    assert!(saved().is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wallet_faucet_keeps_unfinished_batch_keys_after_an_output_error() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let (url, requests) = serve(vec![
+        ("200 OK", activity_json("confirmed", "first-tx", None)),
+        ("200 OK", activity_json("broadcast", "second-tx", None)),
+    ]);
+    let error = runtime
+        .wallet_faucet_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_millis(500),
+            &[1, 2],
+            100,
+            "ironwood",
+            true,
+        )
+        .unwrap_err();
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    for account in 1..=2 {
+        assert_eq!(
+            saved[&format!("wallet:ironwood:100:1,2:{account}")],
+            sent_key(&requests.recv().unwrap())
+        );
+    }
+}
+
+#[test]
+fn terminal_payment_failures_still_release_keys_in_text_mode() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let intent = send_intent(None);
+    let (url, _requests) = serve(vec![(
+        "200 OK",
+        activity_json("failed", "failed-tx", Some("stored failure")),
+    )]);
+    let error = runtime
+        .submit_send(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            intent.clone(),
+            None,
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("stored failure"));
+    assert_eq!(saved_send_key(&runtime, &alpha, &intent), None);
+
+    let (url, _requests) = serve(vec![("200 OK", address_result_json("failed"))]);
+    let error = runtime
+        .faucet_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            FailingWriter,
+            Instant::now() + Duration::from_secs(5),
+            "utest",
+            100,
+            false,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("stored failure"));
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "faucet")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn max_send_retains_its_resolved_amount_after_a_result_write_error() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":490,"txid":"max-txid","block_hash":"block","status":"confirmed"}"#;
+    let (url, requests) = serve(vec![
+        (
+            "200 OK",
+            r#"{"available_zatoshi":500,"fee_zatoshi":10,"max_zatoshi":490}"#,
+        ),
+        ("200 OK", confirmed),
+        ("200 OK", confirmed),
+    ]);
+    let client = reqwest::blocking::Client::new();
+    let error = runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &client,
+            PaymentResultWriter::new(0),
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap_err();
+    assert_payment_output_error(error);
+    assert!(
+        requests
+            .recv()
+            .unwrap()
+            .0
+            .starts_with("POST /api/v1/send/quote ")
+    );
+    let original_key = sent_key(&requests.recv().unwrap());
+    let saved = IntentJournal::open(&runtime.instance_dir(&alpha), "send")
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved.values().next(), Some(&original_key));
+    let fingerprint: serde_json::Value =
+        serde_json::from_str(saved.keys().next().unwrap()).unwrap();
+    assert_eq!(fingerprint["amount_zatoshi"], 490);
+    let mut out = Vec::new();
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &client,
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            1,
+            2,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap();
+    let retry = requests.recv().unwrap();
+    assert!(retry.0.starts_with("POST /api/v1/send "));
+    assert_eq!(sent_key(&retry), original_key);
+    let body: serde_json::Value = serde_json::from_str(&retry.1).unwrap();
+    assert_eq!(body["amount_zatoshi"], 490);
+    assert_eq!(json_stdout(&out)["txid"], "max-txid");
+    assert!(
+        requests.try_recv().is_err(),
+        "a retry must not request another quote"
+    );
+    assert!(
+        IntentJournal::open(&runtime.instance_dir(&alpha), "send")
+            .unwrap()
+            .read()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn address_send_submits_the_address_and_its_pool() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"address-send","kind":"send","from_account":2,"to_account":null,"to_address":"tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ","source_pool":"ironwood","destination_pool":"transparent","amount_zatoshi":10000000,"txid":"address-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let (url, requests) = serve(vec![("200 OK", confirmed)]);
+    let mut out = Vec::new();
+
+    runtime
+        .wallet_send_address_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            2,
+            "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ",
+            "ironwood",
+            "transparent",
+            TransferAmount::Exact(10_000_000),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].0.starts_with("POST /api/v1/send "));
+    let body: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+    assert_eq!(body["to_address"], "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ");
+    assert_eq!(body["source_pool"], "ironwood");
+    assert_eq!(body["destination_pool"], "transparent");
+    assert_eq!(body["amount_zatoshi"], 10_000_000);
+    assert!(body.get("to_account").is_none());
+    assert_eq!(
+        json_stdout(&out)["to_address"],
+        "tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ"
+    );
+}
+
+#[test]
+fn wallet_transaction_forwards_only_an_explicit_account() {
+    let txid = "ab".repeat(32);
+    for (account, expected_request) in [
+        (
+            None,
+            format!("GET /api/v1/transactions/{txid}/wallet HTTP/1.1"),
+        ),
+        (
+            Some(2),
+            format!("GET /api/v1/transactions/{txid}/wallet?account=2 HTTP/1.1"),
+        ),
+    ] {
+        let (url, requests) = serve(vec![("200 OK", r#"{"txid":"t"}"#)]);
+        let view = wallet_transaction(
+            &url,
+            &reqwest::blocking::Client::new(),
+            &name("alpha"),
+            &txid,
+            account,
+        )
+        .unwrap();
+
+        assert_eq!(view, serde_json::json!({"txid": "t"}));
+        assert_eq!(requests.recv().unwrap().0, expected_request);
+    }
+}
+
+#[test]
+fn wallet_transaction_output_shows_memos_change_and_spends() {
+    let view = serde_json::json!({
+        "txid": "send",
+        "status": "confirmed",
+        "mined_height": 107,
+        "confirmations": 1,
+        "fee_zatoshi": 10_000,
+        "details": "complete",
+        "outputs": [
+            {"pool": "ironwood", "index": 0, "value_zatoshi": 10_000_000, "from": 1, "to": 2,
+             "to_address": "uregtest1two", "change": false, "memo": {"text": "order 42"}},
+            {"pool": "ironwood", "index": 1, "value_zatoshi": 89_990_000, "from": 1, "to": 1,
+             "to_address": null, "change": true, "memo": null},
+            {"pool": "ironwood", "index": 2, "value_zatoshi": 1, "from": "faucet", "to": 3,
+             "to_address": "uregtest1three", "change": false, "memo": {"hex": "ff01"}},
+            {"pool": "ironwood", "index": 3, "value_zatoshi": 2, "from": 1, "to": null,
+             "to_address": "uregtest1external", "change": false, "memo": {"text": ""}}
+        ],
+        "spends": [{"account": 1, "pool": "ironwood", "value_zatoshi": 100_000_000}]
+    });
+
+    let output = wallet_transaction_lines(&view, None).unwrap();
+    for expected in [
+        "Transaction: send",
+        "Status: confirmed at height 107 (1 confirmation)",
+        "Fee: 0.0001 ZEC",
+        "Details: complete",
+        "ironwood #0  account 1 -> account 2  0.1 ZEC\n    To: uregtest1two\n    Memo: order 42",
+        "ironwood #1  account 1 -> account 1  0.8999 ZEC  (change)",
+        "ironwood #2  faucet -> account 3  0.00000001 ZEC",
+        "ironwood #3  account 1 -> external address  0.00000002 ZEC\n    To: uregtest1external\n    Memo: (empty text)",
+        "Memo (not text): 0xff01",
+        "Spent:\n  account 1  ironwood  1 ZEC",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing `{expected}` from {output}"
+        );
+    }
+}
+
+#[test]
+fn wallet_transaction_output_explains_uninvolved_accounts_and_pending_details() {
+    let view = serde_json::json!({
+        "txid": "elsewhere",
+        "status": "pending",
+        "mined_height": null,
+        "confirmations": 0,
+        "fee_zatoshi": null,
+        "details": "complete",
+        "outputs": [],
+        "spends": []
+    });
+
+    let output = wallet_transaction_lines(&view, None).unwrap();
+    assert!(output.contains("Status: pending"), "{output}");
+    assert!(!output.contains("Details"), "{output}");
+    assert!(
+        output.ends_with("No local account is involved in this transaction."),
+        "{output}"
+    );
+    let filtered = wallet_transaction_lines(&view, Some(3)).unwrap();
+    assert!(
+        filtered.ends_with("Account 3 is not involved in this transaction."),
+        "{filtered}"
+    );
+
+    let mut pending = view.clone();
+    pending["details"] = serde_json::json!("pending");
+    pending["outputs"] = serde_json::json!([{"pool": "ironwood", "index": 0,
+        "value_zatoshi": 1, "from": null, "to": 2, "to_address": null,
+        "change": false, "memo": null}]);
+    let output = wallet_transaction_lines(&pending, None).unwrap();
+    assert!(
+        output.contains("Fee: not recorded by the wallet"),
+        "{output}"
+    );
+    assert!(output.contains("Details: pending."), "{output}");
+    assert!(output.contains("external -> account 2"), "{output}");
 }

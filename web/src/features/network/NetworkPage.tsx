@@ -7,7 +7,7 @@ import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
 import { SakuraMark } from '@/components/ui/SakuraMark';
 import { useStatus } from '@/hooks/queries';
 import { errorMessage } from '@/lib/api';
-import type { WalletSync } from '@/lib/api/schemas';
+import type { Status, WalletSync } from '@/lib/api/schemas';
 import { cn } from '@/lib/cn';
 import { Stat } from '@/components/ui/Stat';
 import { environmentReadiness } from '@/lib/status';
@@ -19,6 +19,25 @@ const ENDPOINT_ROWS = [
   { key: 'lightwalletd', label: 'lightwalletd' },
   { key: 'p2p', label: 'P2P' },
 ] as const;
+
+/** Names the exact block-production rule, not just whether it is automatic. */
+function miningDescription(status: Status): string {
+  // An older server sends no `mining_mode`; its `auto_mine` still tells the two
+  // legacy cases apart.
+  const mode = status.mining_mode ?? (status.auto_mine ? 'auto' : 'manual');
+  switch (mode) {
+    case 'interval':
+      return status.block_time
+        ? `Mining a block every ${status.block_time} seconds`
+        : 'Mining a block on a fixed interval';
+    case 'mempool':
+      return 'Mining a block when the mempool holds new transactions';
+    case 'manual':
+      return 'Mining only on demand';
+    default:
+      return 'Mining on demand for each payment';
+  }
+}
 
 type IndicatorTone = 'positive' | 'warning' | 'negative' | 'neutral';
 
@@ -105,8 +124,7 @@ export function NetworkPage() {
           </span>
           <strong className="my-1.5 block text-xl font-bold tracking-[-0.02em]">{headline}</strong>
           <small className="text-ink-muted block text-[12px]">
-            Auto-mining is {status.data.auto_mine ? 'enabled' : 'disabled'} · blocks are produced on
-            demand
+            {miningDescription(status.data)}
           </small>
         </div>
         <SakuraMark className="text-petal animate-bloom pointer-events-none absolute -right-8 -bottom-10 z-0 size-28 opacity-70" />

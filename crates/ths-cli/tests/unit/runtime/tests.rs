@@ -6,6 +6,8 @@ use std::{
 
 #[path = "tests/client.rs"]
 mod client;
+#[path = "tests/docker.rs"]
+mod docker;
 #[path = "tests/images.rs"]
 mod images;
 #[path = "tests/instance.rs"]
@@ -99,6 +101,16 @@ impl DockerResourceCommands for RecordingDocker {
         };
         match args {
             ["container", "ls", "-a", "--format", "{{.Names}}"] => Ok(listed(&self.containers)),
+            [
+                "container",
+                "ls",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                _,
+                "--format",
+                "{{.ID}}",
+            ] => Ok(String::new()),
             ["volume", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.volumes)),
             ["network", "ls", "--format", "{{.Name}}"] => Ok(listed(&self.networks)),
             [kind, "inspect", target] => {
@@ -153,6 +165,7 @@ struct RecordingHost {
     allocate_delay: Duration,
     ready_delay: Duration,
     run_status: Option<RuntimeStatus>,
+    allocated_offsets: Mutex<Vec<Option<u16>>>,
     while_running: Option<Box<dyn Fn() -> Ended>>,
     real_child: bool,
     stopping_seen: Arc<AtomicBool>,
@@ -175,6 +188,7 @@ impl RecordingHost {
                 allocate_delay: Duration::ZERO,
                 ready_delay: Duration::ZERO,
                 run_status: None,
+                allocated_offsets: Mutex::new(Vec::new()),
                 while_running: None,
                 real_child: false,
                 stopping_seen: Arc::new(AtomicBool::new(false)),
@@ -211,6 +225,7 @@ fn verified_report() -> CleanupReport {
         failures: Vec::new(),
         recovery_path: None,
         helpers_finished: true,
+        environment_found: true,
     }
 }
 
@@ -284,6 +299,7 @@ impl StartHost for RecordingHost {
                 failures: vec![message.clone()],
                 recovery_path: Some(runtime.recovery_path(name)),
                 helpers_finished: true,
+                environment_found: true,
             });
         }
         Ok(verified_report())
@@ -312,16 +328,19 @@ impl StartHost for RecordingHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         &self,
         _runtime: &Runtime,
         name: &InstanceName,
         shutdown: &Shutdown,
-        _port_offset: u16,
+        port_offset: Option<u16>,
+        _mining: MiningConfig,
         _context: &LifecycleContext,
         _journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
         self.push(&format!("allocate:{name}"));
+        self.allocated_offsets.lock().unwrap().push(port_offset);
         std::thread::sleep(self.allocate_delay);
         shutdown.check()?;
         Ok(AllocatedInstance {
@@ -508,12 +527,25 @@ use deletion::{ScriptedEvents, watched};
 thread_local! {
     /// Points this test thread's Docker commands at a daemon that does not exist.
     pub(super) static DOCKER_UNREACHABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Points this test thread's Docker commands at a stub program instead of
+    /// the real `docker`, so a failing invocation can be reproduced exactly.
+    pub(super) static DOCKER_PROGRAM: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn with_unreachable_docker<T>(test: impl FnOnce() -> T) -> T {
     DOCKER_UNREACHABLE.set(true);
     let result = test();
     DOCKER_UNREACHABLE.set(false);
+    result
+}
+
+/// Runs `test` with every Docker command in this thread replaced by `program`.
+#[cfg(unix)]
+fn with_docker_program<T>(program: PathBuf, test: impl FnOnce() -> T) -> T {
+    DOCKER_PROGRAM.with(|slot| *slot.borrow_mut() = Some(program));
+    let result = test();
+    DOCKER_PROGRAM.with(|slot| *slot.borrow_mut() = None);
     result
 }
 

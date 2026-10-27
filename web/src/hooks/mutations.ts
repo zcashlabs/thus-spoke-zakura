@@ -24,7 +24,14 @@ export type { SendVariables, FaucetVariables } from './payment-identity';
 
 /** Everything a successful money movement invalidates. */
 function walletKeys() {
-  return [[...queryKeys.accounts], ['activity'], [...queryKeys.status], ['blocks'], ['send-quote']];
+  return [
+    [...queryKeys.accounts],
+    ['activity'],
+    [...queryKeys.status],
+    ['blocks'],
+    ['send-quote'],
+    ['wallet-transaction'],
+  ];
 }
 
 function useInvalidateWallet() {
@@ -53,6 +60,9 @@ function operationKey<T>(
         key = idempotencyKey();
       }
       storageArea.setItem(itemKey, key);
+      if (storageArea.getItem(itemKey) !== key) {
+        throw new Error('Could not retain the operation key.');
+      }
       return key;
     },
     clear(variables: T) {
@@ -231,7 +241,10 @@ export function useSend(lifecycle?: PaymentLifecycle) {
 export function useFaucet(lifecycle?: PaymentLifecycle) {
   return usePaymentMutation(
     'faucet',
-    (variables: FaucetVariables, key) => api.faucet({ ...variables, idempotency_key: key }),
+    (variables: FaucetVariables, key) =>
+      'address' in variables
+        ? api.faucetAddress({ ...variables, idempotency_key: key })
+        : api.faucet({ ...variables, idempotency_key: key }),
     lifecycle,
   );
 }
@@ -255,19 +268,43 @@ export function usePaymentRequest(): UseMutationResult<
   return useMutation({ mutationFn: (variables) => api.paymentRequest(variables) });
 }
 
-export function useStartMining(): UseMutationResult<MiningJob, Error, number> {
+export function useStartMining(): UseMutationResult<MiningJob, Error, number> & {
+  cleanupError: string | null;
+} {
   const queryClient = useQueryClient();
-  const operation = operationKey('mine', (blocks: number) => String(blocks));
-  return useMutation({
-    mutationFn: (blocks: number) => {
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const mutation = useMutation({
+    mutationFn: async (blocks: number) => {
+      setCleanupError(null);
       const state = queryClient.getQueryData<{ job: MiningJob | null }>(queryKeys.mining)?.job
         ?.state;
-      if (state === 'completed' || state === 'failed') operation.clear(blocks);
-      return api.startMining(blocks, operation.keyFor(blocks));
+      let key: string;
+      let clear: () => void;
+      try {
+        // Storage policy may deny even the getter. Resolve it only on submit,
+        // and retain the retry identity before the server can accept a job.
+        const operation = operationKey('mine', (blocks: number) => String(blocks));
+        if (state === 'completed' || state === 'failed') operation.clear(blocks);
+        key = operation.keyFor(blocks);
+        clear = () => operation.clear(blocks);
+      } catch (cause) {
+        throw new Error(
+          'Browser session storage is unavailable. Allow site storage and retry. No mining request was sent.',
+          { cause },
+        );
+      }
+      const job = await api.startMining(blocks, key);
+      try {
+        // Acceptance is authoritative even if storage cleanup becomes denied.
+        // Use the submitted handle so success never reacquires sessionStorage.
+        clear();
+      } catch (error) {
+        setCleanupError(error instanceof DOMException ? error.message : errorMessage(error));
+      }
+      return job;
     },
     retry: false,
-    onSuccess: async (job, blocks) => {
-      operation.clear(blocks);
+    onSuccess: async (job) => {
       queryClient.setQueryData(queryKeys.mining, { job });
       await queryClient.invalidateQueries({ queryKey: queryKeys.mining });
     },
@@ -275,4 +312,5 @@ export function useStartMining(): UseMutationResult<MiningJob, Error, number> {
       await queryClient.invalidateQueries({ queryKey: queryKeys.mining });
     },
   });
+  return { ...mutation, cleanupError };
 }

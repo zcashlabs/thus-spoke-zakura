@@ -54,6 +54,77 @@ struct FaucetResult {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct ChainTip {
+    height: u64,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ChainChangeResult {
+    depth: u32,
+    old_tip: ChainTip,
+    new_tip: ChainTip,
+    removed_hashes: Vec<String>,
+    replacement_hashes: Vec<String>,
+    retained_txids: Vec<String>,
+    failed_transactions: Vec<TransactionFailure>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TransactionFailure {
+    txid: String,
+    error: String,
+}
+
+pub(crate) fn change_chain(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    operation: &str,
+    depth: u32,
+    keep_txs: bool,
+) -> Result<ChainChangeResult> {
+    let body = if operation == "reorg" {
+        serde_json::json!({"depth": depth, "keep_txs": keep_txs})
+    } else {
+        serde_json::json!({"depth": depth})
+    };
+    client
+        .post(format!("{dashboard}/api/v1/{operation}"))
+        .json(&body)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .context("chain operation failed; inspect the current tip before retrying")
+}
+
+pub(crate) fn render_chain_change(
+    result: &ChainChangeResult,
+    name: &InstanceName,
+    operation: &str,
+    json: bool,
+) -> Result<String> {
+    if json {
+        return Ok(serde_json::to_string_pretty(result)?);
+    }
+    let action = if operation == "reorg" {
+        "Reorganized"
+    } else {
+        "Rolled back"
+    };
+    let mut output = format!(
+        "{action} {} blocks on {name}.\nNew tip: {} ({})",
+        result.depth, result.new_tip.height, result.new_tip.hash
+    );
+    for failure in &result.failed_transactions {
+        output.push_str(&format!(
+            "\nNot retained: {}: {}",
+            failure.txid, failure.error
+        ));
+    }
+    Ok(output)
+}
+
 fn confirmed_status() -> String {
     "confirmed".to_owned()
 }
@@ -77,17 +148,32 @@ pub(crate) struct Activity {
 #[derive(Debug, Deserialize)]
 struct ActivityHistoryEntry {
     kind: String,
+    #[serde(default)]
+    direction: Option<String>,
     from_account: Option<u8>,
     to_account: Option<u8>,
     #[serde(default)]
+    from_accounts: Vec<u8>,
+    #[serde(default)]
+    to_accounts: Vec<u8>,
+    #[serde(default)]
     to_address: Option<String>,
-    source_pool: String,
-    destination_pool: String,
+    #[serde(default)]
+    source_pool: Option<String>,
+    #[serde(default)]
+    destination_pool: Option<String>,
+    #[serde(default)]
+    source_pools: Vec<String>,
+    #[serde(default)]
+    destination_pools: Vec<String>,
     amount_zatoshi: u64,
     txid: String,
     block_hash: Option<String>,
+    #[serde(default)]
+    mined_height: Option<u32>,
     status: String,
-    created_at: String,
+    #[serde(default)]
+    created_at: Option<String>,
     #[serde(default)]
     last_error: Option<String>,
 }
@@ -299,8 +385,10 @@ struct PaymentUri {
     memo: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct SendQuote {
+    available_zatoshi: u64,
+    fee_zatoshi: u64,
     max_zatoshi: u64,
 }
 
@@ -308,6 +396,22 @@ struct SendQuote {
 pub(crate) enum TransferAmount {
     Exact(u64),
     Max,
+}
+
+fn send_quote_request(
+    client: &reqwest::blocking::Client,
+    dashboard: &str,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> reqwest::blocking::RequestBuilder {
+    client
+        .post(format!("{dashboard}/api/v1/send/quote"))
+        .json(&serde_json::json!({
+            "from_account": from,
+            "source_pool": source_pool,
+            "destination_pool": destination_pool,
+        }))
 }
 
 fn quote_max_amount(
@@ -322,18 +426,15 @@ fn quote_max_amount(
     let timeout = remaining(deadline)
         .ok_or_else(|| anyhow!("maximum transfer quote timed out"))
         .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
-    let quote: SendQuote = client
-        .post(format!("{dashboard}/api/v1/send/quote"))
-        .json(&serde_json::json!({
-            "from_account": from,
-            "source_pool": source_pool,
-            "destination_pool": destination_pool,
-        }))
-        .timeout(timeout)
-        .send()
-        .map_err(anyhow::Error::from)
-        .and_then(decode_response)
-        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
+    let quote: SendQuote =
+        send_quote_request(client, dashboard, from, source_pool, destination_pool)
+            .timeout(timeout)
+            .send()
+            .map_err(anyhow::Error::from)
+            .and_then(decode_response)
+            .with_context(|| {
+                format!("asking environment {name} for the maximum transfer amount")
+            })?;
     if quote.max_zatoshi == 0 {
         bail!(
             "account {from} has no spendable {source_pool} funds remaining after the network fee"
@@ -350,9 +451,24 @@ impl Runtime {
         }
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(300))
             .build()?;
         Ok((dashboard, client))
+    }
+
+    pub fn explorer(
+        &self,
+        name: &InstanceName,
+        resource: &str,
+        id: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let value = explorer_data(&dashboard, &client, resource, id)
+            .with_context(|| format!("reading explorer {resource} from environment {name}"))?;
+        println!("{}", render_explorer(&value, json)?);
+        Ok(())
     }
 
     pub fn mine(&self, name: &InstanceName, blocks: u32, json: bool) -> Result<()> {
@@ -466,6 +582,26 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn change_chain(
+        &self,
+        name: &InstanceName,
+        operation: &str,
+        depth: u32,
+        keep_txs: bool,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let result = change_chain(&dashboard, &client, operation, depth, keep_txs)?;
+        println!("{}", render_chain_change(&result, name, operation, json)?);
+        if !result.failed_transactions.is_empty() {
+            bail!(
+                "chain changed, but {} transaction(s) could not be retained",
+                result.failed_transactions.len()
+            );
+        }
+        Ok(())
+    }
+
     pub fn faucet(
         &self,
         name: &InstanceName,
@@ -560,11 +696,11 @@ impl Runtime {
         if result.status == "confirmed" && result.block_hash.is_none() {
             bail!("faucet reported confirmation without a block hash; retry the same command");
         }
-        journal.clear(&[(&intent, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&result)?)?;
         }
         if result.status == "failed" {
+            journal.clear(&[(&intent, &idempotency_key)])?;
             bail!(
                 "faucet payment to {} failed: {}",
                 result.address,
@@ -583,6 +719,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(&intent, &idempotency_key)])?;
         Ok(())
     }
 
@@ -683,17 +821,6 @@ impl Runtime {
                 }
             }
         }
-        if followed
-            .iter()
-            .all(|outcome| matches!(outcome, Followed::Settled(_)))
-        {
-            let settled: Vec<_> = intents
-                .iter()
-                .zip(&keys)
-                .map(|(intent, key)| (intent.as_str(), key.as_str()))
-                .collect();
-            journal.clear(&settled)?;
-        }
         if json {
             let pending: Vec<_> = pending.iter().map(|(_, value)| value).collect();
             writeln!(
@@ -724,6 +851,18 @@ impl Runtime {
             for failure in &failures {
                 eprintln!("Failed to fund {failure}");
             }
+        }
+        // Release the batch together, only after its results were written.
+        if followed
+            .iter()
+            .all(|outcome| matches!(outcome, Followed::Settled(_)))
+        {
+            let settled: Vec<_> = intents
+                .iter()
+                .zip(&keys)
+                .map(|(intent, key)| (intent.as_str(), key.as_str()))
+                .collect();
+            journal.clear(&settled)?;
         }
         if failures.is_empty() && pending.is_empty() {
             Ok(())
@@ -792,6 +931,75 @@ impl Runtime {
             serde_json::json!({
                 "from_account": from,
                 "to_account": to,
+                "source_pool": source_pool,
+                "destination_pool": destination_pool,
+                "memo": memo,
+            }),
+            source_pool,
+            destination_pool,
+            memo,
+            json,
+        )
+    }
+
+    /// Pays an external Regtest address, like the dashboard's "Other address"
+    /// destination. The server validates the address and its pool.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wallet_send_address(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        address: &str,
+        source_pool: &str,
+        destination_pool: &str,
+        amount: TransferAmount,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_send_address_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            Instant::now() + PAYMENT_WAIT,
+            from,
+            address,
+            source_pool,
+            destination_pool,
+            amount,
+            memo,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_send_address_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        out: impl std::io::Write,
+        deadline: Instant,
+        from: u8,
+        address: &str,
+        source_pool: &str,
+        destination_pool: &str,
+        amount: TransferAmount,
+        memo: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
+        self.submit_transfer(
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            from,
+            amount,
+            serde_json::json!({
+                "from_account": from,
+                "to_address": address,
                 "source_pool": source_pool,
                 "destination_pool": destination_pool,
                 "memo": memo,
@@ -1090,11 +1298,11 @@ impl Runtime {
                 return Err(error.context(format!("asking environment {name} to send")));
             }
         };
-        journal.clear(&[(fingerprint, &idempotency_key)])?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&activity)?)?;
         }
         if activity.status == "failed" {
+            journal.clear(&[(fingerprint, &idempotency_key)])?;
             bail!(
                 "payment from account {from} to {} failed: {}",
                 activity.recipient(),
@@ -1122,6 +1330,8 @@ impl Runtime {
                 writeln!(out, "Confirmed in: {block_hash}")?;
             }
         }
+        // Keep the same payment on retry if any result write failed.
+        journal.clear(&[(fingerprint, &idempotency_key)])?;
         Ok(())
     }
 }
@@ -1137,6 +1347,56 @@ pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
         bail!("rejected ({status}): {detail}");
     }
     response.json().context("decoding response")
+}
+
+pub(crate) fn explorer_data(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    resource: &str,
+    id: Option<&str>,
+) -> Result<serde_json::Value> {
+    let tip;
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let status: serde_json::Value = client
+                .get(format!("{dashboard}/api/v1/status"))
+                .send()
+                .map_err(anyhow::Error::from)
+                .and_then(decode_response)?;
+            tip = status
+                .pointer("/node/bestblockhash")
+                .and_then(serde_json::Value::as_str)
+                .context("the environment did not report a node tip")?
+                .to_owned();
+            &tip
+        }
+    };
+    if matches!(id, "." | "..") {
+        bail!("invalid explorer identifier: {id:?}");
+    }
+    let mut url = reqwest::Url::parse(&format!("{dashboard}/api/v1/{resource}"))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("invalid dashboard URL"))?
+        .push(id);
+    client
+        .get(url)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+}
+
+pub(crate) fn render_explorer(value: &serde_json::Value, json: bool) -> Result<String> {
+    if json {
+        return Ok(serde_json::to_string_pretty(value)?);
+    }
+    value
+        .as_object()
+        .context("expected an explorer object")?
+        .iter()
+        .map(|(key, value)| Ok(format!("{key}: {}", serde_json::to_string_pretty(value)?)))
+        .collect::<Result<Vec<_>>>()
+        .map(|lines| lines.join("\n"))
 }
 
 /// Only retries a transport-level send failure, where it is unknown whether
@@ -1233,16 +1493,49 @@ pub(crate) fn activity_history(
 fn activity_kind(activity: &ActivityHistoryEntry) -> &'static str {
     if activity.kind == "faucet" {
         "faucet"
+    } else if activity.direction.as_deref() == Some("incoming") {
+        "receive"
     } else {
         match (
-            activity.source_pool.as_str(),
-            activity.destination_pool.as_str(),
+            activity.source_pool.as_deref(),
+            activity.destination_pool.as_deref(),
         ) {
-            ("transparent", "ironwood") => "shield",
-            ("ironwood", "transparent") => "unshield",
+            (Some("transparent"), Some("ironwood")) => "shield",
+            (Some("ironwood"), Some("transparent")) => "unshield",
             _ => "send",
         }
     }
+}
+
+fn activity_pool(primary: Option<&str>, pools: &[String]) -> String {
+    primary.map(str::to_owned).unwrap_or_else(|| {
+        if pools.is_empty() {
+            "unknown pool".to_owned()
+        } else {
+            pools.join("+")
+        }
+    })
+}
+
+fn activity_account(accounts: &[u8], account: Option<u8>) -> Option<String> {
+    match accounts {
+        [] => account.map(|account| format!("account {account}")),
+        [account] => Some(format!("account {account}")),
+        accounts => Some(format!(
+            "accounts {}",
+            accounts
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn activity_recipient(entry: &ActivityHistoryEntry) -> String {
+    activity_account(&entry.to_accounts, entry.to_account)
+        .or_else(|| entry.to_address.clone())
+        .unwrap_or_else(|| "an unknown recipient".to_owned())
 }
 
 pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
@@ -1255,15 +1548,24 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
         .map(|value| {
             let entry: ActivityHistoryEntry =
                 serde_json::from_value(value.clone()).context("decoding wallet activity entry")?;
+            let source_pool = activity_pool(entry.source_pool.as_deref(), &entry.source_pools);
+            let destination_pool =
+                activity_pool(entry.destination_pool.as_deref(), &entry.destination_pools);
             let source = if entry.kind == "faucet" {
-                format!("faucet ({})", entry.source_pool)
+                format!("faucet ({source_pool})")
+            } else if entry.direction.as_deref() == Some("incoming")
+                && entry.from_accounts.is_empty()
+                && entry.from_account.is_none()
+            {
+                format!("external ({source_pool})")
             } else {
-                match entry.from_account {
-                    Some(account) => format!("account {account} ({})", entry.source_pool),
-                    None => format!("unknown account ({})", entry.source_pool),
-                }
+                format!(
+                    "{} ({source_pool})",
+                    activity_account(&entry.from_accounts, entry.from_account)
+                        .unwrap_or_else(|| "unknown account".to_owned())
+                )
             };
-            let destination = recipient(entry.to_account, entry.to_address.as_deref());
+            let destination = activity_recipient(&entry);
             let mut lines = vec![
                 format!(
                     "{}  {}  {} ZEC",
@@ -1271,10 +1573,7 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
                     entry.status,
                     format_zec(entry.amount_zatoshi)
                 ),
-                format!(
-                    "  Route: {source} -> {destination} ({})",
-                    entry.destination_pool
-                ),
+                format!("  Route: {source} -> {destination} ({destination_pool})",),
             ];
             if !entry.txid.trim().is_empty() {
                 lines.push(format!("  Transaction: {}", entry.txid));
@@ -1285,11 +1584,154 @@ pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {
             if let Some(error) = &entry.last_error {
                 lines.push(format!("  Error: {error}"));
             }
-            lines.push(format!("  Created: {}", entry.created_at));
+            if let Some(created_at) = &entry.created_at {
+                lines.push(format!("  Created: {created_at}"));
+            } else if let Some(height) = entry.mined_height {
+                lines.push(format!("  Mined at height: {height}"));
+            }
             Ok(lines.join("\n"))
         })
         .collect::<Result<Vec<_>>>()
         .map(|entries| entries.join("\n\n"))
+}
+
+pub(crate) fn wallet_transaction(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    txid: &str,
+    account: Option<u8>,
+) -> Result<serde_json::Value> {
+    let mut request = client.get(format!("{dashboard}/api/v1/transactions/{txid}/wallet"));
+    if let Some(account) = account {
+        request = request.query(&[("account", account)]);
+    }
+    request
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| format!("asking environment {name} for wallet transaction {txid}"))
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionView {
+    txid: String,
+    status: String,
+    mined_height: Option<u64>,
+    confirmations: u64,
+    fee_zatoshi: Option<u64>,
+    details: String,
+    outputs: Vec<WalletTransactionOutput>,
+    spends: Vec<WalletTransactionSpend>,
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionOutput {
+    pool: String,
+    index: u32,
+    value_zatoshi: u64,
+    from: Option<serde_json::Value>,
+    to: Option<serde_json::Value>,
+    to_address: Option<String>,
+    change: bool,
+    memo: Option<WalletTransactionMemo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WalletTransactionMemo {
+    Text(String),
+    Hex(String),
+}
+
+#[derive(Deserialize)]
+struct WalletTransactionSpend {
+    account: u8,
+    pool: String,
+    value_zatoshi: u64,
+}
+
+fn wallet_party(party: Option<&serde_json::Value>, unknown: &str) -> String {
+    match party {
+        Some(serde_json::Value::Number(account)) => format!("account {account}"),
+        Some(serde_json::Value::String(name)) => name.clone(),
+        _ => unknown.to_owned(),
+    }
+}
+
+/// `account` is the `--account` filter the view was read with, if any.
+pub(crate) fn wallet_transaction_lines(
+    value: &serde_json::Value,
+    account: Option<u8>,
+) -> Result<String> {
+    let view: WalletTransactionView =
+        serde_json::from_value(value.clone()).context("decoding wallet transaction")?;
+    let mut lines = vec![format!("Transaction: {}", view.txid)];
+    lines.push(match view.mined_height {
+        Some(height) => format!(
+            "  Status: {} at height {height} ({} confirmation{})",
+            view.status,
+            view.confirmations,
+            if view.confirmations == 1 { "" } else { "s" }
+        ),
+        None => format!("  Status: {}", view.status),
+    });
+    if view.outputs.is_empty() && view.spends.is_empty() {
+        lines.push(match account {
+            Some(account) => format!("Account {account} is not involved in this transaction."),
+            None => "No local account is involved in this transaction.".to_owned(),
+        });
+        return Ok(lines.join("\n"));
+    }
+    lines.push(match view.fee_zatoshi {
+        Some(fee) => format!("  Fee: {} ZEC", format_zec(fee)),
+        None => "  Fee: not recorded by the wallet".to_owned(),
+    });
+    lines.push(match view.details.as_str() {
+        "complete" => "  Details: complete".to_owned(),
+        "pending" => "  Details: pending. The wallet has not fetched the full transaction yet, so memos and change flags may still change.".to_owned(),
+        "unavailable" => "  Details: unavailable. The wallet could not fetch the full transaction, so memos and change flags may be missing.".to_owned(),
+        other => format!("  Details: {other}"),
+    });
+    if !view.outputs.is_empty() {
+        lines.push("Outputs:".to_owned());
+    }
+    for output in &view.outputs {
+        lines.push(format!(
+            "  {} #{}  {} -> {}  {} ZEC{}",
+            output.pool,
+            output.index,
+            wallet_party(output.from.as_ref(), "external"),
+            wallet_party(output.to.as_ref(), "external address"),
+            format_zec(output.value_zatoshi),
+            if output.change { "  (change)" } else { "" }
+        ));
+        if let Some(address) = &output.to_address {
+            lines.push(format!("    To: {address}"));
+        }
+        match &output.memo {
+            Some(WalletTransactionMemo::Text(text)) if text.is_empty() => {
+                lines.push("    Memo: (empty text)".to_owned())
+            }
+            Some(WalletTransactionMemo::Text(text)) => lines.push(format!("    Memo: {text}")),
+            Some(WalletTransactionMemo::Hex(hex)) => {
+                lines.push(format!("    Memo (not text): 0x{hex}"))
+            }
+            None => {}
+        }
+    }
+    if !view.spends.is_empty() {
+        lines.push("Spent:".to_owned());
+    }
+    for spend in &view.spends {
+        lines.push(format!(
+            "  account {}  {}  {} ZEC",
+            spend.account,
+            spend.pool,
+            format_zec(spend.value_zatoshi)
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 pub(crate) fn render_activity_history(
@@ -1335,6 +1777,23 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn wallet_transaction(
+        &self,
+        name: &InstanceName,
+        txid: &str,
+        account: Option<u8>,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        let view = wallet_transaction(&dashboard, &client, name, txid, account)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        } else {
+            println!("{}", wallet_transaction_lines(&view, account)?);
+        }
+        Ok(())
+    }
+
     pub fn wallet_balances(&self, name: &InstanceName, json: bool) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
         let accounts = account_balances(&dashboard, &client, name)?;
@@ -1342,6 +1801,55 @@ impl Runtime {
             println!("{}", serde_json::to_string_pretty(&accounts)?);
         } else {
             println!("{}", balance_lines(&accounts));
+        }
+        Ok(())
+    }
+
+    pub fn wallet_quote(
+        &self,
+        name: &InstanceName,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        let (dashboard, client) = self.instance_client(name)?;
+        self.wallet_quote_with(
+            name,
+            &dashboard,
+            &client,
+            std::io::stdout().lock(),
+            from,
+            source_pool,
+            destination_pool,
+            json,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wallet_quote_with(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+        json: bool,
+    ) -> Result<()> {
+        require_wallet_ready(dashboard, client, name)?;
+        let quote = send_quote(dashboard, client, name, from, source_pool, destination_pool)?;
+        let route = RouteQuote {
+            from_account: from,
+            source_pool,
+            destination_pool,
+            quote: &quote,
+        };
+        if json {
+            writeln!(out, "{}", serde_json::to_string_pretty(&route)?)?;
+        } else {
+            writeln!(out, "{}", quote_lines(name, &route))?;
         }
         Ok(())
     }
@@ -1367,11 +1875,11 @@ struct WalletSyncStatus {
     error: Option<String>,
 }
 
-pub(crate) fn account_balances(
+fn require_wallet_ready(
     dashboard: &str,
     client: &reqwest::blocking::Client,
     name: &InstanceName,
-) -> Result<Vec<Account>> {
+) -> Result<()> {
     let status: ServerStatus = client
         .get(format!("{dashboard}/api/v1/status"))
         .send()
@@ -1379,7 +1887,7 @@ pub(crate) fn account_balances(
         .and_then(decode_response)
         .with_context(|| format!("checking wallet sync for environment {name}"))?;
     match status.wallet_sync.state.as_str() {
-        "ready" => {}
+        "ready" => Ok(()),
         "syncing" => bail!("wallet for environment {name} is still syncing; try again later"),
         "error" => bail!(
             "wallet synchronization failed for environment {name}: {}",
@@ -1391,6 +1899,14 @@ pub(crate) fn account_balances(
         ),
         state => bail!("wallet for environment {name} has unknown sync state `{state}`"),
     }
+}
+
+pub(crate) fn account_balances(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+) -> Result<Vec<Account>> {
+    require_wallet_ready(dashboard, client, name)?;
     client
         .get(format!("{dashboard}/api/v1/accounts"))
         .send()
@@ -1416,6 +1932,63 @@ pub(crate) fn balance_lines(accounts: &[Account]) -> String {
         .join("\n")
 }
 
+fn send_quote(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    from: u8,
+    source_pool: &str,
+    destination_pool: &str,
+) -> Result<SendQuote> {
+    send_quote_request(client, dashboard, from, source_pool, destination_pool)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| {
+            format!(
+                "asking environment {name} to quote account {from} from {source_pool} to {destination_pool}"
+            )
+        })
+}
+
+#[derive(Serialize)]
+struct RouteQuote<'a> {
+    from_account: u8,
+    source_pool: &'a str,
+    destination_pool: &'a str,
+    #[serde(flatten)]
+    quote: &'a SendQuote,
+}
+
+fn quote_lines(name: &InstanceName, route: &RouteQuote) -> String {
+    let RouteQuote {
+        from_account,
+        source_pool,
+        destination_pool,
+        quote,
+    } = route;
+    let mut lines = vec![
+        format!(
+            "Maximum-spend quote for account {from_account} ({source_pool} -> {destination_pool}) on {name}"
+        ),
+        format!(
+            "  Available     {} ZEC",
+            format_zec(quote.available_zatoshi)
+        ),
+        format!("  Fee           {} ZEC", format_zec(quote.fee_zatoshi)),
+        format!("  Maximum send  {} ZEC", format_zec(quote.max_zatoshi)),
+    ];
+    if quote.max_zatoshi == 0 {
+        lines.push(format!(
+            "Account {from_account} has nothing spendable in the {source_pool} pool after the fee."
+        ));
+    }
+    lines.push(
+        "This is a snapshot of the current wallet, not a reservation. Nothing was sent.".to_owned(),
+    );
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeStatus {
     pub(crate) node_height: Option<u64>,
@@ -1427,6 +2000,7 @@ pub(crate) struct RuntimeStatus {
 }
 pub(crate) fn runtime_status(endpoints: &Endpoints, timeout: Duration) -> Result<RuntimeStatus> {
     let response = reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(timeout)
         .build()?
         .get(format!("{}/api/v1/status", endpoints.dashboard))

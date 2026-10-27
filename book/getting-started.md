@@ -9,6 +9,7 @@ network, volumes, and host ports. The default name is `default`. Starting it
 again creates a **fresh** chain and wallet after cleanup succeeds; stopping
 it requests deletion of its data. Check the command result before assuming
 cleanup completed.
+
 An **image** is the built template from which Docker starts a container;
 changing source files does not alter an image that already exists.
 
@@ -131,8 +132,10 @@ default: running
   P2P          127.0.0.1:18233
 ```
 
-`ths status` reports whether the app container is running and prints
-endpoints. It does **not** report the node height or wallet scan status.
+`ths status` reports the combined app, Zakura, and lightwalletd container state
+and prints endpoints. It exits nonzero unless all three services are running.
+It does **not** report the node height or wallet scan status; use `ths wait`
+when a script needs the node, index, and wallet settled at one tip.
 `ths endpoints --json` reports these keys:
 
 | Key | Owner and purpose |
@@ -144,7 +147,7 @@ endpoints. It does **not** report the node height or wallet scan status.
 | `network` | The chain this instance runs: always `"regtest"`. |
 | `tls` | Always `false`; nothing here uses TLS. |
 
-Host ports are **fixed defaults**, all published on `127.0.0.1`: dashboard
+`ths start` uses **fixed defaults**, all published on `127.0.0.1`: dashboard
 `32805`, Zakura RPC `18232`, P2P `18233`, lightwalletd `9067`. They do not
 change between runs, and the launcher never picks a substitute — if one is
 occupied, startup fails and names it. `ths start --port-offset <N>` shifts
@@ -158,7 +161,7 @@ wallet sync state if you need more than process status.
 
 ## Give another experiment its own name
 
-A second instance needs its own ports. Since every instance wants the same
+A second instance needs its own ports. Since every `ths start` wants the same
 four defaults, the name alone is not enough:
 
 ```console
@@ -186,8 +189,9 @@ ths --name alice status
 ths --name alice endpoints --json
 ```
 
-Each name gets its own chain, wallet, volumes, and cleanup. The offset belongs to the `start` that created the
-instance; later commands find its ports from the instance record.
+Each name gets its own chain, wallet, volumes, and cleanup. The offset belongs
+to the `start` that created the instance; later commands find its ports from
+the instance record.
 
 ## Stop deliberately
 

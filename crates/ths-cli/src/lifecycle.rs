@@ -101,6 +101,12 @@ pub(crate) enum OutputMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnTimeout {
+    Kill,
+    LeaveRunning,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandFailureKind {
     Cancelled,
     TimedOut,
@@ -253,6 +259,27 @@ pub(crate) fn run(
     )
 }
 
+pub(crate) fn run_leaving_running_on_timeout(
+    command: &mut Command,
+    deadline: Deadline,
+    cancellation: Cancellation<'_>,
+    mode: OutputMode,
+    policy: &LifecyclePolicy,
+    helpers: &mut HelperSet,
+) -> Result<CapturedOutput, CommandFailure> {
+    run_with(
+        command,
+        deadline,
+        cancellation,
+        mode,
+        policy,
+        helpers,
+        &RealChildOps,
+        false,
+        OnTimeout::LeaveRunning,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_observed(
     command: &mut Command,
@@ -263,6 +290,31 @@ pub(crate) fn run_observed(
     helpers: &mut HelperSet,
     ops: &dyn ChildOps,
     fail_nonblocking: bool,
+) -> Result<CapturedOutput, CommandFailure> {
+    run_with(
+        command,
+        deadline,
+        cancellation,
+        mode,
+        policy,
+        helpers,
+        ops,
+        fail_nonblocking,
+        OnTimeout::Kill,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with(
+    command: &mut Command,
+    deadline: Deadline,
+    cancellation: Cancellation<'_>,
+    mode: OutputMode,
+    policy: &LifecyclePolicy,
+    helpers: &mut HelperSet,
+    ops: &dyn ChildOps,
+    fail_nonblocking: bool,
+    on_timeout: OnTimeout,
 ) -> Result<CapturedOutput, CommandFailure> {
     let command_name = command_label(command);
     if cancellation.requested() || deadline.expired() {
@@ -318,6 +370,16 @@ pub(crate) fn run_observed(
             configure_stdio(&mut child)
         };
         if let Err(error) = setup {
+            if on_timeout == OnTimeout::LeaveRunning {
+                return Err(failure(
+                    CommandFailureKind::Capture,
+                    &command_name,
+                    &format!("{error}; left running so its result is not lost"),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                ));
+            }
             let reaped = match terminate_and_reap(&mut child, deadline, policy.poll, ops) {
                 Ok(()) => true,
                 Err(detail) => {
@@ -367,6 +429,17 @@ pub(crate) fn run_observed(
             );
         }
         if let Some(mut error) = capture_error.take() {
+            if on_timeout == OnTimeout::LeaveRunning {
+                error.push_str("; left running so its result is not lost");
+                return Err(failure(
+                    CommandFailureKind::Capture,
+                    &command_name,
+                    &error,
+                    stdout,
+                    stderr,
+                    false,
+                ));
+            }
             if let Err(kill_error) = ops.kill(&mut child) {
                 error.push_str(&format!("; kill failed: {kill_error}"));
             }
@@ -404,10 +477,12 @@ pub(crate) fn run_observed(
             }
             Ok(None) => {}
             Err(error) => {
-                helpers.pending.push(PendingHelper {
-                    child,
-                    command: command_name.clone(),
-                });
+                if on_timeout == OnTimeout::Kill {
+                    helpers.pending.push(PendingHelper {
+                        child,
+                        command: command_name.clone(),
+                    });
+                }
                 return Err(failure(
                     CommandFailureKind::Reaping,
                     &command_name,
@@ -425,6 +500,16 @@ pub(crate) fn run_observed(
             } else {
                 CommandFailureKind::TimedOut
             };
+            if kind == CommandFailureKind::TimedOut && on_timeout == OnTimeout::LeaveRunning {
+                return Err(failure(
+                    kind,
+                    &command_name,
+                    "left running so its result is not lost",
+                    stdout,
+                    stderr,
+                    false,
+                ));
+            }
             if let Err(error) = ops.kill(&mut child) {
                 helpers.pending.push(PendingHelper {
                     child,
@@ -547,7 +632,7 @@ fn finish_exited(
         Err(failure(
             CommandFailureKind::Nonzero,
             &command_name,
-            &format!("exit status {status}"),
+            &status.to_string(),
             stdout,
             stderr,
             true,

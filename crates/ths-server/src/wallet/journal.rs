@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 const PREPARED_PAYMENTS_MIGRATION_ID: Uuid =
     Uuid::from_u128(0x695f93ac_6935_47e8_8f06_017b1d7ec3aa);
@@ -55,6 +56,31 @@ pub(super) fn prepared_payment(db: &mut Db, activity_id: &str) -> Result<Option<
             .optional()?)
     })
 }
+
+pub(super) fn prepared_payment_txids(
+    db: &mut Db,
+    activity_ids: &[String],
+) -> Result<HashMap<String, String>> {
+    db.transactionally_with_extension::<_, _, anyhow::Error>(|_, ext| {
+        activity_ids
+            .iter()
+            .filter_map(|activity_id| {
+                match ext
+                    .query_row(
+                        "SELECT txid FROM ext_tsz_prepared_payments WHERE activity_id=?1",
+                        [activity_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                {
+                    Ok(Some(txid)) => Some(Ok((activity_id.clone(), txid))),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error.into())),
+                }
+            })
+            .collect()
+    })
+}
 pub struct PreparedPayment {
     pub txid: String,
     pub raw_transaction: Vec<u8>,
@@ -82,6 +108,31 @@ impl RealWallet {
                 return Ok(None);
             };
             Ok(Some(Self::serialize_transaction(txid, &transaction)?))
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_prepared_association_for_test(
+        &self,
+        activity_id: &str,
+        prepared: PreparedPayment,
+    ) -> Result<()> {
+        let activity_id = activity_id.to_owned();
+        self.with_db(move |db| {
+            db.transactionally_with_extension::<_, _, anyhow::Error>(|_, ext| {
+                ext.execute(
+                    "INSERT INTO ext_tsz_prepared_payments(activity_id,txid,raw_transaction,expiry_height)
+                     VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![
+                        activity_id,
+                        prepared.txid,
+                        prepared.raw_transaction,
+                        prepared.expiry_height
+                    ],
+                )?;
+                Ok(())
+            })
         })
         .await
     }

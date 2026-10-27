@@ -80,7 +80,105 @@ pub(super) fn owned_resource(
         );
     }
     let details = docker.output(&[kind, "inspect", target])?;
-    inspected_resource_identity(kind, target, name, &details).map(Some)
+    match inspected_resource_identity(kind, target, name, &details) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if kind == "network" => {
+            match unlabeled_network_identity(docker, target, name, &details)? {
+                Some(id) => Ok(Some(id)),
+                None => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Releases up to v0.3.0 created the instance network without a label. Such a network still
+/// belongs to this instance when every container attached to it, running or stopped, carries
+/// the instance label; an unlabeled network with no attached containers, or with a foreign
+/// one, stays refused.
+fn unlabeled_network_identity(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+    details: &str,
+) -> Result<Option<String>> {
+    let Some(id) = unlabeled_network_id(details) else {
+        return Ok(None);
+    };
+    match network_attachment(docker, target, name)? {
+        Attachment::Owned => Ok(Some(id)),
+        Attachment::Empty | Attachment::Foreign => Ok(None),
+    }
+}
+
+/// An unlabeled network whose ID the recovery journal already holds was adopted by an earlier
+/// cleanup that removed its containers first; the caller matches the recorded ID, so the
+/// attachment check only refuses a foreign container that joined since.
+pub(super) fn recorded_unlabeled_network_identity(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+    details: &str,
+) -> Result<Option<String>> {
+    let Some(id) = unlabeled_network_id(details) else {
+        return Ok(None);
+    };
+    match network_attachment(docker, target, name)? {
+        Attachment::Empty | Attachment::Owned => Ok(Some(id)),
+        Attachment::Foreign => Ok(None),
+    }
+}
+
+fn unlabeled_network_id(details: &str) -> Option<String> {
+    let resources = serde_json::from_str::<serde_json::Value>(details).ok()?;
+    let network = resources.as_array()?.first()?;
+    if !network["Labels"][INSTANCE_LABEL].is_null() {
+        return None;
+    }
+    network["Id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+enum Attachment {
+    Empty,
+    Owned,
+    Foreign,
+}
+
+/// Containers attached to the network, running or stopped: `docker network inspect` lists
+/// only running ones.
+fn network_attachment(
+    docker: &impl DockerResourceCommands,
+    target: &str,
+    name: &InstanceName,
+) -> Result<Attachment> {
+    let attached = docker.output(&[
+        "container",
+        "ls",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        &format!("network={target}"),
+        "--format",
+        "{{.ID}}",
+    ])?;
+    let attached: Vec<&str> = attached
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .collect();
+    if attached.is_empty() {
+        return Ok(Attachment::Empty);
+    }
+    for id in attached {
+        let container = docker.output(&["container", "inspect", id])?;
+        if inspected_resource_identity("container", id, name, &container).is_err() {
+            return Ok(Attachment::Foreign);
+        }
+    }
+    Ok(Attachment::Owned)
 }
 
 pub(super) fn mutation_failure(
@@ -97,6 +195,45 @@ pub(super) fn mutation_failure(
         Ok(()) => error,
         Err(record_error) => anyhow!("{error:#}; recording mutation uncertainty: {record_error:#}"),
     }
+}
+
+pub(super) fn process_listing() -> Command {
+    let mut command = Command::new("ps");
+    command.args(["-A", "-o", "args="]).env_remove("COLUMNS");
+    command
+}
+
+pub(super) fn create_running(
+    context: &LifecycleContext,
+    deadline: Deadline,
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+) -> Result<bool> {
+    let listing = run(
+        &mut process_listing(),
+        deadline.clipped(context.policy.startup_docker),
+        Cancellation::Ignore,
+        OutputMode::Capture,
+        &context.policy,
+        &mut context.helpers.borrow_mut(),
+    )
+    .map_err(|error| anyhow!("{error}"))?;
+    if listing.stdout_truncated {
+        bail!(
+            "the process listing exceeded {} bytes",
+            context.policy.machine_output_limit
+        );
+    }
+    let label = label(name);
+    let create = [kind, "create", "--label", label.as_str(), target];
+    Ok(String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .ends_with(&create)
+        }))
 }
 
 pub(super) fn ensure_network_with(
@@ -124,7 +261,7 @@ pub(super) fn ensure_network_with(
             Vec::new(),
             recovery::MutationOperation::Create,
         )?;
-        if let Err(error) = docker.run(&["network", "create", "--label", &label(name), prefix]) {
+        if let Err(error) = docker.create(&["network", "create", "--label", &label(name), prefix]) {
             return Err(mutation_failure(journal, index, error, None));
         }
         match owned_resource(docker, "network", prefix, name)? {
@@ -173,7 +310,7 @@ pub(super) fn ensure_volume_with(
             Vec::new(),
             recovery::MutationOperation::Create,
         )?;
-        if let Err(error) = docker.run(&["volume", "create", "--label", &label(name), volume]) {
+        if let Err(error) = docker.create(&["volume", "create", "--label", &label(name), volume]) {
             return Err(mutation_failure(journal, index, error, None));
         }
         match owned_resource(docker, "volume", volume, name)? {
@@ -263,6 +400,8 @@ pub(super) fn ensure_zakura(
             &format!("{prefix}-config:/config:ro"),
             "-e",
             "CONFIG_FILE_PATH=/config/zakurad.toml",
+            "-e",
+            "ZAKURA_STATE__CACHE_DIR=/data",
             ZAKURA_IMAGE,
             "zakurad",
             "start",
@@ -328,6 +467,7 @@ pub(super) fn ensure_lightwalletd(
         ],
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_app(
     prefix: &str,
     name: &InstanceName,
@@ -336,6 +476,7 @@ pub(super) fn ensure_app(
     journal: &mut recovery::RecoveryJournal,
     deadline: Deadline,
     mut dependencies: Vec<recovery::ResourceRef>,
+    mining: MiningConfig,
 ) -> Result<WatchedContainer> {
     dependencies.push(volume_dependency(journal, &format!("{prefix}-wallet"))?);
 
@@ -351,6 +492,52 @@ pub(super) fn ensure_app(
     let public_lightwalletd_env = format!("THS_PUBLIC_LIGHTWALLETD={public_lightwalletd}");
     let public_p2p_env = format!("THS_PUBLIC_P2P={public_p2p}");
     let public_dashboard_env = format!("THS_PUBLIC_DASHBOARD={public_dashboard}");
+    let mining_mode_env = format!("THS_MINING_MODE={}", mining.mode.as_str());
+    let block_time_env = mining
+        .block_time
+        .map(|seconds| format!("THS_BLOCK_TIME={seconds}"));
+    let mut args: Vec<String> = vec![
+        "create".into(),
+        "--name".into(),
+        target.clone(),
+        "--network".into(),
+        prefix.into(),
+        "--label".into(),
+        label(name),
+        "-p".into(),
+        dashboard_bind,
+        "-e".into(),
+        "THS_LISTEN=0.0.0.0:8080".into(),
+        "-e".into(),
+        "THS_ZAKURA_RPC=http://zakura:18232".into(),
+        "-e".into(),
+        "THS_LIGHTWALLETD=http://lightwalletd:9067".into(),
+        "-e".into(),
+        instance,
+        "-e".into(),
+        public_rpc_env,
+        "-e".into(),
+        public_lightwalletd_env,
+        "-e".into(),
+        public_p2p_env,
+        "-e".into(),
+        public_dashboard_env,
+        "-e".into(),
+        mining_mode_env,
+    ];
+    if let Some(block_time_env) = block_time_env {
+        args.push("-e".into());
+        args.push(block_time_env);
+    }
+    args.extend([
+        "-v".into(),
+        format!("{prefix}-wallet:/data"),
+        image,
+        "serve".into(),
+        "--data-dir".into(),
+        "/data".into(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let id = create_container(
         &target,
         name,
@@ -358,39 +545,7 @@ pub(super) fn ensure_app(
         journal,
         deadline,
         dependencies,
-        &[
-            "create",
-            "--name",
-            &target,
-            "--network",
-            prefix,
-            "--label",
-            &label(name),
-            "-p",
-            &dashboard_bind,
-            "-e",
-            "THS_LISTEN=0.0.0.0:8080",
-            "-e",
-            "THS_ZAKURA_RPC=http://zakura:18232",
-            "-e",
-            "THS_LIGHTWALLETD=http://lightwalletd:9067",
-            "-e",
-            &instance,
-            "-e",
-            &public_rpc_env,
-            "-e",
-            &public_lightwalletd_env,
-            "-e",
-            &public_p2p_env,
-            "-e",
-            &public_dashboard_env,
-            "-v",
-            &format!("{prefix}-wallet:/data"),
-            &image,
-            "serve",
-            "--data-dir",
-            "/data",
-        ],
+        &args,
     )?;
     if id.is_empty() {
         bail!("Docker returned no ID for app container {target}");
@@ -515,36 +670,40 @@ pub(super) fn start_container(
 }
 
 pub(super) fn inspect_endpoints(prefix: &str) -> Result<Endpoints> {
+    inspect_endpoints_with(
+        &DockerCli,
+        &format!("{prefix}-app"),
+        &format!("{prefix}-zakura"),
+        &format!("{prefix}-lightwalletd"),
+    )
+}
+
+pub(super) fn inspect_endpoints_with(
+    docker: &impl DockerResourceCommands,
+    app: &str,
+    zakura: &str,
+    lightwalletd: &str,
+) -> Result<Endpoints> {
     Ok(Endpoints {
         dashboard: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-app"), "8080/tcp")?
+            published_port_with(docker, app, "8080/tcp")?
         ),
         rpc: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-zakura"), "18232/tcp")?
+            published_port_with(docker, zakura, "18232/tcp")?
         ),
         lightwalletd: format!(
             "http://127.0.0.1:{}",
-            published_port(&format!("{prefix}-lightwalletd"), "9067/tcp")?
+            published_port_with(docker, lightwalletd, "9067/tcp")?
         ),
         p2p: format!(
             "127.0.0.1:{}",
-            published_port(&format!("{prefix}-zakura"), "18233/tcp")?
+            published_port_with(docker, zakura, "18233/tcp")?
         ),
         network: default_regtest(),
         tls: false,
     })
-}
-pub(super) fn published_port(container: &str, port: &str) -> Result<u16> {
-    docker_output([
-        "inspect",
-        "--format",
-        &format!("{{{{(index (index .NetworkSettings.Ports \"{port}\") 0).HostPort}}}}"),
-        container,
-    ])?
-    .parse()
-    .context("Docker returned an invalid published port")
 }
 /// Lists only running containers, so a stopped or missing one is `false` rather than an error.
 pub(crate) fn container_running(name: &str) -> Result<bool> {

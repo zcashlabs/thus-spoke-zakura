@@ -228,7 +228,7 @@ impl Store {
     ) -> Result<AddressFaucet> {
         let db = self.0.lock().unwrap();
         db.execute(
-            "UPDATE address_faucets SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast')",
+            "UPDATE address_faucets SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast','unconfirmed')",
             params![id, expected_status, expected_txid],
         )?;
         address_by_id(&db, id)

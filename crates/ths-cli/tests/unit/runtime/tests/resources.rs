@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn endpoint_inspection_uses_each_containers_actual_published_ports() {
+    let mut docker = RecordingDocker::new("", "", "");
+    for (container, internal, published) in [
+        ("app-id", "8080/tcp", "41001"),
+        ("zakura-id", "18232/tcp", "41002"),
+        ("zakura-id", "18233/tcp", "41003"),
+        ("lightwalletd-id", "9067/tcp", "41004"),
+    ] {
+        docker.extra_output.insert(
+            format!("inspect --format {{{{(index (index .NetworkSettings.Ports \"{internal}\") 0).HostPort}}}} {container}"),
+            published.into(),
+        );
+    }
+    let endpoints =
+        inspect_endpoints_with(&docker, "app-id", "zakura-id", "lightwalletd-id").unwrap();
+    assert_eq!(endpoints.dashboard, "http://127.0.0.1:41001");
+    assert_eq!(endpoints.rpc, "http://127.0.0.1:41002");
+    assert_eq!(endpoints.p2p, "127.0.0.1:41003");
+    assert_eq!(endpoints.lightwalletd, "http://127.0.0.1:41004");
+    docker.extra_output.clear();
+    assert!(inspect_endpoints_with(&docker, "app-id", "zakura-id", "lightwalletd-id").is_err());
+}
+
+#[test]
 fn foreign_volume_collision_preserves_all_resources() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Runtime {
@@ -48,43 +72,6 @@ fn foreign_container_collision_is_not_deleted() {
 }
 
 #[test]
-fn owned_resources_still_clean_up() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = Runtime {
-        root: dir.path().to_path_buf(),
-    };
-    let mut docker = RecordingDocker::new("ths-alpha-app", "ths-alpha-wallet", "ths-alpha");
-    docker.inspect(
-        "container",
-        "ths-alpha-app",
-        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
-    );
-    docker.inspect(
-        "volume",
-        "ths-alpha-wallet",
-        r#"[{"Name":"ths-alpha-wallet","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
-    );
-    docker.inspect(
-        "network",
-        "ths-alpha",
-        r#"[{"Id":"owned-network","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
-    );
-
-    runtime
-        .delete_instance_resources_with(&name("alpha"), &docker)
-        .unwrap();
-
-    assert_eq!(
-        *docker.runs.lock().unwrap(),
-        [
-            "rm -f owned-container",
-            "volume rm ths-alpha-wallet",
-            "network rm owned-network",
-        ]
-    );
-}
-
-#[test]
 fn unlabeled_network_collision_preserves_data_and_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Runtime {
@@ -120,6 +107,171 @@ fn unlabeled_network_collision_preserves_data_and_metadata() {
         fs::read_to_string(metadata.join("instance.json")).unwrap(),
         "important data"
     );
+}
+
+#[test]
+fn unlabeled_network_is_adopted_when_its_containers_are_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let mut docker = RecordingDocker::new("ths-alpha-app", "ths-alpha-wallet", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "volume",
+        "ths-alpha-wallet",
+        r#"[{"Name":"ths-alpha-wallet","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container".to_owned(),
+    );
+
+    runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap();
+
+    assert_eq!(
+        *docker.runs.lock().unwrap(),
+        [
+            "rm -f owned-container",
+            "volume rm ths-alpha-wallet",
+            "network rm old-network",
+        ]
+    );
+}
+
+#[test]
+fn unlabeled_network_with_a_foreign_container_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime {
+        root: dir.path().to_path_buf(),
+    };
+    let mut docker = RecordingDocker::new("ths-alpha-app\nother-app", "", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "container",
+        "other-app",
+        r#"[{"Id":"foreign-container","Config":{"Labels":{}}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container\nforeign-container".to_owned(),
+    );
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+    assert!(docker.runs.lock().unwrap().is_empty());
+}
+
+fn adopted_unlabeled_network_after_failed_removal() -> (Runtime, RecordingDocker) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime { root: dir.keep() };
+    let mut docker = RecordingDocker::new("ths-alpha-app", "ths-alpha-wallet", "ths-alpha");
+    docker.inspect(
+        "container",
+        "ths-alpha-app",
+        r#"[{"Id":"owned-container","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#,
+    );
+    docker.inspect(
+        "volume",
+        "ths-alpha-wallet",
+        r#"[{"Name":"ths-alpha-wallet","Labels":{"com.zakura.ths.instance":"alpha"}}]"#,
+    );
+    docker.inspect(
+        "network",
+        "ths-alpha",
+        r#"[{"Id":"old-network","Labels":{}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}".to_owned(),
+        "owned-container".to_owned(),
+    );
+    docker.retain.lock().unwrap().push("old-network".into());
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("ths-alpha is still present after removal"),
+        "{error:#}"
+    );
+    assert_eq!(
+        *docker.runs.lock().unwrap(),
+        [
+            "rm -f owned-container",
+            "volume rm ths-alpha-wallet",
+            "network rm old-network",
+        ]
+    );
+    docker.retain.lock().unwrap().clear();
+    docker
+        .extra_output
+        .remove("container ls -a --no-trunc --filter network=ths-alpha --format {{.ID}}");
+    docker.extra_output.insert(
+        "network ls --no-trunc --format {{.ID}}".to_owned(),
+        "old-network".to_owned(),
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --format {{.ID}}".to_owned(),
+        String::new(),
+    );
+    (runtime, docker)
+}
+
+#[test]
+fn unlabeled_network_removal_is_retried_from_its_recorded_id() {
+    let (runtime, docker) = adopted_unlabeled_network_after_failed_removal();
+
+    runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap();
+
+    assert_eq!(docker.runs.lock().unwrap()[3..], ["network rm old-network"]);
+    assert!(docker.networks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn recorded_unlabeled_network_is_refused_once_a_foreign_container_joins() {
+    let (runtime, mut docker) = adopted_unlabeled_network_after_failed_removal();
+    docker.inspect(
+        "container",
+        "other-app",
+        r#"[{"Id":"foreign-container","Config":{"Labels":{}}}]"#,
+    );
+    docker.extra_output.insert(
+        "container ls -a --no-trunc --filter network=old-network --format {{.ID}}".to_owned(),
+        "foreign-container".to_owned(),
+    );
+
+    let error = runtime
+        .delete_instance_resources_with(&name("alpha"), &docker)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("not owned"), "{error:#}");
+    assert_eq!(docker.runs.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -295,7 +447,7 @@ fn readiness_failure_deletes_the_started_instance() {
     assert!(!events.iter().any(|e| e.starts_with("wait_for_shutdown")));
 }
 
-fn allocate_replaced_app(docker: &ReplacedApp) -> Result<WatchedContainer> {
+fn allocate_replaced_app(docker: &ReplacedApp, mining: MiningConfig) -> Result<WatchedContainer> {
     let dir = tempfile::tempdir()?;
     let mut journal = recovery::RecoveryJournal::create(
         dir.path().join("lifecycle-recovery.json"),
@@ -323,6 +475,7 @@ fn allocate_replaced_app(docker: &ReplacedApp) -> Result<WatchedContainer> {
         &mut journal,
         Deadline::after(Duration::from_secs(5)),
         Vec::new(),
+        mining,
     )
 }
 
@@ -372,9 +525,110 @@ fn app_allocation_captures_identity_before_a_name_replacement() {
             reuse,
             inspect_error: false,
         };
-        let app = allocate_replaced_app(&docker).unwrap();
+        let app = allocate_replaced_app(&docker, MiningConfig::default()).unwrap();
         assert_eq!(app, watched("app-1"));
     }
+}
+
+struct CapturingApp {
+    created: Mutex<Vec<String>>,
+}
+
+impl DockerResourceCommands for CapturingApp {
+    fn output(&self, args: &[&str]) -> Result<String> {
+        match args {
+            ["container", "ls", "-a", "--format", "{{.Names}}"] => Ok(String::new()),
+            ["create", ..] => {
+                self.created
+                    .lock()
+                    .unwrap()
+                    .extend(args.iter().map(|arg| (*arg).to_owned()));
+                Ok("app-1".into())
+            }
+            ["container", "inspect", "--format", "{{.Created}}", "app-1"] => {
+                Ok("2026-01-01T00:00:00Z".into())
+            }
+            ["container", "inspect", "app-1"] => Ok(
+                r#"[{"Id":"app-1","Config":{"Labels":{"com.zakura.ths.instance":"alpha"}}}]"#
+                    .into(),
+            ),
+            [
+                "container",
+                "inspect",
+                "ths-alpha-app" | "app-1",
+                "--format",
+                "{{.Id}}",
+            ] => Ok("app-1".into()),
+            _ => bail!("unexpected Docker read: {}", args.join(" ")),
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> Result<()> {
+        bail!("unexpected Docker mutation: {}", args.join(" "))
+    }
+}
+
+fn app_env_with(mining: MiningConfig) -> Vec<String> {
+    let docker = CapturingApp {
+        created: Mutex::new(Vec::new()),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = recovery::RecoveryJournal::create(
+        dir.path().join("lifecycle-recovery.json"),
+        &name("alpha"),
+    )
+    .unwrap();
+    let volume = journal
+        .begin(
+            recovery::ResourceRef {
+                kind: recovery::ResourceKind::Volume,
+                name: "ths-alpha-wallet".into(),
+                identity: Some("ths-alpha-wallet".into()),
+            },
+            Vec::new(),
+            recovery::MutationOperation::Create,
+        )
+        .unwrap();
+    journal
+        .finish(
+            volume,
+            recovery::MutationOutcome::Acknowledged,
+            Some("ths-alpha-wallet".into()),
+        )
+        .unwrap();
+    ensure_app(
+        "ths-alpha",
+        &name("alpha"),
+        &host_ports(0).unwrap(),
+        &docker,
+        &mut journal,
+        Deadline::after(Duration::from_secs(5)),
+        Vec::new(),
+        mining,
+    )
+    .unwrap();
+    docker.created.lock().unwrap().clone()
+}
+
+#[test]
+fn app_container_receives_the_selected_mining_mode() {
+    let default = app_env_with(MiningConfig::default());
+    assert!(default.contains(&"THS_MINING_MODE=auto".to_owned()));
+    assert!(!default.iter().any(|arg| arg.starts_with("THS_BLOCK_TIME=")));
+
+    let interval = app_env_with(MiningConfig {
+        mode: MiningMode::Interval,
+        block_time: Some(7),
+    });
+    assert!(interval.contains(&"THS_MINING_MODE=interval".to_owned()));
+    assert!(interval.contains(&"THS_BLOCK_TIME=7".to_owned()));
+
+    let manual = app_env_with(MiningConfig {
+        mode: MiningMode::Manual,
+        block_time: None,
+    });
+    assert!(manual.contains(&"THS_MINING_MODE=manual".to_owned()));
+    assert!(!manual.iter().any(|arg| arg.starts_with("THS_BLOCK_TIME=")));
 }
 
 #[test]
@@ -383,7 +637,7 @@ fn app_identity_capture_does_not_fall_back_to_a_replacement_on_docker_errors() {
         reuse: false,
         inspect_error: true,
     };
-    let error = allocate_replaced_app(&docker).unwrap_err();
+    let error = allocate_replaced_app(&docker, MiningConfig::default()).unwrap_err();
     assert!(error.to_string().contains("Docker is unreachable"));
 }
 

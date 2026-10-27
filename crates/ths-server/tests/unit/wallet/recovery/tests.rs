@@ -136,10 +136,13 @@ async fn known_spender_must_be_stored_and_spend_the_exact_reward_output() {
         .unwrap()
         .transparent_address;
     let reward = transaction(&receiver, OutPoint::new([0; 32], u32::MAX), 0);
-    wallet.enhance_transaction(&raw(&reward), 2).await.unwrap();
+    wallet
+        .enhance_transaction(reward.txid(), hex::decode(raw(&reward)).unwrap(), 2)
+        .await
+        .unwrap();
     let spender = transaction(&receiver, OutPoint::new(*reward.txid().as_ref(), 0), 1);
     wallet
-        .enhance_transaction(&raw(&spender), 103)
+        .enhance_transaction(spender.txid(), hex::decode(raw(&spender)).unwrap(), 103)
         .await
         .unwrap();
     let spenders = wallet

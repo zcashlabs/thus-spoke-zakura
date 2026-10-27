@@ -3,9 +3,9 @@ resolver = "2"
 members = ["crates/ths-cli", "crates/ths-server"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.1"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/zcashlabs/thus-spoke-zakura"
 
@@ -28,7 +28,7 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
-zcash_protocol = { package = "zakura-protocol", version = "=2.2.0", features = ["local-consensus"] }
+zcash_protocol = { package = "zakura-protocol", version = "=4.0.0", features = ["local-consensus"] }
 zip32 = "0.2"
 
 [profile.release]

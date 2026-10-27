@@ -73,6 +73,20 @@ impl PaymentAttempt<'_> {
 
     pub(crate) async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<Vec<String>> {
         self.check_can_start()?;
+        // Startup funding must finish in every mode, so mining before the
+        // instance is started is unconditional. After startup, only auto mode
+        // mines a block as part of a payment; interval, mempool, and manual
+        // modes leave the payment pending until a block is produced elsewhere.
+        if self.state.started() && !self.state.mining_config().mode.auto_mine() {
+            return Ok(Vec::new());
+        }
+        let _chain = self
+            .network(
+                Duration::from_secs(120),
+                "waiting for chain operation",
+                async { Ok::<_, anyhow::Error>(self.state.0.mining.chain_operations.read().await) },
+            )
+            .await?;
         let hashes = if self.dispatch_deadline.is_none() {
             self.state
                 .0

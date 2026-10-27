@@ -1,4 +1,6 @@
 import { ArrowDownToLine, ArrowRight, Copy } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { accountPath } from '@/lib/accounts';
 import { shortHash } from '@/lib/format';
 import type { Account } from '@/lib/api';
 import { CopyButton } from '@/components/ui/CopyButton';
@@ -18,7 +20,15 @@ export function AccountCard({ account, index = 0 }: { account: Account; index?: 
         <div className="xp-raised bg-raised text-ink-muted grid size-8 shrink-0 place-items-center rounded-xs font-mono text-[12px] font-bold">
           {account.id}
         </div>
-        <h3 className="min-w-0 flex-1 truncate text-[13px] font-bold">{account.name}</h3>
+        <h3 className="min-w-0 flex-1 truncate text-[13px] font-bold">
+          <Link
+            to={accountPath(account.id)}
+            aria-label={`View Account ${account.id} details`}
+            className="hover:underline"
+          >
+            {account.name}
+          </Link>
+        </h3>
         <CopyButton
           value={account.unified_address}
           label={`Copy ${account.name} unified address`}

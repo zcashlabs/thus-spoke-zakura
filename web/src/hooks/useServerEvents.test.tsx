@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AddressDetail } from '@/features/explorer/AddressDetail';
 import { BlockDetail } from '@/features/explorer/BlockDetail';
 import { TransactionDetail } from '@/features/explorer/TransactionDetail';
+import { AppProviders } from '@/app/providers';
+import { MempoolPanel } from '@/features/explorer/MempoolPanel';
+import { WalletActionsContext } from '@/features/wallet/wallet-actions-context';
 import { renderWithProviders, requestUrl } from '@/test/utils';
+import { useAccounts } from './queries';
 import { useServerEvents } from './useServerEvents';
 
 const TXID = 'd9'.repeat(32);
@@ -16,6 +21,7 @@ type Listener = (event: MessageEvent<string>) => void;
 
 class FakeEventSource {
   static current: FakeEventSource | undefined;
+  onopen: ((event: Event) => void) | null = null;
   private listeners = new Set<Listener>();
 
   constructor() {
@@ -88,6 +94,47 @@ function requestsTo(path: string): number {
 }
 
 describe('useServerEvents', () => {
+  it('refreshes a pending initial balance after SSE opens', async () => {
+    const account = {
+      id: 1,
+      name: 'Account 1',
+      unified_address: 'uregtest1example',
+      transparent_address: ADDRESS,
+      transparent_zatoshi: 0,
+      ironwood_zatoshi: 100_000_000,
+    };
+    const oldResponse = await json([account]);
+    let releaseOldResponse!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>((resolve) => {
+      releaseOldResponse = resolve;
+    });
+    routes = { '/accounts': () => [{ ...account, ironwood_zatoshi: 200_000_000 }] };
+    vi.mocked(fetch).mockImplementationOnce(() => pendingResponse);
+
+    function Balance() {
+      const accounts = useAccounts();
+      return <p>Balance: {accounts.data?.[0]?.ironwood_zatoshi.toString()}</p>;
+    }
+    render(
+      <AppProviders>
+        <Live>
+          <Balance />
+        </Live>
+      </AppProviders>,
+    );
+    expect(requestsTo('/accounts')).toBe(1);
+
+    act(() => FakeEventSource.current?.onopen?.(new Event('open')));
+    // The held snapshot predates subscription and must not satisfy the fresh read.
+    await act(async () => {
+      releaseOldResponse(oldResponse);
+      await pendingResponse;
+    });
+
+    expect(await screen.findByText('Balance: 200000000')).toBeInTheDocument();
+    expect(requestsTo('/accounts')).toBe(2);
+  });
+
   it.each(['resync', 'unknown-topic'])('invalidates all mapped queries on %s', (topic) => {
     const client = new QueryClient();
     const invalidate = vi.spyOn(client, 'invalidateQueries');
@@ -101,10 +148,13 @@ describe('useServerEvents', () => {
       [{ queryKey: ['accounts'] }],
       [{ queryKey: ['activity'] }],
       [{ queryKey: ['send-quote'] }],
+      [{ queryKey: ['wallet-transaction'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['blocks'] }],
+      [{ queryKey: ['mempool'] }],
       [{ queryKey: ['block'] }],
       [{ queryKey: ['transaction'] }],
+      [{ queryKey: ['wallet-transaction'] }],
       [{ queryKey: ['address'] }],
       [{ queryKey: ['status'] }],
       [{ queryKey: ['mining'] }],
@@ -136,6 +186,26 @@ describe('useServerEvents', () => {
     expect(await screen.findByText('4 conf')).toBeInTheDocument();
   });
 
+  it('removes a mined transaction from the mempool on a chain update', async () => {
+    let transactions = [TXID];
+    routes = { '/mempool': () => ({ transactions }) };
+    renderPage(
+      '/explorer',
+      '/explorer',
+      <WalletActionsContext
+        value={{ openMine: vi.fn(), openSend: vi.fn(), openFaucet: vi.fn(), openRequest: vi.fn() }}
+      >
+        <MempoolPanel />
+      </WalletActionsContext>,
+    );
+    await screen.findByRole('link', { name: TXID });
+    transactions = [];
+    FakeEventSource.current?.emit('chain');
+    await waitFor(() => expect(screen.queryByRole('link', { name: TXID })).not.toBeInTheDocument());
+    expect(screen.queryByRole('heading', { name: 'Pending transactions' })).not.toBeInTheDocument();
+    expect(requestsTo('/mempool')).toBe(2);
+  });
+
   it('refreshes an open address page on a new block', async () => {
     let balance = 0;
     routes = {
@@ -159,6 +229,7 @@ describe('useServerEvents', () => {
       '/status': () => ({
         instance: 'test',
         account_count: 5,
+        mining_mode: 'auto',
         auto_mine: true,
         network: 'regtest',
         node: { blocks: 106 + confirmations - 1, bestblockhash: 'ab'.repeat(32) },
@@ -181,15 +252,53 @@ describe('useServerEvents', () => {
     expect(await screen.findByText('4 conf')).toBeInTheDocument();
   });
 
-  it('leaves detail pages alone on wallet and sync updates', async () => {
-    routes = { [`/transactions/${TXID}`]: () => ({ txid: TXID, height: 106, confirmations: 1 }) };
+  it('leaves public detail data alone on wallet and sync updates', async () => {
+    let memo = 'order 4';
+    routes = {
+      [`/transactions/${TXID}/wallet`]: () => ({
+        txid: TXID,
+        status: 'confirmed',
+        mined_height: 106,
+        confirmations: 1,
+        fee_zatoshi: null,
+        details: 'complete',
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 1,
+            from: 1,
+            to: 2,
+            to_address: null,
+            change: false,
+            memo: { text: memo },
+          },
+        ],
+        spends: [],
+      }),
+      [`/transactions/${TXID}`]: () => ({
+        txid: TXID,
+        height: 106,
+        confirmations: 1,
+        ironwood: { actions: [{}, {}] },
+      }),
+    };
     renderPage(`/explorer/tx/${TXID}`, '/explorer/tx/:txid', <TransactionDetail />);
     await screen.findByText('1 conf');
+    await userEvent.click(await screen.findByRole('button', { name: 'Decrypt actions' }));
+    await screen.findByText('order 4');
 
+    // The local wallet view follows wallet updates; public chain data does not.
+    memo = 'order 42';
     FakeEventSource.current?.emit('wallet');
     FakeEventSource.current?.emit('sync');
+    expect(await screen.findByText('order 42')).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(requestsTo(`/transactions/${TXID}`)).toBe(1);
+    const publicReads = vi
+      .mocked(fetch)
+      .mock.calls.map(([input]) => requestUrl(input))
+      .filter((url) => url.includes(`/transactions/${TXID}`) && !url.endsWith('/wallet'));
+    expect(publicReads).toHaveLength(1);
   });
 });

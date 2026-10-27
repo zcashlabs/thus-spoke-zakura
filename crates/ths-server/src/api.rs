@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use axum::{
     Router,
-    extract::Request,
+    extract::{DefaultBodyLimit, Request},
     http::{StatusCode, header::HOST, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -9,7 +9,9 @@ use axum::{
 };
 use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
+mod chain;
 mod dashboard;
+mod decode;
 pub(crate) mod error;
 mod events;
 pub(crate) mod explorer;
@@ -30,12 +32,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/zip321/parse", post(payments::parse_payment_uri))
         .route("/api/v1/zip321/request", post(payments::payment_request))
         .route("/api/v1/send/quote", post(payments::send_quote))
+        .route(
+            "/api/v1/transactions/decode",
+            post(decode::decode).layer(DefaultBodyLimit::max(decode::MAX_REQUEST_BYTES)),
+        )
         .route("/api/v1/faucet", post(payments::faucet))
         .route(
             "/api/v1/faucet/address",
             get(payments::faucet_address_status).post(payments::faucet_address),
         )
         .route("/api/v1/mine", post(mining::mine))
+        .route("/api/v1/reorg", post(chain::reorg))
+        .route("/api/v1/rollback", post(chain::rollback))
         .route(
             "/api/v1/mining/jobs",
             get(mining::latest_mining_job).post(mining::start_mining_job),
@@ -45,6 +53,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/blocks", get(explorer::blocks))
         .route("/api/v1/blocks/{id}", get(explorer::block))
         .route("/api/v1/transactions/{txid}", get(explorer::transaction))
+        .route(
+            "/api/v1/transactions/{txid}/wallet",
+            get(explorer::wallet_transaction),
+        )
         .route("/api/v1/mempool", get(explorer::mempool))
         .route("/api/v1/addresses/{address}", get(explorer::address))
         .route("/api/v1/search", get(explorer::search))

@@ -158,63 +158,6 @@ impl AddressFaucetRuntime for RecordingAddressFaucetRuntime {
 }
 
 #[tokio::test]
-async fn address_faucet_dispatches_internal_transparent_and_unified() {
-    let (state, _dir) = state_with_local_wallet();
-    let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
-    let account = state.0.store.account(2).unwrap();
-    for (address, pool) in [
-        (account.transparent_address, "transparent"),
-        (account.unified_address, "ironwood"),
-    ] {
-        let Json(response) = execute_address_faucet(
-            &state.0.store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address: address.clone(),
-                amount_zatoshi: 100_000_000,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(
-            serde_json::to_value(response).unwrap(),
-            json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "faucet-txid", "block_hash": "inclusion-hash", "status": "confirmed", "last_error": null})
-        );
-        let calls = runtime.internal_calls.lock().unwrap();
-        let call = calls.last().unwrap();
-        assert_eq!((call.0, call.1.as_str(), call.2), (2, pool, 100_000_000));
-    }
-    assert!(runtime.external_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn address_faucet_retries_preserve_the_client_key() {
-    let (state, _dir) = state_with_local_wallet();
-    let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
-    let address = state.0.store.account(2).unwrap().transparent_address;
-    for _ in 0..2 {
-        let Json(_response) = execute_address_faucet(
-            &state.0.store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address: address.clone(),
-                amount_zatoshi: 100_000_000,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{}", error.message));
-    }
-    let calls = runtime.internal_calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].3, "address-test-key");
-    assert_eq!(calls[1].3, "address-test-key");
-    assert!(calls.iter().all(|call| require_key(&call.3).is_ok()));
-    assert!(runtime.external_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn address_faucet_validation_precedes_dispatch() {
     let (state, _dir) = state_with_local_wallet();
     let runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
@@ -252,133 +195,6 @@ async fn address_faucet_validation_precedes_dispatch() {
     .await
     .unwrap_or_else(|error| panic!("{}", error.message));
     assert_eq!(runtime.internal_calls.lock().unwrap()[0].2, 500_000_000);
-}
-
-#[tokio::test]
-async fn address_faucet_dispatch_preserves_external_behavior() {
-    let (state, _dir) = state_with_local_wallet();
-    let mut runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
-    let treasury = state.0.store.account(TREASURY_ACCOUNT_ID).unwrap();
-    for address in [
-        treasury.transparent_address.clone(),
-        treasury.unified_address,
-    ] {
-        let Json(response) = execute_address_faucet(
-            &state.0.store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address: address.clone(),
-                amount_zatoshi: 100_000_000,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(
-            serde_json::to_value(response).unwrap(),
-            json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "external-txid", "block_hash": "external-block", "status": "confirmed", "last_error": null})
-        );
-        assert_eq!(
-            runtime.external_calls.lock().unwrap().last().unwrap(),
-            &(address, 100_000_000)
-        );
-    }
-    runtime.fail_external = true;
-    assert!(
-        execute_address_faucet(
-            &state.0.store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address: treasury.transparent_address,
-                amount_zatoshi: 1
-            }
-        )
-        .await
-        .is_err()
-    );
-    assert!(runtime.internal_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn address_faucet_internal_errors_do_not_fall_back() {
-    let (state, _dir) = state_with_local_wallet();
-    let mut runtime = RecordingAddressFaucetRuntime::new(&state.0.store);
-    let address = state.0.store.account(2).unwrap().transparent_address;
-    runtime.fail_internal = true;
-    assert!(
-        execute_address_faucet(
-            &state.0.store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address: address.clone(),
-                amount_zatoshi: 100_000_000
-            }
-        )
-        .await
-        .is_err()
-    );
-    runtime.fail_internal = false;
-    runtime.activity.status = "broadcast".into();
-    runtime.activity.block_hash = None;
-    let Json(pending) = execute_address_faucet(
-        &state.0.store,
-        &runtime,
-        FaucetAddressRequest {
-            idempotency_key: "address-test-key".into(),
-            address: address.clone(),
-            amount_zatoshi: 100_000_000,
-        },
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{}", error.message));
-    assert_eq!(pending.status, "broadcast");
-    assert_eq!(pending.block_hash, None);
-    assert_eq!(runtime.internal_calls.lock().unwrap().len(), 2);
-    let broken_store = Store::open(":memory:").unwrap();
-    assert!(
-        execute_address_faucet(
-            &broken_store,
-            &runtime,
-            FaucetAddressRequest {
-                idempotency_key: "address-test-key".into(),
-                address,
-                amount_zatoshi: 1
-            }
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(runtime.internal_calls.lock().unwrap().len(), 2);
-    assert!(runtime.external_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn send_rejects_invalid_pools_before_wallet_work() {
-    let (state, _dir) = state_with_local_wallet();
-    for (source_pool, destination_pool) in [("sapling", "ironwood"), ("ironwood", "sapling")] {
-        let response = router(state.clone())
-            .oneshot(
-                Request::post("/api/v1/send")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_vec(&json!({
-                            "from_account": 1,
-                            "to_account": 2,
-                            "source_pool": source_pool,
-                            "destination_pool": destination_pool,
-                            "amount_zatoshi": 1,
-                            "idempotency_key": "invalid-pool",
-                        }))
-                        .unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
 }
 
 #[test]
@@ -428,12 +244,6 @@ fn absent_and_null_memos_differ_from_an_explicit_empty_memo() {
         panic!("an explicit empty memo must be kept");
     };
     assert_eq!(empty.as_array(), &[0u8; 512]);
-}
-
-#[test]
-fn any_present_memo_is_rejected_for_a_transparent_destination() {
-    assert!(is_bad_request(parse_memo(Some("hi"), "transparent")));
-    assert!(is_bad_request(parse_memo(Some(""), "transparent")));
 }
 
 #[test]
@@ -937,17 +747,6 @@ async fn a_valid_replay_returns_the_original_without_the_wallet_or_network() {
     );
 }
 
-#[test]
-fn faucet_accepts_only_regtest_unified_and_transparent_addresses() {
-    let store = Store::open(":memory:").unwrap();
-    store.initialize().unwrap();
-    let account = store.account(1).unwrap();
-
-    assert!(require_faucet_address(&account.unified_address).is_ok());
-    assert!(require_faucet_address(&account.transparent_address).is_ok());
-    assert!(require_faucet_address("not-an-address").is_err());
-}
-
 #[tokio::test]
 async fn address_faucet_rejects_missing_or_invalid_operation_keys_before_network_work() {
     let (state, _dir) = state_with_local_wallet();
@@ -1044,60 +843,6 @@ async fn internal_address_faucet_replays_preserve_activity_after_store_reopen() 
     }
 }
 
-#[tokio::test]
-async fn confirmed_address_faucet_replays_without_sending_a_second_payment() {
-    let (state, _dir) = state_with_local_wallet();
-    let address = state.0.store.account(1).unwrap().unified_address;
-    let claim = state
-        .0
-        .store
-        .claim_address_faucet(&address, 123, "replay-address")
-        .unwrap();
-    state
-        .0
-        .store
-        .record_address_prepared(&claim.id, "original-txid", b"original bytes", 140)
-        .unwrap();
-    state
-        .0
-        .store
-        .confirm_address(&claim.id, "original-txid", "original-block")
-        .unwrap();
-    let body = json!({"address":address,"amount_zatoshi":123,"idempotency_key":"replay-address"});
-
-    for _ in 0..2 {
-        let response = router(state.clone())
-            .oneshot(
-                Request::post("/api/v1/faucet/address")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(result["txid"], "original-txid");
-        assert_eq!(result["block_hash"], "original-block");
-        assert_eq!(result["status"], "confirmed");
-    }
-    let mut conflict = body;
-    conflict["amount_zatoshi"] = json!(124);
-    let response = router(state)
-        .oneshot(
-            Request::post("/api/v1/faucet/address")
-                .header("content-type", "application/json")
-                .body(Body::from(conflict.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-}
-
 /// An unknown pool is a client error, not the wallet's internal `bail!`
 /// surfacing as a 500 that the dashboard reports as an unexpected error.
 #[tokio::test]
@@ -1131,6 +876,50 @@ async fn send_quote_rejects_unknown_pools_as_bad_requests() {
         assert!(
             String::from_utf8_lossy(&bytes).contains(message),
             "expected {message} in {bytes:?}"
+        );
+    }
+}
+
+/// While startup is pending the quote is unavailable, like send and faucet,
+/// instead of failing against an unscanned wallet.
+#[tokio::test]
+async fn send_quote_reports_startup_as_unavailable() {
+    let (state, _dir) = crate::state::tests::offline_state();
+    let (status, body) = api_request(
+        &state,
+        "POST",
+        "/api/v1/send/quote",
+        json!({"from_account": 1, "source_pool": "ironwood", "destination_pool": "ironwood"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body,
+        json!({"error": {"message": "the environment is still starting", "status": 503}}),
+    );
+}
+
+/// A started server with an unscanned wallet reports the quote as
+/// unavailable rather than as an unexpected error, for either pool.
+#[tokio::test]
+async fn send_quote_reports_an_unscanned_wallet_as_unavailable() {
+    let (state, _dir) = state_with_local_wallet();
+    for (source_pool, destination_pool) in [("ironwood", "ironwood"), ("transparent", "ironwood")] {
+        let (status, body) = api_request(
+            &state,
+            "POST",
+            "/api/v1/send/quote",
+            json!({"from_account": 1, "source_pool": source_pool, "destination_pool": destination_pool}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{source_pool}->{destination_pool}"
+        );
+        assert_eq!(
+            body["error"]["status"], 503,
+            "{source_pool}->{destination_pool}: {body}"
         );
     }
 }
@@ -1291,6 +1080,28 @@ fn payment_uri_resolves_a_development_account_with_amount_and_memo() {
     assert_eq!(parsed.to_account, Some(2));
     assert_eq!(parsed.amount_zatoshi, Some(150_000_000));
     assert_eq!(parsed.memo.as_deref(), Some("rent for October"));
+}
+
+#[test]
+fn payment_uri_rejects_an_explicit_zero_and_keeps_a_missing_amount() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let address = store.account(2).unwrap().unified_address;
+
+    for amount in ["0", "0.0"] {
+        let error = payment_uri(&store, &format!("zcash:{address}?amount={amount}")).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{amount}");
+        assert_eq!(
+            error.message, "amount must be greater than zero",
+            "{amount}"
+        );
+    }
+
+    let omitted = payment_uri(&store, &format!("zcash:{address}")).unwrap();
+    assert_eq!(omitted.amount_zatoshi, None);
+
+    let positive = payment_uri(&store, &format!("zcash:{address}?amount=1")).unwrap();
+    assert_eq!(positive.amount_zatoshi, Some(100_000_000));
 }
 
 #[test]

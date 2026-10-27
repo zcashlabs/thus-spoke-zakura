@@ -33,6 +33,46 @@ pub enum Recipient<'a> {
 }
 
 impl Store {
+    pub(crate) fn unconfirm_blocks(&self, hashes: &[String]) -> Result<Vec<(String, String)>> {
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        let mut confirmations = Vec::new();
+        for hash in hashes {
+            for table in ["activity", "address_faucets"] {
+                let mut query = tx.prepare(&format!(
+                    "SELECT txid,block_hash FROM {table} WHERE status='confirmed' AND block_hash=?1"
+                ))?;
+                confirmations.extend(
+                    query
+                        .query_map([hash], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                );
+                tx.execute(
+                    &format!("UPDATE {table} SET status='unconfirmed',block_hash=NULL,last_error=NULL WHERE status='confirmed' AND block_hash=?1"),
+                    [hash],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(confirmations)
+    }
+
+    pub(crate) fn confirm_reorged_transaction(&self, txid: &str, hash: &str) -> Result<()> {
+        if hash.is_empty() {
+            bail!("block hash is required to confirm activity");
+        }
+        let mut db = self.0.lock().unwrap();
+        let tx = db.transaction()?;
+        for table in ["activity", "address_faucets"] {
+            tx.execute(
+                &format!("UPDATE {table} SET status='confirmed',block_hash=?1,last_error=NULL WHERE status='unconfirmed' AND txid=?2"),
+                params![hash, txid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn activities(&self, limit: u32) -> Result<Vec<Activity>> {
         let db = self.0.lock().unwrap();
         let mut query = db.prepare(&format!(
@@ -240,6 +280,7 @@ impl Store {
         activity_by_id(&db, id).map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub fn fail(&self, id: &str, error: &str) -> Result<Activity> {
         let db = self.0.lock().unwrap();
         let updated = db.execute(
@@ -251,6 +292,37 @@ impl Store {
             bail!("payment {id} is no longer waiting for preparation");
         }
         Ok(activity)
+    }
+
+    /// A failed preparation is not terminal while an earlier retained operation
+    /// can still provide the source funds. Check and transition under one lock
+    /// so recovery cannot change a dependency between the check and the write.
+    /// Deliberately orphaned payments are only observed, not executed, so they
+    /// cannot defer an otherwise unfunded send while waiting for reconfirmation.
+    pub(crate) fn fail_unfunded_send(&self, id: &str, error: &str) -> Result<Activity> {
+        let db = self.0.lock().unwrap();
+        db.execute(
+            "UPDATE activity AS target SET status='failed',last_error=?1
+             WHERE target.id=?2 AND target.kind='send' AND target.status='preparing' AND target.txid=''
+             AND NOT EXISTS (
+                 SELECT 1 FROM activity earlier
+                 WHERE earlier.rowid < target.rowid
+                   AND earlier.status IN ('preparing','prepared','broadcast')
+                   AND (earlier.txid!='' OR EXISTS (SELECT 1 FROM idempotency i WHERE i.activity_id=earlier.id))
+                   AND (
+                       (earlier.destination_pool=target.source_pool AND (
+                           earlier.to_account=target.from_account
+                           OR earlier.to_address IN (
+                               SELECT unified_address FROM accounts WHERE id=target.from_account
+                               UNION ALL SELECT transparent_address FROM accounts WHERE id=target.from_account
+                           )
+                       ))
+                       OR (earlier.kind='send' AND earlier.from_account=target.from_account AND target.source_pool='ironwood')
+                   )
+             )",
+            params![error, id],
+        )?;
+        activity_by_id(&db, id).map_err(Into::into)
     }
 }
 
@@ -359,7 +431,49 @@ pub struct ActivityIntent {
     pub memo: Option<String>,
 }
 
+pub(crate) enum ActivityRecovery {
+    Intent(ActivityIntent),
+    Legacy(Activity),
+}
+
+impl ActivityRecovery {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Intent(intent) => &intent.activity.id,
+            Self::Legacy(activity) => &activity.id,
+        }
+    }
+}
+
 impl Store {
+    /// Rowids keep admission order across timestamp ties and restarts. Keyed
+    /// intents and legacy transactions share one queue; never reorder by UUID.
+    pub(crate) fn pending_activities(&self) -> Result<Vec<(i64, ActivityRecovery)>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare(&format!(
+            "SELECT {ACTIVITY_COLUMNS},i.key,i.memo,a.rowid
+             FROM activity a LEFT JOIN idempotency i ON i.activity_id=a.id
+             WHERE a.status NOT IN ('confirmed','failed') AND (i.key IS NOT NULL OR a.txid!='')
+             ORDER BY a.rowid ASC"
+        ))?;
+        Ok(query
+            .query_map([], |row| {
+                let activity = row_activity(row)?;
+                let key: Option<String> = row.get(13)?;
+                let recovery = match key {
+                    Some(key) => ActivityRecovery::Intent(ActivityIntent {
+                        activity,
+                        key,
+                        memo: row.get(14)?,
+                    }),
+                    None => ActivityRecovery::Legacy(activity),
+                };
+                Ok((row.get(15)?, recovery))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[cfg(test)]
     pub fn unresolved_activities(&self) -> Result<Vec<ActivityIntent>> {
         let db = self.0.lock().unwrap();
         let mut query = db.prepare(&format!(
@@ -392,15 +506,6 @@ impl Store {
 }
 
 impl Store {
-    pub fn unconfirmed_legacy_activities(&self) -> Result<Vec<Activity>> {
-        let db = self.0.lock().unwrap();
-        let mut query = db.prepare(&format!(
-            "SELECT {ACTIVITY_COLUMNS} FROM activity a WHERE a.txid!='' AND a.status NOT IN ('confirmed','failed') AND NOT EXISTS (SELECT 1 FROM idempotency i WHERE i.activity_id=a.id) ORDER BY a.rowid ASC"
-        ))?;
-        Ok(query
-            .query_map([], row_activity)?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
     pub fn unconfirmed_legacy_activity(&self, id: &str) -> Result<Option<Activity>> {
         let db = self.0.lock().unwrap();
         db.query_row(
@@ -425,7 +530,7 @@ impl Store {
     ) -> Result<Activity> {
         let db = self.0.lock().unwrap();
         db.execute(
-            "UPDATE activity SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast')",
+            "UPDATE activity SET last_error=NULL WHERE id=?1 AND status=?2 AND txid=?3 AND status IN ('preparing','prepared','broadcast','unconfirmed')",
             params![id, expected_status, expected_txid],
         )?;
         activity_by_id(&db, id).map_err(Into::into)

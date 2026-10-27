@@ -300,6 +300,8 @@ pub struct RegtestStack {
     node_url: String,
     api_url: String,
     lightwalletd_port: Option<u16>,
+    mining_mode: Option<&'static str>,
+    block_time: Option<u64>,
     start_attempted: bool,
     shutdown_complete: bool,
     cleanup_errors: Vec<String>,
@@ -352,6 +354,8 @@ impl RegtestStack {
             node_url: String::new(),
             api_url: String::new(),
             lightwalletd_port: None,
+            mining_mode: None,
+            block_time: None,
             start_attempted: false,
             shutdown_complete: false,
             cleanup_errors: Vec::new(),
@@ -361,6 +365,15 @@ impl RegtestStack {
 
     pub async fn start(&mut self) -> Result<()> {
         self.start_with_funding_fault(false).await
+    }
+
+    /// Selects the server's mining mode before startup by exporting
+    /// `THS_MINING_MODE` (and `THS_BLOCK_TIME` for interval mode). The launcher
+    /// normally sets these; the fixture sets them directly on the owned server.
+    pub fn configure_mining(&mut self, mode: &'static str, block_time: Option<u64>) -> &mut Self {
+        self.mining_mode = Some(mode);
+        self.block_time = block_time;
+        self
     }
 
     pub async fn start_with_funding_fault(&mut self, fail_auto_mine: bool) -> Result<()> {
@@ -445,6 +458,8 @@ impl RegtestStack {
                 format!("{}:/config:ro", self.config_dir.display()),
                 "--env".into(),
                 "CONFIG_FILE_PATH=/config/zakurad.toml".into(),
+                "--env".into(),
+                "ZAKURA_STATE__CACHE_DIR=/data".into(),
                 // The private host-mounted config is mode 0700. Keep the
                 // image entrypoint from dropping to its default UID so the
                 // isolated node can read that config while preserving its
@@ -455,7 +470,7 @@ impl RegtestStack {
                 "GID=0".into(),
                 "--publish".into(),
                 "127.0.0.1::18232".into(),
-                "zakuracore/zakura:1.6.0".into(),
+                "zakuracore/zakura:1.7.0".into(),
                 "zakurad".into(),
                 "start".into(),
             ],
@@ -901,6 +916,12 @@ impl RegtestStack {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        if let Some(mode) = self.mining_mode {
+            command.env("THS_MINING_MODE", mode);
+        }
+        if let Some(block_time) = self.block_time {
+            command.env("THS_BLOCK_TIME", block_time.to_string());
+        }
         let child = command
             .spawn()
             .map_err(|_| anyhow::anyhow!("starting the owned fixture server"))?;
@@ -1288,17 +1309,6 @@ impl TerminationSignals {
             }
         }
     }
-}
-
-/// Test-only cancellation seam: it receives a local one-shot signal and takes
-/// the same explicit cleanup path as the live cancellation owner.
-#[cfg(test)]
-async fn shutdown_after_test_cancellation(
-    stack: &mut RegtestStack,
-    cancellation: &mut tokio::sync::oneshot::Receiver<()>,
-) -> Result<()> {
-    let _ = cancellation.await;
-    stack.shutdown().await
 }
 
 fn published_loopback_port(inspect: &DockerInspect, container_port: &str) -> Result<u16> {

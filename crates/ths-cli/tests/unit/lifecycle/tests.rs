@@ -132,6 +132,7 @@ fn nonzero_exit_keeps_diagnostics_and_reaps_the_helper() {
     assert!(failure.stdout.windows(3).any(|window| window == b"out"));
     assert!(failure.stderr.windows(3).any(|window| window == b"err"));
     assert!(failure.to_string().contains("; stderr: err"), "{failure}");
+    assert_eq!(failure.detail, "exit status: 7", "{failure}");
     assert!(failure.helper_reaped);
     assert!(helpers.is_empty());
     fixture.finish();
@@ -401,14 +402,91 @@ fn unverified_reap_retains_the_helper_and_is_not_success() {
     fixture.finish();
 }
 
+#[cfg(unix)]
+fn finishing_create() -> (tempfile::TempDir, std::process::Command, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("created");
+    let script = directory.path().join("create");
+    std::fs::write(&script, format!("sleep 1\ntouch '{}'\n", marker.display())).unwrap();
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg(&script);
+    (directory, command, marker)
+}
+
+#[cfg(unix)]
+fn assert_finishes(marker: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the create was killed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+struct NeverKill(AtomicBool);
+
+#[cfg(unix)]
+impl ChildOps for NeverKill {
+    fn kill(&self, _child: &mut Child) -> io::Result<()> {
+        panic!("a create that must finish was killed")
+    }
+
+    fn try_wait(&self, child: &mut Child) -> io::Result<Option<ExitStatus>> {
+        if !self.0.swap(true, Ordering::SeqCst) {
+            let directory: std::os::fd::OwnedFd = std::fs::File::open(std::env::temp_dir())?.into();
+            child.stdout = Some(std::process::ChildStdout::from(directory));
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+struct WaitFails;
+
+#[cfg(unix)]
+impl ChildOps for WaitFails {
+    fn kill(&self, _child: &mut Child) -> io::Result<()> {
+        panic!("a create that must finish was killed")
+    }
+
+    fn try_wait(&self, _child: &mut Child) -> io::Result<Option<ExitStatus>> {
+        Err(io::Error::other("wait unavailable"))
+    }
+}
+
+#[cfg(unix)]
 #[test]
-fn termination_reserve_is_inside_the_allowance() {
+fn a_create_left_running_survives_every_runner_failure() {
     let policy = short_policy();
-    let deadline = Deadline::after(policy.termination_reserve);
-    let reserve = policy.termination_reserve.min(deadline.remaining());
-    let execution = deadline.saturating_sub(reserve);
-    assert!(execution.expired() || execution.remaining() <= Duration::from_millis(20));
-    assert!(
-        deadline.0 <= Deadline::after(policy.termination_reserve).0 + Duration::from_millis(50)
-    );
+    for (case, ops, fail_nonblocking) in [
+        ("pipe setup", &RealOps as &dyn ChildOps, true),
+        ("capture", &NeverKill(AtomicBool::new(false)), false),
+        ("wait", &WaitFails, false),
+    ] {
+        let (_directory, mut command, marker) = finishing_create();
+        let mut helpers = HelperSet::new();
+
+        let failure = super::run_with(
+            &mut command,
+            Deadline::after(Duration::from_secs(5)),
+            Cancellation::Ignore,
+            OutputMode::Capture,
+            &policy,
+            &mut helpers,
+            ops,
+            fail_nonblocking,
+            super::OnTimeout::LeaveRunning,
+        )
+        .unwrap_err();
+
+        assert!(
+            failure.detail.contains("left running") || case == "wait",
+            "{case}: {failure}"
+        );
+        assert!(
+            helpers.is_empty(),
+            "{case}: the create was queued to be killed"
+        );
+        assert_finishes(&marker);
+    }
 }

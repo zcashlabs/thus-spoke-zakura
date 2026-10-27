@@ -16,6 +16,11 @@ const zatoshi = z
   .nonnegative()
   .transform((value) => BigInt(value));
 
+const signedZatoshi = z
+  .number()
+  .int()
+  .transform((value) => BigInt(value));
+
 export const poolSchema = z.enum(['transparent', 'ironwood']);
 export type Pool = z.infer<typeof poolSchema>;
 
@@ -35,21 +40,83 @@ export type PaymentRequest = z.infer<typeof paymentRequestSchema>;
 
 export const activitySchema = z.object({
   id: z.string(),
-  kind: z.enum(['send', 'faucet']).catch('send'),
+  kind: z.enum(['send', 'faucet', 'transaction']),
+  direction: z.enum(['incoming', 'outgoing', 'internal', 'self', 'unknown']).optional(),
   from_account: z.number().int().nullable().default(null),
   /** Null when the recipient is an address outside the development accounts. */
   to_account: z.number().int().nullable().default(null),
+  from_accounts: z.array(z.number().int().min(1).max(5)).optional(),
+  to_accounts: z.array(z.number().int().min(1).max(5)).optional(),
   to_address: z.string().nullable().default(null),
-  source_pool: poolSchema,
-  destination_pool: poolSchema,
+  recipient_addresses: z.array(z.string()).optional(),
+  source_pool: poolSchema.nullable(),
+  destination_pool: poolSchema.nullable(),
+  source_pools: z.array(poolSchema).optional(),
+  destination_pools: z.array(poolSchema).optional(),
   amount_zatoshi: zatoshi,
+  received_zatoshi: zatoshi.nullable().optional(),
+  spent_zatoshi: zatoshi.nullable().optional(),
+  net_zatoshi: signedZatoshi.nullable().optional(),
   txid: z.string(),
   block_hash: z.string().nullable().default(null),
+  mined_height: z.number().int().nonnegative().nullable().optional(),
   status: z.string(),
   last_error: z.string().nullable().default(null),
-  created_at: z.string(),
+  created_at: z.string().nullable(),
 });
 export type Activity = z.infer<typeof activitySchema>;
+
+const developmentAccount = z.number().int().min(1).max(5);
+
+/** A memo as the wallet stored it: UTF-8 text, or any other memo's bytes as hex. */
+export const storedMemoSchema = z.union([
+  z.strictObject({ text: z.string() }),
+  z.strictObject({ hex: z.string().regex(/^[0-9a-f]*$/) }),
+]);
+export type StoredMemo = z.infer<typeof storedMemoSchema>;
+
+/** One output a development account sent or received, as the local wallet recorded it. */
+export const walletOutputSchema = z.object({
+  pool: z.enum(['transparent', 'sapling', 'orchard', 'ironwood']),
+  index: z.number().int().nonnegative(),
+  value_zatoshi: zatoshi,
+  /** `faucet` for an output the treasury paid; null for an address outside accounts 1-5. */
+  from: z.union([developmentAccount, z.literal('faucet')]).nullable(),
+  to: developmentAccount.nullable(),
+  to_address: z.string().nullable(),
+  change: z.boolean(),
+  memo: storedMemoSchema.nullable(),
+});
+export type WalletOutput = z.infer<typeof walletOutputSchema>;
+
+export const walletTransactionSchema = z.object({
+  txid: z.string(),
+  status: z.enum(['pending', 'confirmed']),
+  mined_height: z.number().int().nonnegative().nullable(),
+  confirmations: z.number().int().nonnegative(),
+  fee_zatoshi: zatoshi.nullable(),
+  /** Whether memos and change flags are final. */
+  details: z.enum(['pending', 'complete', 'unavailable']),
+  outputs: z.array(walletOutputSchema),
+  spends: z.array(
+    z.object({
+      account: developmentAccount,
+      pool: z.enum(['transparent', 'sapling', 'orchard', 'ironwood']),
+      value_zatoshi: zatoshi,
+    }),
+  ),
+});
+export type WalletTransaction = z.infer<typeof walletTransactionSchema>;
+
+export const addressFaucetSchema = z.object({
+  address: z.string(),
+  amount_zatoshi: zatoshi,
+  txid: z.string(),
+  block_hash: z.string().nullable(),
+  status: z.string(),
+  last_error: z.string().nullable(),
+});
+export type AddressFaucet = z.infer<typeof addressFaucetSchema>;
 
 /** A single-payment ZIP-321 URI as resolved by the server. */
 export const paymentUriSchema = z.object({
@@ -87,11 +154,19 @@ export const walletSyncSchema = z.object({
 });
 export type WalletSync = z.infer<typeof walletSyncSchema>;
 
+export const miningModeSchema = z.enum(['auto', 'interval', 'mempool', 'manual']);
+export type MiningMode = z.infer<typeof miningModeSchema>;
+
 export const statusSchema = z.object({
   instance: z.string(),
   node: chainInfoSchema.nullable().default(null),
   account_count: z.number().int().nonnegative(),
+  /** `true` only when each payment mines its own confirming block. */
   auto_mine: z.boolean(),
+  // Optional so a dashboard built before the server grew these fields still loads.
+  mining_mode: miningModeSchema.optional(),
+  block_time: z.number().int().positive().nullable().optional(),
+  mine_on_mempool: z.boolean().optional(),
   network: z.string(),
   settled: z.boolean().optional(),
   settlement_blocker: z.string().nullable().optional(),
@@ -147,11 +222,17 @@ export const blockPageSchema = z.object({
 });
 export type BlockPage = z.infer<typeof blockPageSchema>;
 
+export const mempoolSchema = z.object({
+  transactions: z.array(z.string().regex(/^[0-9a-f]{64}$/i)),
+});
+export type Mempool = z.infer<typeof mempoolSchema>;
+
 /** Transparent inputs. A coinbase input has no previous output to reference. */
 export const txInputSchema = z.looseObject({
   coinbase: z.string().optional(),
   txid: z.string().optional(),
   vout: z.number().int().optional(),
+  prevout_unavailable: z.boolean().optional(),
   /** Copied from the spent output when the explorer can resolve the prevout. */
   valueZat: z.number().int().optional(),
   scriptPubKey: z
@@ -163,7 +244,7 @@ export const txInputSchema = z.looseObject({
 });
 
 export const txOutputSchema = z.looseObject({
-  n: z.number().int().default(0),
+  n: z.number().int().nonnegative(),
   valueZat: z.number().int().optional(),
   scriptPubKey: z
     .looseObject({
@@ -175,15 +256,23 @@ export const txOutputSchema = z.looseObject({
 export type TxOutput = z.infer<typeof txOutputSchema>;
 export type TxInput = z.infer<typeof txInputSchema>;
 
+const txOutputsSchema = z
+  .array(txOutputSchema)
+  .default([])
+  .refine((outputs) => new Set(outputs.map((output) => output.n)).size === outputs.length, {
+    message: 'transaction output indices must be unique',
+  });
+
 export const transactionSchema = z.looseObject({
   txid: z.string(),
+  transparent_inputs_complete: z.boolean().optional(),
   height: z.number().int().optional(),
   blockhash: z.string().optional(),
   blocktime: z.number().int().optional(),
   confirmations: z.number().int().optional(),
   size: z.number().int().optional(),
   vin: z.array(txInputSchema).default([]),
-  vout: z.array(txOutputSchema).default([]),
+  vout: txOutputsSchema,
   vShieldedSpend: z.array(z.unknown()).default([]),
   vShieldedOutput: z.array(z.unknown()).default([]),
   vjoinsplit: z.array(z.unknown()).optional(),
@@ -220,8 +309,8 @@ export type Transaction = z.infer<typeof transactionSchema>;
 export const addressSchema = z.object({
   address: z.string(),
   balance: z.looseObject({
-    balance: z.number().default(0),
-    received: z.number().default(0),
+    balance: z.number().int().nonnegative().default(0),
+    received: z.number().int().nonnegative().default(0),
   }),
 });
 export type AddressInfo = z.infer<typeof addressSchema>;

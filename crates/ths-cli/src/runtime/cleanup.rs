@@ -4,6 +4,9 @@ impl Runtime {
     pub fn stop(&self, name: &InstanceName) -> Result<()> {
         let report = self.verified_cleanup(name)?;
         if report.verified() {
+            if !report.environment_found {
+                bail!("environment {name} does not exist");
+            }
             println!("Stopped and deleted {name} and all of its development data.");
             Ok(())
         } else {
@@ -17,6 +20,9 @@ impl Runtime {
         }
         let report = self.verified_cleanup(name)?;
         if report.verified() {
+            if !report.environment_found {
+                bail!("environment {name} does not exist");
+            }
             println!("Deleted {name}; its Docker volumes cannot be recovered.");
             Ok(())
         } else {
@@ -77,6 +83,7 @@ impl Runtime {
         context: &LifecycleContext,
     ) -> Result<CleanupReport> {
         let recovery_path = self.recovery_path(name);
+        let recorded = self.instance_dir(name).exists();
         let loaded = match recovery::RecoveryJournal::load(recovery_path.clone(), name) {
             Ok(journal) => journal,
             Err(error) => {
@@ -90,16 +97,14 @@ impl Runtime {
                 return Ok(CleanupReport {
                     outcome: CleanupOutcome::Uncertain,
                     failures,
-                    recovery_path: Some(recovery_path),
+                    recovery_path: recovery_path.is_file().then_some(recovery_path),
                     helpers_finished: context.helpers_finished(),
+                    environment_found: recorded,
                 });
             }
         };
+        let mut environment_found = recorded || loaded.is_some();
         let mut journal = loaded;
-        let kept = journal
-            .as_ref()
-            .map(|existing| retained_mutation_resources(existing.record(), false))
-            .unwrap_or_default();
         let work_deadline = deadline.saturating_sub(context.policy.termination_reserve);
         let prefix = prefix(name);
         let mut failures = Vec::new();
@@ -121,6 +126,51 @@ impl Runtime {
         let mut targets: Vec<(String, String, String)> = Vec::new();
         let mut absent_containers = Vec::new();
         let mut consider = |kind: &str, target: &str| -> Result<()> {
+            if let Some(index) = journal
+                .as_ref()
+                .filter(|_| context.helpers_finished())
+                .and_then(|existing| interrupted_create(existing.record(), kind, target))
+            {
+                match create_finished(context, work_deadline, kind, target, name) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        uncertain = true;
+                        failures.push(format!(
+                            "kept {kind} {target}: an earlier `docker {kind} create` for it is still running"
+                        ));
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        uncertain = true;
+                        failures.push(format!(
+                            "kept {kind} {target}: checking for a running create: {error:#}"
+                        ));
+                        return Ok(());
+                    }
+                }
+                let settled = match owned_resource(docker, kind, target, name) {
+                    Ok(Some(id)) => (recovery::MutationOutcome::ReconciledPresent, Some(id)),
+                    Ok(None) => (recovery::MutationOutcome::ReconciledAbsent, None),
+                    Err(error) => {
+                        uncertain = true;
+                        failures.push(format!("kept {kind} {target}: {error:#}"));
+                        return Ok(());
+                    }
+                };
+                if let Some(existing) = &mut journal
+                    && let Err(error) = existing.finish(index, settled.0, settled.1)
+                {
+                    uncertain = true;
+                    failures.push(format!(
+                        "recording the interrupted create of {kind} {target}: {error:#}"
+                    ));
+                    return Ok(());
+                }
+            }
+            let kept = journal
+                .as_ref()
+                .map(|existing| retained_mutation_resources(existing.record(), false))
+                .unwrap_or_default();
             if kept.contains(&(resource_kind(kind), target.to_owned())) {
                 let present = match resource_absent(docker, kind, target) {
                     Ok(absent) => !absent,
@@ -177,7 +227,20 @@ impl Runtime {
                             name: target.to_owned(),
                             identity: Some(id.clone()),
                         };
-                        match inspected_resource_identity(kind, target, name, &details) {
+                        let identity =
+                            match inspected_resource_identity(kind, target, name, &details) {
+                                Err(error) if kind == "network" => {
+                                    match recorded_unlabeled_network_identity(
+                                        docker, &id, name, &details,
+                                    ) {
+                                        Ok(Some(observed)) => Ok(observed),
+                                        Ok(None) => Err(error),
+                                        Err(listing) => Err(listing),
+                                    }
+                                }
+                                identity => identity,
+                            };
+                        match identity {
                             Ok(observed) if recovery::identity_matches(&recorded, &observed) => {
                                 targets.push((kind.to_owned(), id, target.to_owned()));
                                 return Ok(());
@@ -231,7 +294,10 @@ impl Runtime {
             let result = owned_resource(docker, kind, target, name)
                 .with_context(|| format!("{kind} {target}"));
             match result {
-                Ok(Some(id)) => targets.push((kind.to_owned(), id, target.to_owned())),
+                Ok(Some(id)) => {
+                    environment_found = true;
+                    targets.push((kind.to_owned(), id, target.to_owned()));
+                }
                 Ok(None) => {}
                 Err(error) if partial => failures.push(format!("{error:#}")),
                 Err(error) => return Err(error),
@@ -451,8 +517,9 @@ impl Runtime {
                 return Ok(CleanupReport {
                     outcome: CleanupOutcome::Incomplete,
                     failures,
-                    recovery_path: Some(recovery_path),
+                    recovery_path: recovery_path.is_file().then_some(recovery_path),
                     helpers_finished,
+                    environment_found,
                 });
             }
             return Ok(CleanupReport {
@@ -460,6 +527,7 @@ impl Runtime {
                 failures,
                 recovery_path: None,
                 helpers_finished,
+                environment_found,
             });
         }
         if let Some(existing) = &mut journal
@@ -471,8 +539,9 @@ impl Runtime {
         Ok(CleanupReport {
             outcome,
             failures,
-            recovery_path: Some(recovery_path),
+            recovery_path: recovery_path.is_file().then_some(recovery_path),
             helpers_finished,
+            environment_found,
         })
     }
 }
@@ -490,6 +559,7 @@ pub(super) struct CleanupReport {
     pub(super) failures: Vec<String>,
     pub(super) recovery_path: Option<PathBuf>,
     pub(super) helpers_finished: bool,
+    pub(super) environment_found: bool,
 }
 
 impl CleanupReport {
@@ -571,6 +641,44 @@ pub(super) fn resource_absent(
         _ => unreachable!("resource kind is fixed by the caller"),
     };
     Ok(!names.lines().any(|candidate| candidate.trim() == name))
+}
+
+fn create_finished(
+    context: &LifecycleContext,
+    deadline: Deadline,
+    kind: &str,
+    target: &str,
+    name: &InstanceName,
+) -> Result<bool> {
+    let polling = deadline.saturating_sub(context.policy.startup_docker);
+    loop {
+        if !create_running(context, deadline, kind, target, name)? {
+            return Ok(true);
+        }
+        if polling.expired() {
+            return Ok(false);
+        }
+        thread::sleep(CREATE_CHECK_INTERVAL.min(polling.remaining()));
+    }
+}
+
+const CREATE_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
+fn interrupted_create(
+    record: &recovery::RecoveryRecord,
+    kind: &str,
+    target: &str,
+) -> Option<usize> {
+    if !matches!(kind, "network" | "volume") {
+        return None;
+    }
+    record.mutations.iter().rposition(|mutation| {
+        mutation.operation == recovery::MutationOperation::Create
+            && mutation.resource.kind == resource_kind(kind)
+            && mutation.resource.name == target
+            && mutation.resource.identity.is_none()
+            && unresolved_allocation(mutation)
+    })
 }
 
 pub(super) fn unresolved_allocation(mutation: &recovery::MutationRecord) -> bool {

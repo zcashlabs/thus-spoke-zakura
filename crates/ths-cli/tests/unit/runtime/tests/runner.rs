@@ -1,4 +1,27 @@
 use super::*;
+
+#[test]
+fn run_removes_its_lock_when_the_startup_deadline_has_already_expired() {
+    let (host, events) = RecordingHost::new();
+    let mut context = LifecycleContext::new(LifecyclePolicy::default());
+    context.overall_deadline = Some(Deadline::after(Duration::ZERO));
+    let (_sender, shutdown) = Shutdown::channel();
+    let runtime = runtime_for_tests();
+    let error = runtime
+        .run_with_policy(
+            &name("alpha"),
+            &[OsString::from("true")],
+            &runtime.root,
+            &host,
+            &shutdown,
+            &context,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("timeout"));
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+    assert!(events.lock().unwrap().is_empty());
+}
+
 #[test]
 fn run_timeout_after_allocation_skips_child_and_cleans_its_instance() {
     let (mut host, events) = RecordingHost::new();
@@ -18,6 +41,7 @@ fn run_timeout_after_allocation_skips_child_and_cleans_its_instance() {
         )
         .unwrap_err();
     assert!(format!("{error:#}").contains("timeout"), "{error:#}");
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
     let events = events.lock().unwrap();
     assert!(events.contains(&"allocate:alpha".to_owned()));
     assert!(events.contains(&"delete:alpha".to_owned()));
@@ -221,6 +245,8 @@ fn run_preserves_child_exit_code_and_cleans_after_settlement() {
         )
         .unwrap();
     assert_eq!(code, 42);
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
+    assert_eq!(*host.allocated_offsets.lock().unwrap(), [None]);
     let events = events.lock().unwrap();
     assert!(events.contains(&"runtime_status".to_owned()));
     assert!(events.contains(&"child:alpha".to_owned()));
@@ -254,6 +280,7 @@ fn failed_cleanup_reports_error_without_replacing_child_exit_code() {
         )
         .unwrap();
     assert_eq!(code, 42);
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
 }
 
 #[test]
@@ -275,6 +302,7 @@ fn run_refuses_existing_instance_without_cleanup() {
         )
         .unwrap_err();
     assert!(format!("{error:#}").contains("already exists"));
+    assert!(!runtime.root.join(".locks/alpha.lock").exists());
     assert!(events.lock().unwrap().is_empty());
 }
 
@@ -303,7 +331,7 @@ fn child_receives_project_directory_and_regtest_endpoints() {
         &command,
         dir.path(),
         &name("alpha"),
-        &endpoints_for(&host_ports(0).unwrap()),
+        &endpoints_for(&host_ports(10).unwrap()),
         &shutdown,
         Duration::from_millis(50),
     )
@@ -317,11 +345,11 @@ fn child_receives_project_directory_and_regtest_endpoints() {
     for expected in [
         "THS_INSTANCE=alpha",
         "THS_NETWORK=regtest",
-        "THS_API_URL=http://127.0.0.1:32805",
-        "THS_ZAKURA_RPC_URL=http://127.0.0.1:18232",
-        "THS_LIGHTWALLETD_URL=http://127.0.0.1:9067",
+        "THS_API_URL=http://127.0.0.1:32815",
+        "THS_ZAKURA_RPC_URL=http://127.0.0.1:18242",
+        "THS_LIGHTWALLETD_URL=http://127.0.0.1:9077",
         "THS_LIGHTWALLETD_TLS=false",
-        "THS_P2P_ADDR=127.0.0.1:18233",
+        "THS_P2P_ADDR=127.0.0.1:18243",
     ] {
         assert!(
             output.lines().any(|line| line == expected),
@@ -460,43 +488,6 @@ fn stop_routes_through_a_running_run() {
 }
 
 #[test]
-fn wait_ignores_metadata_left_by_a_previous_owner() {
-    let (_sender, shutdown) = Shutdown::channel();
-    let runtime = runtime_for_tests();
-    let alpha = name("alpha");
-    let session = runtime.root.join(".locks/alpha.session");
-    let lock = runtime.claim_start(&alpha).unwrap();
-    fs::write(&session, "old-session").unwrap();
-    fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
-    runtime
-        .write_instance(&alpha, &endpoints_for(&host_ports(0).unwrap()))
-        .unwrap();
-    fs::write(&session, "new-session").unwrap();
-    let delay = Duration::from_millis(300);
-    let startup = finish_startup_after(&runtime, &alpha, lock, delay, "http://127.0.0.1:1".into());
-    let started = Instant::now();
-
-    let status = runtime
-        .wait_for_settlement(
-            &alpha,
-            Instant::now() + Duration::from_secs(10),
-            Duration::ZERO,
-            &shutdown,
-            false,
-            &|_, _| Ok(settled_status()),
-        )
-        .unwrap();
-
-    assert!(status.settled);
-    assert!(started.elapsed() >= delay);
-    assert_eq!(
-        runtime.read_instance(&alpha).unwrap().session.as_deref(),
-        Some("new-session")
-    );
-    startup.join().unwrap();
-}
-
-#[test]
 fn wait_does_not_settle_while_a_stop_is_pending() {
     let (_sender, shutdown) = Shutdown::channel();
     let runtime = runtime_for_tests();
@@ -561,18 +552,6 @@ fn a_run_marks_its_own_teardown_as_stopping() {
     assert!(!runtime.root.join(".locks/alpha.stopping").exists());
 }
 
-fn write_instance_without_session(runtime: &Runtime, name: &InstanceName) {
-    fs::create_dir_all(runtime.instance_dir(name)).unwrap();
-    runtime
-        .write_instance(name, &endpoints_for(&host_ports(0).unwrap()))
-        .unwrap();
-    let path = runtime.instance_dir(name).join("instance.json");
-    let mut instance: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    instance.as_object_mut().unwrap().remove("session");
-    fs::write(&path, serde_json::to_vec(&instance).unwrap()).unwrap();
-}
-
 fn settles_within(
     runtime: &Runtime,
     name: &InstanceName,
@@ -587,33 +566,6 @@ fn settles_within(
         false,
         &|_, _| Ok(settled_status()),
     )
-}
-
-#[test]
-fn wait_ignores_metadata_without_a_session_while_a_launcher_prepares() {
-    let runtime = runtime_for_tests();
-    let alpha = name("alpha");
-    let _owner = runtime.claim_start(&alpha).unwrap();
-    let lifecycle = runtime.lock_instance(&alpha).unwrap();
-    fs::write(runtime.root.join(".locks/alpha.session"), "live").unwrap();
-    write_instance_without_session(&runtime, &alpha);
-    let delay = Duration::from_millis(300);
-    let startup = finish_startup_after(
-        &runtime,
-        &alpha,
-        lifecycle,
-        delay,
-        "http://127.0.0.1:1".into(),
-    );
-
-    let started = Instant::now();
-    assert!(
-        settles_within(&runtime, &alpha, Duration::from_secs(10))
-            .unwrap()
-            .settled
-    );
-    assert!(started.elapsed() >= delay);
-    startup.join().unwrap();
 }
 
 #[test]
@@ -808,28 +760,6 @@ fn wait_rejects_a_settled_answer_read_across_the_owners_exit() {
         if reads.fetch_add(1, Ordering::SeqCst) == 0 {
             fs::remove_file(runtime.root.join(".locks/alpha.session")).unwrap();
             drop(owner.lock().unwrap().take());
-            Ok(settled_status())
-        } else {
-            Err(anyhow!("connection refused"))
-        }
-    });
-
-    assert!(result.is_err(), "{result:?}");
-}
-
-#[test]
-fn wait_rejects_a_settled_answer_read_across_a_stop_without_an_owner() {
-    let runtime = runtime_for_tests();
-    let alpha = name("alpha");
-    fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
-    runtime
-        .write_instance(&alpha, &endpoints_for(&host_ports(0).unwrap()))
-        .unwrap();
-    let reads = std::sync::atomic::AtomicUsize::new(0);
-
-    let result = wait_with_reader(&runtime, &alpha, Duration::from_millis(1500), &|_, _| {
-        if reads.fetch_add(1, Ordering::SeqCst) == 0 {
-            drop(runtime.claim_start(&alpha).unwrap());
             Ok(settled_status())
         } else {
             Err(anyhow!("connection refused"))

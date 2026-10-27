@@ -173,11 +173,11 @@ impl PaymentLifecycle for PaymentAttempt<'_> {
             return Ok(false);
         }
         let current = self.state.0.store.activity(&activity.id)?;
-        let updated = self.state.0.store.fail(&activity.id, error)?;
+        let updated = self.state.0.store.fail_unfunded_send(&activity.id, error)?;
         if updated != current {
             notify(self.state, "wallet");
         }
-        Ok(true)
+        Ok(updated.status == "failed")
     }
 }
 
@@ -221,6 +221,7 @@ where
         runtime.check_can_start()?;
         match pending.status.as_str() {
             "confirmed" | "failed" => return Ok(pending),
+            "unconfirmed" => return runtime.confirm_after_mining(pending).await,
             "prepared" | "broadcast" => match runtime.submit_prepared(&pending).await? {
                 PreparedSubmission::Broadcast(activity) => {
                     return runtime.confirm_after_mining(activity).await;

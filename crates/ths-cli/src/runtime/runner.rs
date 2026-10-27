@@ -110,15 +110,16 @@ impl Runtime {
 
     pub fn run(&self, name: &InstanceName, timeout: Duration, command: &[OsString]) -> Result<u8> {
         let shutdown = Shutdown::install()?;
-        let mut context = LifecycleContext::new(LifecyclePolicy::default());
+        // The child owns stdout, so launcher progress and Docker output go to stderr.
+        let mut context = LifecycleContext::new_for_start(LifecyclePolicy::default(), true);
         let deadline = Deadline(
             Instant::now()
                 .checked_add(timeout)
                 .context("startup timeout is too large")?,
         );
         context.overall_deadline = Some(deadline);
-        host_ports(0)?;
-        let ownership = self.own_start(name, &shutdown, &context)?;
+        let mut ownership = self.own_start(name, &shutdown, &context)?;
+        ownership.remove_lifecycle_when_dropped();
         let prepared = {
             let requested = || shutdown.try_interrupted();
             let docker = LifecycleDocker::production(
@@ -128,7 +129,7 @@ impl Runtime {
                 Cancellation::Observe(&requested),
             );
             (|| {
-                startup_docker_reachable(&docker, false)?;
+                startup_docker_reachable(&docker, context.diagnostics_to_stderr)?;
                 for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
                     startup_require_image(&docker, &image)?;
                 }
@@ -170,7 +171,6 @@ impl Runtime {
         shutdown: &Shutdown,
         context: &LifecycleContext,
     ) -> Result<u8> {
-        host_ports(0)?;
         let ownership = self.own_start(name, shutdown, context)?;
         self.run_owned(
             name,
@@ -192,8 +192,9 @@ impl Runtime {
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
-        ownership: StartOwnership,
+        mut ownership: StartOwnership,
     ) -> Result<u8> {
+        ownership.remove_lifecycle_when_dropped();
         let session = ownership.session();
         let deadline = context.overall_deadline.context("missing run deadline")?;
         if deadline.expired() {
@@ -215,10 +216,18 @@ impl Runtime {
             context,
             state: CleanupGuard::Armed,
         };
-        println!("Preparing a fresh {name} environment…");
+        eprintln!("Preparing a fresh {name} environment…");
         let primary = (|| {
             let mut journal = recovery::RecoveryJournal::create(self.recovery_path(name), name)?;
-            let allocated = host.allocate(self, name, shutdown, 0, context, &mut journal)?;
+            let allocated = host.allocate(
+                self,
+                name,
+                shutdown,
+                None,
+                MiningConfig::default(),
+                context,
+                &mut journal,
+            )?;
             if allocated.zakura_container_id.is_empty()
                 || allocated
                     .resources
@@ -243,7 +252,7 @@ impl Runtime {
                 shutdown,
                 true,
             )?;
-            println!("{name} is settled; running child command…");
+            eprintln!("{name} is settled; running child command…");
             let ready = self.mark_ready(name, session)?;
             let outcome =
                 host.run_child(command, current_dir, name, &allocated.endpoints, shutdown);
@@ -273,6 +282,11 @@ impl Runtime {
         let cleaned = host
             .delete_partial(self, name, context, Deadline::after(context.policy.cleanup))
             .and_then(CleanupReport::into_result);
+        let unlocked = ownership.finish_lifecycle();
+        let cleaned = match (cleaned, unlocked) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(cleanup), Err(unlock)) => Err(anyhow!("{cleanup:#}; {unlock:#}")),
+        };
         match (primary, cleaned) {
             (Ok(ChildOutcome::Exited(code)), Ok(())) => Ok(code),
             (Ok(ChildOutcome::Signaled), Ok(())) => Ok(1),
@@ -401,16 +415,10 @@ pub(super) fn run_child(
         .split_first()
         .context("run requires a child command")?;
     let mut process = Command::new(program);
-    process
-        .args(arguments)
-        .current_dir(current_dir)
-        .env("THS_INSTANCE", name.to_string())
-        .env("THS_NETWORK", "regtest")
-        .env("THS_API_URL", &endpoints.dashboard)
-        .env("THS_ZAKURA_RPC_URL", &endpoints.rpc)
-        .env("THS_LIGHTWALLETD_URL", &endpoints.lightwalletd)
-        .env("THS_LIGHTWALLETD_TLS", "false")
-        .env("THS_P2P_ADDR", &endpoints.p2p);
+    process.args(arguments).current_dir(current_dir);
+    for (key, value) in child_environment(name, endpoints) {
+        process.env(key, value);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

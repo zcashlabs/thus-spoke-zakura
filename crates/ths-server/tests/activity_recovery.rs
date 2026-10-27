@@ -1,13 +1,20 @@
 mod support;
 
+#[path = "scenarios/activity_recovery/chain.rs"]
+mod chain;
+
 #[path = "scenarios/activity_recovery/assertions.rs"]
 mod assertions;
 #[path = "scenarios/activity_recovery/faucet.rs"]
 mod faucet;
+#[path = "scenarios/activity_recovery/mining.rs"]
+mod mining;
 #[path = "scenarios/activity_recovery/recovery.rs"]
 mod recovery;
 #[path = "scenarios/activity_recovery/send.rs"]
 mod send;
+#[path = "scenarios/activity_recovery/transparent_history.rs"]
+mod transparent_history;
 #[path = "scenarios/activity_recovery/treasury.rs"]
 mod treasury;
 
@@ -21,7 +28,9 @@ use recovery::{exercise_recovery, queued_retry_survives_restart};
 use treasury::exercise_treasury_sync;
 
 use std::{
+    net::TcpListener as StdTcpListener,
     path::PathBuf,
+    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -41,6 +50,18 @@ use support::{
     RecoveryPhase, RegtestStack, TerminationSignals, lose_payment_response, request_json, rpc,
     rpc_with_timeout,
 };
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn external_transparent_spend_reconciles_after_restart() -> Result<()> {
+    transparent_history::external_transparent_spend_reconciles_after_restart().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn reorg_and_rollback_preserve_canonical_wallet_and_payment_state() -> Result<()> {
+    chain::reorg_and_rollback_preserve_canonical_wallet_and_payment_state().await
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker and prepared regtest images"]
@@ -195,6 +216,210 @@ async fn external_address_faucet_behavior_is_unchanged() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker and prepared regtest images"]
+async fn external_ironwood_memo_is_recovered_by_receiving_wallet_sync() -> Result<()> {
+    let mut fixture = RegtestStack::new(PathBuf::from(env!("CARGO_BIN_EXE_ths-server")))?;
+    let mut external_server = None;
+    let external_dir = tempfile::tempdir()?;
+    let scenario = async {
+        fixture.start().await?;
+        fixture.assert_running().await?;
+        let client = Client::new();
+        let accounts: serde_json::Value = request_json(
+            &client,
+            fixture.api_url(),
+            "/api/v1/accounts",
+            None,
+            API_READ_TIMEOUT,
+        )
+        .await?;
+        let recipient = accounts
+            .as_array()
+            .and_then(|accounts| accounts.iter().find(|account| account["id"] == 2))
+            .and_then(|account| account["unified_address"].as_str())
+            .context("account 2 has no unified address")?
+            .to_owned();
+
+        let data_dir = external_dir.path().join("data");
+        let config_dir = external_dir.path().join("config");
+        std::fs::create_dir_all(&data_dir)?;
+        std::fs::create_dir_all(&config_dir)?;
+        let db_path = data_dir.join("ths.db");
+        let db = Connection::open(&db_path)?;
+        db.execute_batch(&format!(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);\
+             INSERT INTO metadata(key,value) VALUES('seed','{}');\
+             INSERT INTO metadata(key,value) VALUES('mnemonic','external memo test wallet');",
+            "07".repeat(32)
+        ))?;
+        drop(db);
+        let init = tokio::process::Command::new(env!("CARGO_BIN_EXE_ths-server"))
+            .arg("init")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .output()
+            .await?;
+        anyhow::ensure!(
+            init.status.success(),
+            "external wallet initialization failed"
+        );
+        let db = Connection::open(&db_path)?;
+        let external_address: String = db.query_row(
+            "SELECT unified_address FROM accounts WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(db);
+
+        let funding: serde_json::Value = confirmed_payment(
+            &client,
+            fixture.api_url(),
+            "/api/v1/faucet/address",
+            Some(&json!({
+                "address": external_address,
+                "amount_zatoshi": 500_000_000,
+                "idempotency_key": uuid::Uuid::new_v4().to_string(),
+            })),
+            SEND_TIMEOUT,
+        )
+        .await?;
+        anyhow::ensure!(
+            funding["status"] == "confirmed",
+            "external wallet funding failed"
+        );
+        let funding_txid = funding["txid"]
+            .as_str()
+            .context("external wallet funding has no txid")?;
+        let funding_block = funding["block_hash"]
+            .as_str()
+            .context("external wallet funding has no block hash")?;
+        let db = Connection::open(&db_path)?;
+        db.execute(
+            "INSERT INTO activity(
+                id,kind,from_account,to_account,to_address,source_pool,destination_pool,
+                amount_zatoshi,txid,block_hash,status
+             ) VALUES(
+                'external-startup-funding','faucet',NULL,1,NULL,'ironwood','ironwood',
+                500000000,?1,?2,'confirmed'
+             )",
+            params![funding_txid, funding_block],
+        )?;
+        db.execute(
+            "INSERT INTO idempotency(key,activity_id,memo)
+             VALUES('startup-account-1-ironwood-v1','external-startup-funding',NULL)",
+            [],
+        )?;
+        drop(db);
+
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        let external_url = format!("http://127.0.0.1:{port}");
+        external_server = Some(
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_ths-server"))
+                .arg("serve")
+                .arg("--data-dir")
+                .arg(&data_dir)
+                .env("THS_LISTEN", format!("127.0.0.1:{port}"))
+                .env("THS_ZAKURA_RPC", fixture.node_url())
+                .env(
+                    "THS_LIGHTWALLETD",
+                    format!("http://127.0.0.1:{}", fixture.lightwalletd_port()?),
+                )
+                .env("THS_INSTANCE", "external-memo-test-wallet")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()?,
+        );
+        let ready_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if client
+                .get(format!("{external_url}/api/v1/health"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            anyhow::ensure!(
+                Instant::now() < ready_deadline,
+                "external wallet did not start"
+            );
+            tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
+        }
+
+        let memo = "memo recovered through receiving wallet sync";
+        let key = uuid::Uuid::new_v4().to_string();
+        let payment: serde_json::Value = confirmed_payment(
+            &client,
+            &external_url,
+            "/api/v1/send",
+            Some(&json!({
+                "from_account": 1,
+                "to_address": recipient,
+                "source_pool": "ironwood",
+                "destination_pool": "ironwood",
+                "amount_zatoshi": 10_000_000,
+                "idempotency_key": key,
+                "memo": memo,
+            })),
+            SEND_TIMEOUT,
+        )
+        .await?;
+        let payment_deadline = Instant::now() + SEND_TIMEOUT;
+        let txid = payment["txid"]
+            .as_str()
+            .context("confirmed external payment has no txid")?
+            .to_owned();
+
+        // Compact-block scanning records the incoming note before transaction
+        // enhancement decrypts its memo, so the row can briefly appear with
+        // no memos. Keep polling until enhancement has caught up.
+        let mut observed_memos = None;
+        loop {
+            let activity: serde_json::Value = request_json(
+                &client,
+                fixture.api_url(),
+                "/api/v1/activity?limit=100",
+                None,
+                API_READ_TIMEOUT,
+            )
+            .await?;
+            if let Some(incoming) = activity
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["txid"] == txid))
+            {
+                if incoming["memos"] == json!([memo]) {
+                    break;
+                }
+                observed_memos = Some(incoming["memos"].clone());
+            }
+            if Instant::now() >= payment_deadline {
+                match observed_memos {
+                    Some(memos) => anyhow::bail!(
+                        "receiving wallet sync did not recover the external memo; last saw {memos}"
+                    ),
+                    None => anyhow::bail!("receiving wallet did not index the external payment"),
+                }
+            }
+            tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
+        }
+        Ok(())
+    }
+    .await;
+    if let Some(mut server) = external_server {
+        let _ = server.kill().await;
+        let _ = server.wait().await;
+    }
+    let cleanup = fixture.shutdown().await;
+    preserve_scenario_failure(scenario, cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
 async fn prepare_rolls_back_constructed_transaction_when_journal_write_fails() -> Result<()> {
     recovery::prepare_rolls_back_constructed_transaction_when_journal_write_fails().await
 }
@@ -299,6 +524,30 @@ mod tests;
 #[ignore = "requires Docker and prepared regtest images"]
 async fn startup_funding_retry_after_auto_mine_failure_has_one_payout() -> Result<()> {
     treasury::startup_funding_retry_after_auto_mine_failure_has_one_payout().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn interval_mode_mines_empty_blocks_without_api_actions() -> Result<()> {
+    mining::interval_mode_mines_empty_blocks_without_api_actions().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn interval_mode_confirms_a_payment_without_ths_mine() -> Result<()> {
+    mining::interval_mode_confirms_a_payment_without_ths_mine().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn mempool_mode_confirms_a_payment_without_ths_mine() -> Result<()> {
+    mining::mempool_mode_confirms_a_payment_without_ths_mine().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn manual_mode_keeps_a_payment_pending_until_ths_mine() -> Result<()> {
+    mining::manual_mode_keeps_a_payment_pending_until_ths_mine().await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -486,4 +735,10 @@ async fn restart_recovers_claim_before_preparation_without_payment_post() -> Res
 #[ignore = "requires Docker and prepared regtest images"]
 async fn insufficient_send_stays_failed_after_restart_and_later_funding() -> Result<()> {
     recovery::insufficient_send_stays_failed_after_restart_and_later_funding().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn dependent_payments_resume_in_admission_order_after_restart() -> Result<()> {
+    recovery::dependent_payments_resume_in_admission_order_after_restart().await
 }

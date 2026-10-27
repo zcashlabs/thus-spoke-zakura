@@ -5,6 +5,7 @@ fn send_args(from: u8, to: u8, destination_pool: Pool, memo: Option<&str>) -> Se
     SendArgs {
         from,
         to: Some(to),
+        to_address: None,
         uri: None,
         amount: Some(SendAmount(1)),
         max: false,
@@ -39,4 +40,26 @@ fn sends_are_checked_before_contacting_the_environment() {
     assert!(check_send(&send_args(3, 3, Pool::Ironwood, None)).is_err());
     assert!(check_send(&send_args(1, 2, Pool::Transparent, Some("hi"))).is_err());
     assert!(check_send(&send_args(1, 2, Pool::Transparent, Some(""))).is_err());
+}
+
+#[test]
+fn external_address_sends_take_their_pool_from_the_address() {
+    assert_eq!(
+        address_pool("tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ"),
+        Pool::Transparent
+    );
+    assert_eq!(address_pool("uregtest1external"), Pool::Ironwood);
+
+    let mut args = send_args(1, 2, Pool::Ironwood, Some("hi"));
+    args.to = None;
+    args.to_address = Some("tmXzrDnkD3c38xn8CRzSqg8azgK24iuvzFZ".to_owned());
+    args.destination_pool = address_pool(args.to_address.as_deref().unwrap());
+    let error = check_send(&args).unwrap_err().to_string();
+    assert!(
+        error.contains("address that can receive Ironwood"),
+        "{error}"
+    );
+
+    args.memo = None;
+    assert!(check_send(&args).is_ok());
 }

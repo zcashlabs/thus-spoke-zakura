@@ -558,6 +558,20 @@ pub(super) async fn exercise_recovery(
         confirmed.status == "confirmed",
         "recovered activity was not confirmed"
     );
+    let persisted_confirmed: Activity = serde_json::from_value(
+        wait_payment_state(
+            &client,
+            fixture.api_url(),
+            &admission.location,
+            "confirmed",
+            recovery_deadline,
+        )
+        .await?,
+    )?;
+    anyhow::ensure!(
+        persisted_confirmed == expected_confirmed,
+        "payment journal did not reconcile the canonical confirmation: expected {expected_confirmed:?}, got {persisted_confirmed:?}"
+    );
     // Keep server mining faulted until direct-node inclusion is reconciled.
     // Autonomous retries may be rejected, but none may advance the chain.
     let recovery_counts = fixture.proxy().counts();
@@ -992,6 +1006,103 @@ pub(super) async fn insufficient_send_stays_failed_after_restart_and_later_fundi
         fixture.assert_running().await
     }
     .await;
+    let cleanup = fixture.shutdown().await;
+    scenario?;
+    cleanup
+}
+
+pub(super) async fn dependent_payments_resume_in_admission_order_after_restart() -> Result<()> {
+    let mut fixture = RegtestStack::new(PathBuf::from(env!("CARGO_BIN_EXE_ths-server")))?;
+    let scenario = async {
+        fixture.start().await?;
+        fixture.interrupt_server().await?;
+        let claims = [
+            ("ffffffff-ffff-4fff-bfff-fffffffffff1", "ordered-restart-faucet", "faucet", None, 2, 100_000_000_u64),
+            ("00000000-0000-4000-8000-000000000001", "ordered-restart-send", "send", Some(2), 3, 50_000_000),
+            ("00000000-0000-4000-8000-000000000000", "ordered-restart-chain", "send", Some(3), 4, 25_000_000),
+        ];
+        // Seed retained, not-yet-prepared intents while the server is stopped.
+        // Deliberately reverse their IDs and tie their timestamps; only durable
+        // admission order can safely recover this dependency chain on restart.
+        {
+            let mut db = Connection::open(fixture.data_dir().join("ths.db"))?;
+            let transaction = db.transaction()?;
+            for (id, key, kind, from, to, amount) in claims {
+                transaction.execute(
+                    "INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,status,created_at)
+                     VALUES(?1,?2,?3,?4,'ironwood','ironwood',?5,'','preparing','2026-10-17 00:00:00')",
+                    params![id,kind,from,to,amount],
+                )?;
+                transaction.execute("INSERT INTO idempotency(key,activity_id,memo) VALUES(?1,?2,NULL)", params![key,id])?;
+            }
+            transaction.commit()?;
+        }
+        fixture.proxy().reject_payment_mining(true)?;
+        fixture.restart_server().await?;
+        let client = Client::new();
+        let funding_location = format!("/api/v1/activity?idempotency_key={}", claims[0].1);
+        let pending_funding = wait_payment_state(&client, fixture.api_url(), &funding_location, "broadcast", Instant::now() + SEND_TIMEOUT).await?;
+        let funding_journal = prepared_payment(fixture.data_dir(), claims[0].0)?.context("funding journal missing")?;
+        for (id, key, _, _, _, _) in &claims[1..] {
+            let location = format!("/api/v1/activity?idempotency_key={key}");
+            let deadline = Instant::now() + SEND_TIMEOUT;
+            loop {
+                let rows: Vec<serde_json::Value> = request_json(&client, fixture.api_url(), &location, None, API_READ_TIMEOUT).await?;
+                let pending = rows.first().context("dependent intent disappeared")?;
+                anyhow::ensure!(pending["id"] == *id && pending["status"] == "preparing" && pending["txid"] == "", "an earlier unresolved payment did not protect its dependent send: {pending}");
+                if pending["last_error"].as_str().is_some_and(|error| error.contains("insufficient")) {
+                    break;
+                }
+                anyhow::ensure!(Instant::now() < deadline, "dependent preparation was not exercised");
+                tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
+            }
+        }
+        // Both dependents have now tried preparation without spendable incoming
+        // funds. Restart with those same intents and the original signed funder.
+        fixture.restart_server().await?;
+        let retained_funding: Vec<serde_json::Value> = request_json(&client, fixture.api_url(), &funding_location, None, API_READ_TIMEOUT).await?;
+        anyhow::ensure!(retained_funding.first().map(|payment| &payment["txid"]) == Some(&pending_funding["txid"]) && prepared_payment(fixture.data_dir(), claims[0].0)?.as_ref() == Some(&funding_journal), "restart replaced the original pending funding transaction");
+        let _: serde_json::Value = rpc(&client, fixture.node_url(), "generate", json!([1])).await?;
+        fixture.proxy().reject_payment_mining(false)?;
+        let mut confirmed = Vec::new();
+        for (id, key, _, _, _, amount) in claims {
+            let location = format!("/api/v1/activity?idempotency_key={key}");
+            let payment = wait_payment_state(&client, fixture.api_url(), &location, "confirmed", Instant::now() + SEND_TIMEOUT).await?;
+            anyhow::ensure!(payment["id"] == id && payment["amount_zatoshi"] == amount && payment["txid"].as_str().is_some_and(|txid| !txid.is_empty()) && !payment["block_hash"].is_null(), "dependent payment lost its identity or confirmation: {payment}");
+            let txid = payment["txid"].as_str().context("confirmed payment omitted txid")?;
+            let transaction: serde_json::Value = rpc(&client, fixture.node_url(), "getrawtransaction", json!([txid,1])).await?;
+            anyhow::ensure!(transaction["blockhash"] == payment["block_hash"] && transaction["confirmations"].as_u64().is_some_and(|count| count > 0), "payment was not included on the real chain");
+            confirmed.push(payment);
+        }
+        anyhow::ensure!(confirmed[0]["txid"] == pending_funding["txid"] && prepared_payment(fixture.data_dir(), claims[0].0)?.as_ref() == Some(&funding_journal), "recovery replaced the retained funding transaction");
+        let balances: serde_json::Value = request_json(&client, fixture.api_url(), "/api/v1/accounts", None, API_READ_TIMEOUT).await?;
+        let accounts: Vec<AccountBalance> = serde_json::from_value(balances.clone())?;
+        anyhow::ensure!(accounts.iter().any(|account| account.id == 4 && account.ironwood_zatoshi == 25_000_000), "dependent chain did not pay Account 4 exactly once");
+        let second = accounts.iter().find(|account| account.id == 2).context("Account 2 missing")?.ironwood_zatoshi;
+        let third = accounts.iter().find(|account| account.id == 3).context("Account 3 missing")?.ironwood_zatoshi;
+        anyhow::ensure!(second > 0 && second < 50_000_000 && third > 0 && third < 25_000_000, "source balances did not account for both transfers and fees");
+        let tip: ChainInfo = rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
+        let counts = fixture.proxy().counts();
+        let wallet_journal = prepared_payment_journal(fixture.data_dir())?;
+        let server_journal = super::assertions::server_prepared_journal(fixture.data_dir())?;
+        fixture.restart_server().await?;
+        for (index, (_, key, kind, from, to, amount)) in claims.into_iter().enumerate() {
+            let body = if kind == "faucet" {
+                json!({"account_id":to,"pool":"ironwood","amount_zatoshi":amount,"idempotency_key":key})
+            } else {
+                json!({"from_account":from,"to_account":to,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":amount,"idempotency_key":key})
+            };
+            let path = if kind == "faucet" { "/api/v1/faucet" } else { "/api/v1/send" };
+            let replay = admit_payment(&client, fixture.api_url(), path, &body).await?;
+            anyhow::ensure!(replay.operation == confirmed[index], "same-key replay changed a dependent payment");
+        }
+        let after: serde_json::Value = request_json(&client, fixture.api_url(), "/api/v1/accounts", None, API_READ_TIMEOUT).await?;
+        let final_tip: ChainInfo = rpc(&client, fixture.node_url(), "getblockchaininfo", json!([])).await?;
+        anyhow::ensure!(after == balances && final_tip.blocks == tip.blocks && final_tip.bestblockhash == tip.bestblockhash, "restart or replays changed balances or chain");
+        anyhow::ensure!(fixture.proxy().counts() == counts && prepared_payment_journal(fixture.data_dir())? == wallet_journal && super::assertions::server_prepared_journal(fixture.data_dir())? == server_journal, "restart or replays executed retained payments again");
+        println!("{}", json!({"case":"dependent_payments_resume_in_admission_order_after_restart","payments":confirmed,"balances":balances.as_array().map(|accounts| accounts.iter().map(|account| json!({"id":account["id"],"ironwood_zatoshi":account["ironwood_zatoshi"],"transparent_zatoshi":account["transparent_zatoshi"]})).collect::<Vec<_>>()),"height":tip.blocks,"restart_and_replays_unchanged":true}));
+        fixture.assert_running().await
+    }.await;
     let cleanup = fixture.shutdown().await;
     scenario?;
     cleanup

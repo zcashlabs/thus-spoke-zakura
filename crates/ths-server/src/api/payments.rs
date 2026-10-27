@@ -110,11 +110,17 @@ fn payment_uri(store: &Store, uri: &str) -> ApiResult<PaymentUri> {
         Ok(Some(Memo::Text(text))) => Some(String::from(&*text)),
         _ => return Err(ApiError::bad_request("only text memos are supported")),
     };
+    // ZIP-321 treats an explicit zero as a requested amount. Send cannot pay
+    // it, while an omitted amount stays unset so the sender can supply one.
+    let amount_zatoshi = payment.amount().map(u64::from);
+    if amount_zatoshi == Some(0) {
+        return Err(ApiError::bad_request("amount must be greater than zero"));
+    }
     Ok(PaymentUri {
         to_account: development_account_for(store, &address)?,
         address,
         destination_pool,
-        amount_zatoshi: payment.amount().map(u64::from),
+        amount_zatoshi,
         memo,
     })
 }
@@ -187,6 +193,7 @@ pub(crate) async fn send_quote(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<SendQuoteRequest>,
 ) -> ApiResult<Json<SendQuote>> {
+    require_started(&state)?;
     require_user_account(req.from_account)?;
     require_pool(&req.source_pool, "source_pool")?;
     require_pool(&req.destination_pool, "destination_pool")?;
@@ -600,7 +607,7 @@ fn payment_response<T>(
 ) -> ApiResult<PaymentResponse<T>> {
     let status = match status {
         "confirmed" | "failed" => StatusCode::OK,
-        "preparing" | "prepared" | "broadcast" => StatusCode::ACCEPTED,
+        "preparing" | "prepared" | "broadcast" | "unconfirmed" => StatusCode::ACCEPTED,
         status => return Err(anyhow::anyhow!("payment has unsupported status {status}").into()),
     };
     let mut url =

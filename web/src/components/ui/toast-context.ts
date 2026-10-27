@@ -17,7 +17,7 @@ export interface ToastMessage {
 
 export interface ToastApi {
   success: (title: string, detail?: string) => void;
-  error: (title: string, detail?: string, action?: ToastAction) => void;
+  error: (title: string, detail?: string, action?: ToastAction) => () => void;
 }
 
 export const ToastContext = createContext<ToastApi | null>(null);

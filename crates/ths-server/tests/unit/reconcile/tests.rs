@@ -195,3 +195,24 @@ fn scan_ranges_are_split_without_gaps() {
         .collect::<Vec<_>>();
     assert_eq!(ranges, [(5, 105), (105, 205), (205, 256)]);
 }
+
+#[test]
+fn only_an_aborted_lightwalletd_stream_marks_a_reorg_repair() {
+    let aborted = within_deadline_error(tonic::Status::aborted(
+        "GetBlockRange: chain discontinuity during reorg repair",
+    ));
+    assert!(repairing_reorg(&aborted));
+    let out_of_range = within_deadline_error(tonic::Status::out_of_range(
+        "GetBlock: block 5 is newer than the latest block",
+    ));
+    assert!(!repairing_reorg(&out_of_range));
+    assert!(!repairing_reorg(&anyhow::anyhow!(
+        "streaming compact blocks"
+    )));
+}
+
+/// The error `within_deadline` returns for a lightwalletd status: the status wrapped in the
+/// call's label, as `sync_pass` sees it.
+fn within_deadline_error(status: tonic::Status) -> anyhow::Error {
+    anyhow::Error::from(status).context("streaming compact blocks")
+}

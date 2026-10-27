@@ -1,4 +1,5 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { userAccounts } from '@/lib/accounts';
 import {
   api,
   type Account,
@@ -7,10 +8,12 @@ import {
   type Block,
   type BlockPage,
   type MiningJob,
+  type Mempool,
   type SendQuote,
   type SendQuoteInput,
   type Status,
   type Transaction,
+  type WalletTransaction,
 } from '@/lib/api';
 
 /**
@@ -24,8 +27,10 @@ export const queryKeys = {
   activity: (limit: number) => ['activity', limit] as const,
   payment: (key: string) => ['activity', 'payment', key] as const,
   blocks: (before?: number) => ['blocks', before ?? 'tip'] as const,
+  mempool: ['mempool'] as const,
   block: (id: string) => ['block', id] as const,
   transaction: (txid: string) => ['transaction', txid] as const,
+  walletTransaction: (txid: string) => ['wallet-transaction', txid] as const,
   address: (address: string) => ['address', address] as const,
   sendQuote: (params: SendQuoteInput) => ['send-quote', params] as const,
 };
@@ -34,8 +39,10 @@ export function useStatus(): UseQueryResult<Status> {
   return useQuery({ queryKey: queryKeys.status, queryFn: api.status });
 }
 
+export const accountsQueryOptions = { queryKey: queryKeys.accounts, queryFn: () => api.accounts() };
+
 export function useAccounts(): UseQueryResult<Account[]> {
-  return useQuery({ queryKey: queryKeys.accounts, queryFn: api.accounts });
+  return useQuery({ ...accountsQueryOptions, select: userAccounts });
 }
 
 export function useActivity(limit = 30): UseQueryResult<Activity[]> {
@@ -46,10 +53,10 @@ export function isTerminalPayment(activity: Activity | null | undefined): boolea
   return activity?.status === 'confirmed' || activity?.status === 'failed';
 }
 
-export function usePaymentStatus(key: string, enabled: boolean) {
+export function usePaymentStatus(key: string, enabled: boolean, addressFaucet = false) {
   return useQuery({
     queryKey: queryKeys.payment(key),
-    queryFn: () => api.payment(key),
+    queryFn: () => (addressFaucet ? api.faucetAddressStatus(key) : api.payment(key)),
     enabled,
     retry: false,
     staleTime: 0,
@@ -75,11 +82,30 @@ export function useBlock(id: string): UseQueryResult<Block> {
   });
 }
 
+export function useMempool(): UseQueryResult<Mempool> {
+  return useQuery({
+    queryKey: queryKeys.mempool,
+    queryFn: api.mempool,
+    // External broadcasts do not advance the chain or emit a server event.
+    refetchInterval: 2_000,
+  });
+}
+
 export function useTransaction(txid: string): UseQueryResult<Transaction> {
   return useQuery({
     queryKey: queryKeys.transaction(txid),
     queryFn: () => api.transaction(txid),
     enabled: txid.length > 0,
+  });
+}
+
+export function useWalletTransaction(txid: string): UseQueryResult<WalletTransaction> {
+  return useQuery({
+    queryKey: queryKeys.walletTransaction(txid),
+    queryFn: () => api.walletTransaction(txid),
+    enabled: txid.length > 0,
+    // Fetching the full transaction does not always emit a server event.
+    refetchInterval: (query) => (query.state.data?.details === 'pending' ? 5_000 : false),
   });
 }
 

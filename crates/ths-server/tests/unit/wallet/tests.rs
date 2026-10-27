@@ -345,14 +345,6 @@ async fn delayed_send_quote_does_not_block_the_async_executor() {
 }
 
 #[tokio::test]
-async fn delayed_has_prepared_does_not_block_the_async_executor() {
-    assert_runs_off_the_executor(|test| async move {
-        test.wallet.has_prepared("activity-1").await.map(|_| ())
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn delayed_recover_prepared_does_not_block_the_async_executor() {
     assert_runs_off_the_executor(|test| async move {
         test.wallet

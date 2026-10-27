@@ -18,7 +18,7 @@ use super::recovery::{
 };
 use super::*;
 use crate::{
-    lifecycle::Cancellation,
+    lifecycle::{Cancellation, ChildOps},
     test_support::{HttpFixture, HttpMode, short_policy},
 };
 
@@ -35,9 +35,19 @@ fn name(value: &str) -> InstanceName {
     value.parse().unwrap()
 }
 
+/// Every caller of this policy asserts on outcome *classification*
+/// (verified/incomplete/uncertain, retained dependencies, journal contents),
+/// never on deadline or termination-reserve math itself. Real persistence
+/// (fsync) and scheduling delays can eat a finite budget under heavy
+/// parallel test contention, which has nothing to do with the classification
+/// logic under test, so the budget here is large enough that in-memory
+/// fixture work never approaches it regardless of machine load. A test that
+/// exercises actual deadline or reserve math (e.g.
+/// `hanging_removal_leaves_the_termination_reserve_for_helpers`) must use its
+/// own real, finite policy instead of this one.
 fn cleanup_policy() -> LifecyclePolicy {
     LifecyclePolicy {
-        cleanup: Duration::from_secs(2),
+        cleanup: Duration::from_secs(3600),
         ..short_policy()
     }
 }
@@ -322,6 +332,7 @@ fn script_docker<'a>(
         program: "/bin/sh".into(),
         prefix_args: vec![script.path().join("docker").to_string_lossy().into_owned()],
         env: Vec::new(),
+        child_ops: None,
     }
 }
 
@@ -331,7 +342,7 @@ fn hang_on_removal_script() -> tempfile::TempDir {
     let mut file = fs::File::create(&path).unwrap();
     write!(
         file,
-        "#!/bin/sh\nif [ \"$1\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"volume\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"network\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"container\" ] && [ \"$2\" = \"inspect\" ]; then\n  printf '%s\\n' '[{{\"Id\":\"app-id\",\"Config\":{{\"Labels\":{{\"com.zakura.ths.instance\":\"alpha\"}}}}}}]'\n  exit 0\nfi\nexit 0\n"
+        "#!/bin/sh\nif [ \"$1\" = \"rm\" ]; then\n  [ -n \"$THS_REMOVAL_MARKER\" ] && touch \"$THS_REMOVAL_MARKER\"\n  sleep 30\nfi\nif [ \"$1\" = \"volume\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"network\" ] && [ \"$2\" = \"rm\" ]; then\n  sleep 30\nfi\nif [ \"$1\" = \"container\" ] && [ \"$2\" = \"inspect\" ]; then\n  printf '%s\\n' '[{{\"Id\":\"app-id\",\"Config\":{{\"Labels\":{{\"com.zakura.ths.instance\":\"alpha\"}}}}}}]'\n  exit 0\nfi\nexit 0\n"
     )
     .unwrap();
     make_executable(&path);

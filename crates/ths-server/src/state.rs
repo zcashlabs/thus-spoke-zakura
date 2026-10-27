@@ -2,7 +2,7 @@
 use crate::mining::MiningRuntime;
 use crate::{
     db::{Account, Store},
-    mining::MiningCoordinator,
+    mining::{MiningConfig, MiningCoordinator},
     rpc::{ChainCheckpoint, NodeRpc},
     wallet::RealWallet,
     wallet::WALLET_BIRTHDAY_HEIGHT,
@@ -23,15 +23,21 @@ pub(crate) struct Inner {
     pub(crate) mining: Arc<MiningCoordinator>,
     #[cfg(test)]
     pub(crate) mining_runtime: Option<Arc<dyn MiningRuntime>>,
+    #[cfg(test)]
+    pub(crate) chain_runtime: Option<Arc<dyn crate::chain::ChainRuntime>>,
     pub(crate) store: Store,
     pub(crate) wallet: RealWallet,
     pub(crate) rpc: NodeRpc,
     pub(crate) instance: String,
+    /// Selected once at startup and never changed for the server lifetime.
+    pub(crate) mining_config: MiningConfig,
     pub(crate) events: broadcast::Sender<String>,
     pub(crate) payments: Mutex<()>,
     pub(crate) wallet_sync: Mutex<()>,
     pub(crate) treasury_replenishment: Mutex<()>,
     pub(crate) wallet_snapshot: RwLock<WalletSnapshot>,
+    /// whether the last background tick reached lightwalletd; startup waits for it, so true.
+    pub(crate) lightwalletd_reachable: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -60,7 +66,18 @@ impl AppState {
         self.0.started.store(true, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(crate) fn new(store: Store, wallet: RealWallet, rpc: String, instance: String) -> Self {
+        Self::new_with_mining(store, wallet, rpc, instance, MiningConfig::default())
+    }
+
+    pub(crate) fn new_with_mining(
+        store: Store,
+        wallet: RealWallet,
+        rpc: String,
+        instance: String,
+        mining_config: MiningConfig,
+    ) -> Self {
         let (events, _) = broadcast::channel(128);
         let accounts = store.accounts().unwrap_or_default();
         Self(Arc::new(Inner {
@@ -68,14 +85,18 @@ impl AppState {
             mining: Arc::new(MiningCoordinator::new()),
             #[cfg(test)]
             mining_runtime: None,
+            #[cfg(test)]
+            chain_runtime: None,
             store,
             wallet,
             rpc: NodeRpc::new(rpc),
             instance,
+            mining_config,
             events,
             payments: Mutex::new(()),
             wallet_sync: Mutex::new(()),
             treasury_replenishment: Mutex::new(()),
+            lightwalletd_reachable: AtomicBool::new(true),
             wallet_snapshot: RwLock::new(WalletSnapshot {
                 accounts,
                 status: WalletSyncStatus {
@@ -89,6 +110,10 @@ impl AppState {
                 },
             }),
         }))
+    }
+
+    pub(crate) fn mining_config(&self) -> MiningConfig {
+        self.0.mining_config
     }
 
     pub(crate) async fn accounts(&self) -> Vec<Account> {

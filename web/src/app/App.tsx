@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AlertTriangle, Fuel, Pickaxe } from 'lucide-react';
 import { Shell } from '@/components/layout/Shell';
 import { WalletPage } from '@/features/wallet/WalletPage';
+import { AccountDetail } from '@/features/wallet/AccountDetail';
 import { ExplorerPage } from '@/features/explorer/ExplorerPage';
 import { NetworkPage } from '@/features/network/NetworkPage';
 import { useServerEvents } from '@/hooks/useServerEvents';
@@ -29,7 +30,10 @@ export function App() {
   // Detail views render their own <h1> (the block, transaction, address or
   // node). Rendering the section title as a second <h1> above it duplicated
   // the page heading and left two h1 elements in the document.
-  const ownsHeading = /^\/explorer\/(block|tx|address)\//.test(pathname) || section === '/network';
+  const ownsHeading =
+    /^\/explorer\/(block|tx|address)\//.test(pathname) ||
+    pathname.startsWith('/wallet/accounts/') ||
+    section === '/network';
 
   return (
     <Shell>
@@ -52,7 +56,7 @@ export function App() {
             <ThemeToggle />
           </div>
           <PaymentUpdates />
-          <Button variant="ghost" onClick={openMine} className="max-sm:hidden">
+          <Button variant="ghost" onClick={openMine}>
             <Pickaxe />
             Mine
           </Button>
@@ -88,6 +92,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/wallet" replace />} />
           <Route path="/wallet" element={<WalletPage />} />
+          <Route path="/wallet/accounts/:accountId" element={<AccountDetail />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
           <Route path="/network" element={<NetworkPage />} />
           <Route path="*" element={<Navigate to="/wallet" replace />} />

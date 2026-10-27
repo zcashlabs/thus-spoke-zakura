@@ -19,6 +19,7 @@ import { paymentRecipient, type PaymentIdentity } from '@/hooks/payment-identity
 import { errorMessage } from '@/lib/api';
 import { formatZecAmount } from '@/lib/money';
 import { cn } from '@/lib/cn';
+import { absoluteTime } from '@/lib/format';
 
 export function PaymentStatus({
   identity,
@@ -36,6 +37,7 @@ export function PaymentStatus({
   onHiddenFocus,
   focusRequest,
   onView,
+  onFollowTransaction,
 }: {
   identity: PaymentIdentity;
   restored: boolean;
@@ -52,8 +54,9 @@ export function PaymentStatus({
   onHiddenFocus: () => void;
   focusRequest: object | null;
   onView: () => void;
+  onFollowTransaction: () => void;
 }) {
-  const status = usePaymentStatus(identity.key, true);
+  const status = usePaymentStatus(identity.key, true, 'address' in identity.variables);
   const activity = status.data;
   const toast = useToast();
   const titleId = useId();
@@ -333,6 +336,21 @@ export function PaymentStatus({
               className="text-accent-strong self-center underline underline-offset-2"
               aria-describedby={titleId}
               to={`/explorer/tx/${activity.txid}`}
+              onClick={(event) => {
+                const { button, altKey, ctrlKey, metaKey, shiftKey, currentTarget } = event;
+                const opensSeparateContext =
+                  currentTarget.target !== '' && currentTarget.target.toLowerCase() !== '_self';
+                if (
+                  button === 0 &&
+                  !altKey &&
+                  !ctrlKey &&
+                  !metaKey &&
+                  !shiftKey &&
+                  !opensSeparateContext
+                ) {
+                  onFollowTransaction();
+                }
+              }}
             >
               View transaction
             </Link>
@@ -368,15 +386,17 @@ export function PaymentStatus({
       </div>
       <div id={detailsId} hidden={!detailsOpen} className="text-ink-muted mt-2 space-y-1">
         {restored && <p>Previous payment</p>}
-        <p>
-          Pool route:{' '}
-          {identity.kind === 'send'
-            ? `${identity.variables.source_pool} → ${identity.variables.destination_pool}`
-            : identity.variables.pool}
-        </p>
+        {identity.kind === 'send' ? (
+          <p>
+            Pool route: {identity.variables.source_pool} → {identity.variables.destination_pool}
+          </p>
+        ) : 'pool' in identity.variables ? (
+          <p>Pool route: {identity.variables.pool}</p>
+        ) : null}
         {identity.kind === 'send' && identity.variables.to_address && (
           <p>Destination: {identity.variables.to_address}</p>
         )}
+        {'address' in identity.variables && <p>Destination: {identity.variables.address}</p>}
         {identity.kind === 'send' && (
           <p>
             Memo:{' '}
@@ -387,7 +407,7 @@ export function PaymentStatus({
                 : identity.variables.memo}
           </p>
         )}
-        {activity?.created_at && <p>Created: {activity.created_at}</p>}
+        {activity?.created_at && <p>Created: {absoluteTime(activity.created_at)}</p>}
         {failed && <p>Adding funds won’t restart this payment. Start a new one to try again.</p>}
       </div>
     </article>,

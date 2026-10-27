@@ -34,6 +34,20 @@ pub(crate) enum Command {
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
         port_offset: u16,
+        /// Mine a block every SECS seconds, even when there are no transactions.
+        #[arg(
+            long,
+            value_name = "SECS",
+            value_parser = clap::value_parser!(u64).range(1..),
+            conflicts_with_all = ["mine_on_mempool", "no_auto_mine"]
+        )]
+        block_time: Option<u64>,
+        /// Mine a block whenever the mempool holds new transactions.
+        #[arg(long, conflicts_with = "no_auto_mine")]
+        mine_on_mempool: bool,
+        /// Never mine automatically; confirmed work waits for `ths mine`.
+        #[arg(long)]
+        no_auto_mine: bool,
     },
     /// Wait until an existing environment is settled.
     Wait {
@@ -74,12 +88,56 @@ pub(crate) enum Command {
     /// Open the dashboard in the default browser.
     Open,
     /// Print endpoints for developer tooling.
-    Endpoints,
+    Endpoints {
+        /// Print export lines for the variables ths run passes to its child.
+        #[arg(long)]
+        env: bool,
+    },
+    /// Call a method on the instance's Zakura JSON-RPC endpoint.
+    Rpc {
+        /// Print the full JSON-RPC response.
+        #[arg(long)]
+        raw: bool,
+        /// Allow `stop`, which shuts the Zakura node down.
+        #[arg(long)]
+        yes: bool,
+        /// JSON-RPC method name.
+        method: String,
+        /// JSON-RPC parameters.
+        ///
+        /// Numbers, `true`, `false`, `null`, objects, and arrays are parsed as JSON.
+        /// Any other value is sent as a string.
+        #[arg(value_name = "PARAMS", allow_hyphen_values = true)]
+        params: Vec<String>,
+    },
+    /// Show a transaction from the running environment's explorer.
+    Tx {
+        /// Transaction ID.
+        txid: String,
+    },
+    /// Show a block from the explorer, defaulting to the chain tip.
+    Block {
+        /// Block height or hash.
+        id: Option<String>,
+    },
     /// Mine blocks on a running development environment.
     Mine {
         /// Number of blocks to mine.
         #[arg(value_parser = clap::value_parser!(u32).range(1..=10_000))]
         blocks: u32,
+    },
+    /// Replace recent Regtest blocks with a new branch.
+    Reorg {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        depth: u32,
+        /// Attempt to include the dropped transactions in replacement blocks.
+        #[arg(long)]
+        keep_txs: bool,
+    },
+    /// Remove recent Regtest blocks without mining replacements.
+    Rollback {
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        depth: u32,
     },
     /// Send disposable Regtest ZEC to a unified or transparent address.
     Faucet {
@@ -123,6 +181,12 @@ pub(crate) enum Command {
     List,
     /// Check local Docker and configuration prerequisites.
     Doctor,
+    /// Print a shell completion script.
+    Completions {
+        /// Shell that will load the script.
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +198,29 @@ pub(crate) enum WalletCommand {
         /// Maximum number of entries to print (1-100).
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: Option<u32>,
+    },
+    /// Show what the local wallet recorded about one transaction for accounts
+    /// 1-5: outputs, change, memos, spent notes, and fee.
+    Tx {
+        /// Transaction ID.
+        #[arg(value_parser = parse_txid)]
+        txid: String,
+        /// Only show outputs and spends of this account (1-5).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        account: Option<u8>,
+    },
+    /// Show an account's spendable funds, fee, and maximum send for one pool
+    /// route, without sending.
+    Quote {
+        /// Account index to quote (1-5).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        from: u8,
+        /// Pool the quoted send would spend from.
+        #[arg(long = "source-pool", value_enum)]
+        source_pool: Pool,
+        /// Pool the quoted send would pay into. The fee depends on it.
+        #[arg(long = "destination-pool", value_enum)]
+        destination_pool: Pool,
     },
     /// Send faucet funds from the treasury to one or more accounts.
     Faucet {
@@ -198,10 +285,18 @@ pub(crate) struct SendArgs {
     #[arg(
         long,
         value_parser = clap::value_parser!(u8).range(1..=5),
-        required_unless_present = "uri",
-        conflicts_with = "uri"
+        required_unless_present_any = ["uri", "to_address"],
+        conflicts_with_all = ["uri", "to_address"]
     )]
     pub(crate) to: Option<u8>,
+    /// Regtest unified or transparent address to pay instead of --to. The
+    /// destination pool follows the address.
+    #[arg(
+        long = "to-address",
+        value_name = "ADDRESS",
+        conflicts_with_all = ["uri", "destination_pool"]
+    )]
+    pub(crate) to_address: Option<String>,
     /// ZIP-321 payment URI to pay instead of --to. It sets the destination,
     /// pool, and memo, and the amount unless it omits one.
     #[arg(long, conflicts_with_all = ["destination_pool", "memo"])]
@@ -234,6 +329,24 @@ pub(crate) struct SendArgs {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "lower")]
+pub(crate) enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl CompletionShell {
+    pub(crate) fn generator(self) -> clap_complete::Shell {
+        match self {
+            Self::Bash => clap_complete::Shell::Bash,
+            Self::Zsh => clap_complete::Shell::Zsh,
+            Self::Fish => clap_complete::Shell::Fish,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
 pub(crate) enum Pool {
     Ironwood,
     Transparent,
@@ -249,6 +362,13 @@ impl Pool {
 }
 
 fn _assert_pathbuf_send(_: PathBuf) {}
+
+fn parse_txid(value: &str) -> Result<String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("transaction ID must be 64 hexadecimal characters");
+    }
+    Ok(value.to_ascii_lowercase())
+}
 
 /// `--memo ""` is allowed and sends an explicit empty text memo.
 fn parse_memo(value: &str) -> Result<String> {

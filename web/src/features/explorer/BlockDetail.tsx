@@ -8,6 +8,7 @@ import { ErrorState, LoadingState } from '@/components/ui/StateBlock';
 import { useBlock, useStatus } from '@/hooks/queries';
 import { errorMessage } from '@/lib/api';
 import { chainTime } from '@/lib/format';
+import { cn } from '@/lib/cn';
 import { SupplyPanel } from './SupplyPanel';
 import { Stat } from '@/components/ui/Stat';
 import { BACK_LINK } from './back-link';
@@ -116,11 +117,14 @@ export function BlockDetail() {
                   </Link>
                 </td>
                 <NumCell
-                  className={actions > 0 ? 'text-accent-strong font-semibold' : 'text-ink-muted'}
+                  className={cn(
+                    'max-sm:hidden',
+                    actions > 0 ? 'text-accent-strong font-semibold' : 'text-ink-muted',
+                  )}
                 >
                   {actions > 0 ? `${actions} actions` : '—'}
                 </NumCell>
-                <NumCell className="text-ink-muted">
+                <NumCell className="text-ink-muted max-sm:hidden">
                   {typeof tx.size === 'number' ? `${tx.size.toLocaleString()} B` : '—'}
                 </NumCell>
               </Row>

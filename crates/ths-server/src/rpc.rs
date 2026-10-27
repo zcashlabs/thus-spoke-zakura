@@ -128,6 +128,10 @@ impl NodeRpc {
         self.call_within(GENERATE_TIMEOUT, "generate", json!([blocks]))
             .await
     }
+    pub(crate) async fn invalidate_block(&self, hash: &str) -> Result<()> {
+        self.call::<Value>("invalidateblock", json!([hash])).await?;
+        Ok(())
+    }
     pub async fn block(&self, id: &str) -> Result<Value> {
         self.call("getblock", json!([id, 2])).await
     }
@@ -137,11 +141,27 @@ impl NodeRpc {
     pub async fn block_hash(&self, height: u32) -> Result<String> {
         self.call("getblockhash", json!([height])).await
     }
+    /// Zakura's block hash at `height`, or `None` once its chain is shorter than that.
+    /// `getblockhash` above the tip fails with the generic code -1, so the tip decides.
+    pub async fn canonical_hash(&self, height: u32) -> Result<Option<String>> {
+        let error = match self.block_hash(height).await {
+            Ok(hash) => return Ok(Some(hash)),
+            Err(error) => error,
+        };
+        match self.checkpoint().await {
+            Ok(tip) if tip.height < u64::from(height) => Ok(None),
+            _ => Err(error),
+        }
+    }
     pub async fn unspent_output(&self, txid: &str, index: u32) -> Result<Option<Value>> {
         self.call("gettxout", json!([txid, index, true])).await
     }
     pub async fn transaction(&self, txid: &str) -> Result<Value> {
         self.call("getrawtransaction", json!([txid, 1])).await
+    }
+    pub(crate) async fn transaction_within(&self, txid: &str, timeout: Duration) -> Result<Value> {
+        self.call_within(timeout, "getrawtransaction", json!([txid, 1]))
+            .await
     }
     pub async fn lookup_transaction(&self, txid: &str) -> Result<Option<Value>> {
         match self.transaction(txid).await {
@@ -174,7 +194,7 @@ fn transaction_missing(error: &anyhow::Error) -> bool {
 fn classify_response<T: DeserializeOwned>(
     status: reqwest::StatusCode,
     method: &str,
-    envelope: Value,
+    mut envelope: Value,
 ) -> Result<T> {
     if let Some(error) = envelope.get("error").filter(|error| !error.is_null()) {
         let error: RpcError =
@@ -185,9 +205,10 @@ fn classify_response<T: DeserializeOwned>(
         bail!("Zakura {method} returned HTTP {status} without a JSON-RPC error");
     }
     let result = envelope
-        .get("result")
+        .as_object_mut()
+        .and_then(|object| object.remove("result"))
         .with_context(|| format!("Zakura {method} response did not contain a result"))?;
-    serde_json::from_value(result.clone()).context("decoding Zakura result")
+    serde_json::from_value(result).context("decoding Zakura result")
 }
 
 #[cfg(test)]

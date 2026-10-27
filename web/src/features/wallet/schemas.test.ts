@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sendSchema } from './schemas';
+import { MINE_MAX_BLOCKS, MINE_MIN_BLOCKS, mineSchema, sendSchema } from './schemas';
 
 const base = {
   from_account: '1',
@@ -100,6 +100,22 @@ describe('sendSchema', () => {
     }
   });
 
+  it('accepts the 21,000,000 ZEC supply and rejects anything above it', () => {
+    const atSupply = sendSchema.safeParse({ ...base, amount: '21000000' });
+    expect(atSupply.success).toBe(true);
+    if (atSupply.success) expect(atSupply.data.amount).toBe(2_100_000_000_000_000n);
+
+    for (const amount of ['21000000.00000001', '21000001']) {
+      const result = sendSchema.safeParse({ ...base, amount });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.find((issue) => issue.path[0] === 'amount')?.message).toBe(
+          'Amount must not exceed 21,000,000 ZEC.',
+        );
+      }
+    }
+  });
+
   it('accepts a memo to an ironwood destination', () => {
     expect(memoIssue({ ...base, memo: 'rent for October' })).toBeUndefined();
     expect(sendSchema.safeParse({ ...base, memo: 'rent for October' }).success).toBe(true);
@@ -123,4 +139,65 @@ describe('sendSchema', () => {
     expect(memoIssue({ ...base, memo: 'hi\0' })).toMatch(/NUL/);
     expect(memoIssue({ ...base, memo: 'a\0b' })).toBeUndefined();
   });
+});
+
+const rangeMessage = `Enter between ${MINE_MIN_BLOCKS} and ${MINE_MAX_BLOCKS.toLocaleString()} blocks.`;
+
+describe('mineSchema', () => {
+  it.each(['1', '10', '10000', '010', '00010000'])('accepts decimal whole number %s', (blocks) => {
+    const result = mineSchema.safeParse({ blocks });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.blocks).toBe(Number(blocks));
+    }
+  });
+
+  it.each([
+    '1e4',
+    '1E4',
+    '0x10',
+    '0X10',
+    '0b11',
+    '0B11',
+    '0o10',
+    '10.0',
+    '1.5',
+    '+10',
+    '-1',
+    ' 10',
+    '10 ',
+    '1_000',
+  ])('rejects non-decimal block count %s', (blocks) => {
+    const result = mineSchema.safeParse({ blocks });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message: 'Enter a whole number of blocks.',
+          path: ['blocks'],
+        }),
+      ]);
+    }
+  });
+
+  it('rejects an empty block count', () => {
+    const result = mineSchema.safeParse({ blocks: '' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toBe('Enter a number of blocks.');
+      expect(result.error.issues[0]?.path).toEqual(['blocks']);
+    }
+  });
+
+  it.each(['0', '000', '10001', '9'.repeat(40)])(
+    'rejects out-of-range block count %s',
+    (blocks) => {
+      const result = mineSchema.safeParse({ blocks });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe(rangeMessage);
+        expect(result.error.issues[0]?.path).toEqual(['blocks']);
+      }
+    },
+  );
 });

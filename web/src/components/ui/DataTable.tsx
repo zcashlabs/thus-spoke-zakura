@@ -16,10 +16,19 @@ export interface Column {
   width?: string;
 }
 
-export function DataTable({ columns, children }: { columns: Column[]; children: ReactNode }) {
+export function DataTable({
+  columns,
+  children,
+  fixed = false,
+}: {
+  columns: Column[];
+  children: ReactNode;
+  /** Honour column widths exactly, so stacked tables line up column for column. */
+  fixed?: boolean;
+}) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[520px] text-[13px]">
+      <table className={cn('w-full min-w-[520px] text-[13px]', fixed && 'table-fixed')}>
         <thead>
           <tr className="border-line-strong bg-raised sticky top-0 z-10 border-b-2">
             {columns.map((column) => (

@@ -5,13 +5,14 @@ import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
 import { useToast } from '@/components/ui/toast-context';
-import { errorMessage, type Account } from '@/lib/api';
+import { api, errorMessage, type Account } from '@/lib/api';
+import { shortHash } from '@/lib/format';
 import { formatZec, formatZecAmount } from '@/lib/money';
 import { type FaucetVariables, type PaymentResult } from '@/hooks/mutations';
 import { paymentName, type PaymentIdentity } from '@/hooks/payment-identity';
 import { isTerminalPayment, usePaymentStatus } from '@/hooks/queries';
 import { useWalletPayments } from './payment-context';
-import { faucetSchema, type FaucetInput, type FaucetValues } from './schemas';
+import { ADDRESS_DESTINATION, faucetSchema, type FaucetInput, type FaucetValues } from './schemas';
 import { controlStyles } from '@/components/ui/control-styles';
 import { SelectField } from './fields';
 import { POOL_OPTIONS, accountOptions } from './field-options';
@@ -41,6 +42,8 @@ export function FaucetDialog({
   const busy = sendOperation.isPending || faucetOperation.isPending;
   const mounted = useRef(true);
   const [submittedHere, setSubmittedHere] = useState(false);
+  const checkingAddress = useRef(false);
+  const [validatingAddress, setValidatingAddress] = useState(false);
   const [receipt, setReceipt] = useState<{
     text: string;
     kind: 'accepted' | 'error';
@@ -61,29 +64,41 @@ export function FaucetDialog({
     // from block rewards, and requests at the maximum are the first to fail
     // once the subsidy has halved.
     defaultValues: {
-      account_id: String(previous?.account_id ?? defaultAccountId ?? 1),
-      pool: previous?.pool ?? 'ironwood',
+      account_id:
+        previous && 'address' in previous
+          ? ADDRESS_DESTINATION
+          : String(
+              previous && 'account_id' in previous ? previous.account_id : (defaultAccountId ?? 1),
+            ),
+      to_address: previous && 'address' in previous ? previous.address : '',
+      pool: previous && 'pool' in previous ? previous.pool : 'ironwood',
       amount: previous ? formatZec(previous.amount_zatoshi, { grouping: false }) : '1',
     },
   });
-  const variablesFor = (values: FaucetValues) => ({
-    account_id: values.account_id,
-    pool: values.pool,
-    amount_zatoshi: values.amount,
-  });
+  const destination = useWatch({ control: form.control, name: 'account_id' });
+  const variablesFor = (values: FaucetValues): FaucetVariables =>
+    values.account_id === ADDRESS_DESTINATION
+      ? { address: values.to_address, amount_zatoshi: values.amount }
+      : { account_id: values.account_id, pool: values.pool, amount_zatoshi: values.amount };
   const current = faucetSchema.safeParse(useWatch({ control: form.control }));
   const match = current.success
     ? payments.retained.find(
         (item) => item.name === paymentName('faucet', variablesFor(current.data)),
       )
     : undefined;
-  const matchStatus = usePaymentStatus(match?.key ?? '', Boolean(match));
+  const matchStatus = usePaymentStatus(
+    match?.key ?? '',
+    Boolean(match),
+    match !== undefined && 'address' in match.variables,
+  );
   const matchTerminal = isTerminalPayment(matchStatus.data);
   const retryLabel = match && !matchTerminal ? `Resume payment` : null;
   const announce = ({ activity, key }: PaymentResult) => {
     if (!faucet.claimAnnouncement(key)) return;
     toast.success(
-      `Funded Account ${activity.to_account}`,
+      activity.to_account === null
+        ? `Funded ${shortHash(activity.to_address ?? '', 14, 6)}`
+        : `Funded Account ${activity.to_account}`,
       `${formatZecAmount(activity.amount_zatoshi)} confirmed.`,
     );
   };
@@ -92,14 +107,43 @@ export function FaucetDialog({
     setReceipt({ text: errorMessage(error), kind: 'error', key });
   };
 
-  const submit = (values: FaucetValues) => {
-    if (busy || matchTerminal) return;
-    setSubmittedHere(true);
-    setReceipt(null);
+  const submit = async (values: FaucetValues) => {
+    if (busy || matchTerminal || checkingAddress.current) return;
     const variables = variablesFor(values);
     const retained = payments.retained.find(
       (item) => item.name === paymentName('faucet', variables),
     );
+    if ('address' in variables && !retained) {
+      checkingAddress.current = true;
+      setValidatingAddress(true);
+      try {
+        const parsed = await api.parsePaymentUri(`zcash:${variables.address}`);
+        if (parsed.address !== variables.address) {
+          form.setError('to_address', { message: 'Enter a valid Regtest address.' });
+          return;
+        }
+        if (parsed.to_account !== null) {
+          form.setError('to_address', {
+            message: `This is Account ${parsed.to_account}'s address. Choose Account ${parsed.to_account} as the destination.`,
+          });
+          return;
+        }
+        const current = faucetSchema.safeParse(form.getValues());
+        if (
+          !current.success ||
+          paymentName('faucet', variablesFor(current.data)) !== paymentName('faucet', variables)
+        )
+          return;
+      } catch (error) {
+        form.setError('to_address', { message: errorMessage(error) });
+        return;
+      } finally {
+        checkingAddress.current = false;
+        setValidatingAddress(false);
+      }
+    }
+    setSubmittedHere(true);
+    setReceipt(null);
     const submitted = {
       onError: failed,
       // Finish only the submitted draft; inputs can change during the POST.
@@ -139,7 +183,7 @@ export function FaucetDialog({
       open={open}
       onOpenChange={onOpenChange}
       eyebrow="DEV TOOLS"
-      title="Fund an account"
+      title="Fund an account or address"
       description="Requests test funds from the mining treasury."
     >
       {payments.error && (
@@ -174,17 +218,38 @@ export function FaucetDialog({
         <SelectField
           control={form.control}
           name="account_id"
-          label="Destination account"
-          options={accountOptions(accounts)}
+          label="Destination"
+          options={[
+            ...accountOptions(accounts),
+            { value: ADDRESS_DESTINATION, label: 'External address' },
+          ]}
           error={form.formState.errors.account_id?.message}
         />
-        <SelectField
-          control={form.control}
-          name="pool"
-          label="Destination pool"
-          options={POOL_OPTIONS}
-          error={form.formState.errors.pool?.message}
-        />
+        {destination === ADDRESS_DESTINATION ? (
+          <Field
+            label="Destination address"
+            hint="A transparent Regtest address or a unified address with an Ironwood receiver."
+            error={form.formState.errors.to_address?.message}
+          >
+            {(aria) => (
+              <input
+                {...aria}
+                {...form.register('to_address')}
+                autoComplete="off"
+                spellCheck={false}
+                className={controlStyles}
+              />
+            )}
+          </Field>
+        ) : (
+          <SelectField
+            control={form.control}
+            name="pool"
+            label="Destination pool"
+            options={POOL_OPTIONS}
+            error={form.formState.errors.pool?.message}
+          />
+        )}
         <Field
           label="Amount (ZEC)"
           hint="Maximum 5 ZEC per request."
@@ -205,14 +270,22 @@ export function FaucetDialog({
           type="submit"
           variant="primary"
           size="block"
-          loading={busy}
-          disabled={!form.formState.isValid || busy || matchTerminal || Boolean(payments.error)}
+          loading={busy || validatingAddress}
+          disabled={
+            !form.formState.isValid ||
+            busy ||
+            validatingAddress ||
+            matchTerminal ||
+            Boolean(payments.error)
+          }
         >
-          {busy
-            ? faucet.isPending && submittedHere
-              ? 'Submitting payment…'
-              : 'Another payment is submitting…'
-            : (retryLabel ?? 'Add funds')}
+          {validatingAddress
+            ? 'Checking address…'
+            : busy
+              ? faucet.isPending && submittedHere
+                ? 'Submitting payment…'
+                : 'Another payment is submitting…'
+              : (retryLabel ?? 'Add funds')}
         </Button>
       </form>
     </Dialog>

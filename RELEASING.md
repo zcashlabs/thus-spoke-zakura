@@ -81,7 +81,7 @@ The launcher always selects these exact tags using its compiled Cargo version:
 ```text
 ghcr.io/zcashlabs/thus-spoke-zakura-app:<version>
 ghcr.io/zcashlabs/thus-spoke-zakura-lightwalletd:<version>
-zakuracore/zakura:1.6.0
+zakuracore/zakura:1.7.0
 ```
 
 `ths pull` fetches that set. `start` has no network-side image

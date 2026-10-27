@@ -59,6 +59,55 @@ instance's databases remain intact. This is not an end-to-end exactly-once
 guarantee: a fresh key requests a new payment, and deleting the instance deletes
 its recovery records.
 
+### Spending newly confirmed Ironwood
+
+A newly confirmed Ironwood output may need another block before it can be spent.
+Automatic Sends mine at most one prerequisite block and retry once. In manual
+or mempool mode, use `ths mine 1`; interval mode supplies the next block on its
+schedule. While waiting, the operation stays `preparing` with its original key.
+New ordinary NU7 payments expire 120 blocks after their candidate inclusion height.
+
+## HTTP admission and status
+
+`POST /api/v1/send`, `POST /api/v1/faucet`, and
+`POST /api/v1/faucet/address` save an intent before processing it. The response
+is HTTP **202** while the payment is pending, or **200** when its stored status
+is `confirmed` or `failed`. Both include the operation and a relative
+`Location` with the encoded idempotency key.
+
+Neither status code alone proves the payment succeeded: inspect the operation's
+`status`. Follow `Location` with **GET** to check a pending payment. The server
+keeps working if the caller disconnects and resumes saved payments after a
+restart. Status reads do not start payment work.
+
+`preparing`, `prepared`, and `broadcast` are pending. Only `confirmed` and
+`failed` are terminal. A pending operation can have an empty `txid`. A
+`last_error` can describe a retryable failure and clears when processing
+continues. Keep the same key after a timeout. Reusing it with different
+payment details is rejected.
+
+### Earlier payments and dependent sends
+
+The worker visits account payments in their stored admission order, including
+retained legacy transactions. Their random IDs and timestamp ties do not set
+that order. It keeps its position across bounded passes and alternates with
+external-address faucets so one slow collection does not always go first.
+
+Admission order is not a promise that every earlier payment has finished. A
+pass can stop while an earlier payment is still pending. If a Send then has
+insufficient funds, it stays `preparing` while an earlier active payment
+could fund its source account and pool, including Ironwood change from an
+earlier spend. It keeps its original key and can progress after that payment
+confirms. An unrelated payment, a payment accepted later, or a terminal
+payment does not defer this failure. An earlier `unconfirmed` payment is
+observation-only after a deliberate reorg or rollback, so it does not defer
+an unfunded Send either, even before its transaction expires. Only
+`preparing`, `prepared`, and `broadcast` payments are active funding
+dependencies. The orphaned payment keeps its original status and key for
+observation; this does not rebroadcast or fail it. Once no earlier funding
+dependency remains, the existing transaction-reconciliation checks still decide whether
+insufficient funds can safely become terminal `failed`.
+
 ## Call the API with a deliberate key
 
 This example uses integer zatoshi. Run it against the live dashboard URL of
@@ -71,8 +120,9 @@ curl -fsS "$DASHBOARD_URL/api/v1/send" \
   --data '{"from_account":1,"to_account":2,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":100000000,"idempotency_key":"book-account-1-to-2-v1"}'
 ```
 
-The response is one activity object, and the same object is what
-`GET /api/v1/activity` returns in a list. It has thirteen fields:
+The response is one payment-journal activity object. A keyed
+`GET /api/v1/activity?idempotency_key=<key>` returns that same object in a
+one-item list:
 
 | Field | Meaning |
 | --- | --- |
@@ -86,17 +136,67 @@ The response is one activity object, and the same object is what
 | `amount_zatoshi` | Integer zatoshi paid to the destination. It does not include the fee. |
 | `txid` | The prepared transaction's ID; empty while status is `preparing`. |
 | `block_hash` | The confirming block's hash, or `null` before confirmation. |
-| `status` | `preparing`, `prepared`, `broadcast`, `confirmed`, or a stored terminal `failed` result. |
+| `status` | `preparing`, `prepared`, `broadcast`, `confirmed`, `unconfirmed` after a deliberate reorg/rollback, or a stored terminal `failed` result. |
 | `created_at` | When the row was inserted, as `YYYY-MM-DD HH:MM:SS` UTC. |
 | `last_error` | Stored diagnostic, or `null`. |
 
-Read `txid`, `status`, and `block_hash` first; do not infer confirmation
-merely because HTTP returned 200. There is no memo field here. The supplied
-memo is stored with the payment intent to compare replays, but received memos
-are not read back through this API.
+An unkeyed `GET /api/v1/activity` returns unified wallet history. It merges
+these journal records with transactions observed by the wallet and adds chain
+metadata, memos, recipient and pool lists, and `from_accounts` and
+`to_accounts`. The arrays preserve every affected development account;
+`from_account` and `to_account` are only populated when their corresponding
+array contains exactly one account. A transaction appears once even when it
+affects multiple development accounts. Outputs to the hidden treasury account
+are excluded from the user-facing amount, recipients, and account lists.
+
+`amount_zatoshi` remains the value paid to the relevant user or external
+recipient. Canonical wallet entries additionally expose the aggregate effects
+across development accounts 1–5 as `received_zatoshi`, `spent_zatoshi`, and the
+signed `net_zatoshi`. These totals include wallet change and transaction fees,
+but exclude treasury account 6. Journal-only pending or failed entries set all
+three effect fields to `null` because their final wallet effects are not yet
+known.
+
+When a transaction uses more than one pool, `source_pool` or
+`destination_pool` is `null` and the corresponding `source_pools` or
+`destination_pools` array preserves every known pool.
+
+For external incoming transactions, transparent-source detection requires a
+Zakura transaction lookup. These lookups run concurrently within one short,
+shared budget and fail open: if Zakura is slow or unavailable, activity still
+returns and the unknown source pool remains absent.
+
+For the keyed payment-journal object, read `txid`, `status`, and `block_hash`
+first; do not infer confirmation merely because HTTP returned 200. That object
+does not expose a memo field. The supplied memo is stored with the payment
+intent to compare replays. Unkeyed unified history exposes decoded received
+text memos in its `memos` array when transaction enhancement recovers them.
 Keep this key only for this intended payment. If the server has recorded it,
 repeating the **same direct API request** with the same key retrieves or
 finishes that activity.
+
+## Resume a faucet payment after a lost response
+
+1. Get the dashboard URL for your instance as shown above. Choose a key for
+   this one-ZEC payment to Account 2 and keep the exact request:
+
+   ```console
+   curl -i "$DASHBOARD_URL/api/v1/faucet" \
+     -H 'content-type: application/json' \
+     --data '{"account_id":2,"pool":"ironwood","amount_zatoshi":100000000,"idempotency_key":"book-faucet-account-2-v1"}'
+   ```
+
+2. If the response is lost, repeat **that same request** against the same
+   instance. The key identifies this payment; a new key requests another one.
+3. GET the returned `Location` until the stored status is `confirmed` or
+   `failed`. For this example, that is:
+
+   ```console
+   curl -fsS "$DASHBOARD_URL/api/v1/activity?idempotency_key=book-faucet-account-2-v1"
+   ```
+
+   The response is a one-item array. A mined block alone does not prove this
+   payment was confirmed.
 
 ## Which caller are you retrying?
 
@@ -104,7 +204,15 @@ finishes that activity.
 | --- | --- |
 | Direct API | Repeat the identical request with your saved key. A new key requests a new payment. |
 | Dashboard Send or Faucet | Pending payments retain their key and exact details across dialog closure, refresh, and browser restart. Use **Resume** for the saved payment. A `broadcast` response does not clear it; terminal `confirmed` or `failed` results release the retained identity. |
-| CLI send, shield, unshield, or faucet | Rerun the same arguments against the same instance. The local payment journal retains keys across errors and pending results; an identical command after terminal observation starts a new payment. |
+| CLI send, shield, unshield, or faucet | Rerun the same arguments against the same instance. The local payment journal retains keys across errors and pending results; an identical command after successful terminal-result output starts a new payment. |
+
+Send and faucet commands retain their retry keys if a stdout result write
+returns an error. Fix the output destination and rerun the same
+arguments against the same instance to recover that payment. For an account
+faucet batch, every key stays retained until all members are terminal and the
+batch output succeeds. A successfully reported terminal failure also releases
+its key; a later invocation may request another payment. This covers reported
+write errors, not a guarantee that a downstream program consumed buffered output.
 
 The dashboard reads retained payment outcomes separately from wallet balances.
 A confirmation can appear before the wallet snapshot catches up. A partial CLI
@@ -141,7 +249,14 @@ those checks are useful, but their boundary matters. Never reuse a key for
 a different amount or recipient. Do not reconstruct a balance by summing
 activity records; use `GET /api/v1/accounts` after wallet sync.
 
-A chain reorganization can replace the block named by a previously confirmed
+`ths reorg` and `ths rollback` clear affected confirmations in activity and
+external faucet records, marking them `unconfirmed` while preserving the original
+transaction, request, and key. Background handling only observes these payments;
+it does not rebroadcast, replace, or auto-mine them. Replays return that same
+unconfirmed request. A later canonical confirmation restores `confirmed` with
+its new block hash.
+
+An external chain reorganization can replace the block named by a previously confirmed
 activity. The server reconciles wallet balances against the new canonical
 chain, but it does not recheck activity already marked `confirmed`. If
 current inclusion matters, query Zakura for the transaction and compare its
@@ -154,13 +269,19 @@ result of its earlier confirmation check.
 job. It generates blocks, reads the mined tip, reconciles the wallet, notifies
 dashboards, and returns `blocks` plus `hashes`. If a later step errors,
 blocks may already exist, even though the request has no success response.
-A lost connection does not cancel admitted work; another `ths mine` invocation
-uses a fresh internal key and can request additional mining.
+A lost connection does not cancel admitted work. Each legacy API request uses
+a fresh internal key and can request additional mining.
 
-The dashboard uses `POST /api/v1/mining/jobs` with a caller key and receives
-an accepted job before completion. Replaying the same accepted key and count
-returns that job within the server's lifetime. After a lost response, read
+The dashboard and `ths mine` use `POST /api/v1/mining/jobs` with a caller key
+and receive an accepted job before completion. Replaying the same accepted
+key and count returns that job within the server's lifetime. After a lost response, read
 `GET /api/v1/mining/jobs` to inspect the latest job before requesting more.
+
+The CLI saves its key before submission and retains it after an uncertain
+response, interruption, or polling timeout. Rerun `ths mine` with the same
+block count against the same instance to resume the saved job. After the CLI
+observes a finished job, it clears the key; the next invocation starts new
+mining. Jobs are not recovered after a server restart.
 
 After a timeout, compare the current **node height and tip hash** with
 what you observed before the request. Use Network, `GET /api/v1/status`,
@@ -168,9 +289,10 @@ or Zakura RPC. Another process can also mine or reorganize a local chain,
 so that observation guides a human decision but is not an exactly-once
 receipt. [Chapter 5](../mining-and-sync.md) traces the full wallet catch-up.
 
-**Source map:** [API handlers](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/api.rs),
-[SQLite activity and keys](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/db.rs),
-[wallet payments](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/wallet.rs),
+**Source map:** [API handlers](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/api/payments.rs),
+[payment progression](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/payments/progression.rs),
+[SQLite activity and keys](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/db/activity.rs),
+[wallet payments](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/wallet/payments.rs),
 and [chain reconciliation](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/crates/ths-server/src/reconcile.rs).
 
 **Next:** [choose an interface for your own application](../connect-an-app.md).

@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertTriangle, ArrowDownToLine, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/cn';
@@ -22,32 +22,51 @@ const COLUMNS: Column[] = [
 ];
 
 /** Shielded funds read in accent; public funds read in neutral ink. */
-function PoolLabel({ pool }: { pool: Activity['source_pool'] }) {
+function PoolLabel({
+  pool,
+  pools,
+}: {
+  pool: Activity['source_pool'];
+  pools: Activity['source_pools'];
+}) {
+  const knownPools = pool ? [pool] : pools;
+  const label = knownPools?.length ? knownPools.join(', ') : 'unknown';
   return (
     <span
       className={cn(
         'text-[11px] font-bold tracking-[0.04em] uppercase',
-        pool === 'ironwood' ? 'text-accent' : 'text-ink-muted',
+        knownPools?.includes('ironwood') ? 'text-accent' : 'text-ink-muted',
       )}
     >
-      {pool}
+      {label}
     </span>
   );
 }
 
+function accountLabel(accounts: number[] | undefined, account: number | null): string | null {
+  const ids = accounts?.length ? accounts : account === null ? [] : [account];
+  if (ids.length === 0) return null;
+  return `${ids.length === 1 ? 'Account' : 'Accounts'} ${ids.join(', ')}`;
+}
+
 function recipientLabel(activity: Activity): string {
-  if (activity.to_account !== null) return `Account ${activity.to_account}`;
+  const accounts = accountLabel(activity.to_accounts, activity.to_account);
+  if (accounts) return accounts;
   return shortHash(activity.to_address ?? '', 14, 6);
 }
 
-function ActivityRow({ activity, index }: { activity: Activity; index: number }) {
+function ActivityRow({ activity, index, now }: { activity: Activity; index: number; now: Date }) {
   const id = useId();
   const errorId = activity.last_error ? id : undefined;
   const isFaucet = activity.kind === 'faucet';
+  const isIncoming = activity.direction === 'incoming';
   const transactionPath = activity.txid ? `/explorer/tx/${activity.txid}` : null;
+  const source = accountLabel(activity.from_accounts, activity.from_account) ?? 'External';
   const transfer = isFaucet
     ? `Faucet → ${recipientLabel(activity)}`
-    : `Account ${activity.from_account ?? '?'} → ${recipientLabel(activity)}`;
+    : isIncoming
+      ? `${source} → ${recipientLabel(activity)}`
+      : `${source === 'External' ? 'Unknown' : source} → ${recipientLabel(activity)}`;
   const navigate = useNavigate();
 
   return (
@@ -67,11 +86,11 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
             <span
               className={cn(
                 'xp-raised grid size-6 shrink-0 place-items-center rounded-xs',
-                isFaucet ? 'bg-accent-soft text-accent' : 'bg-raised text-ink-muted',
+                isFaucet || isIncoming ? 'bg-accent-soft text-accent' : 'bg-raised text-ink-muted',
               )}
               aria-hidden
             >
-              {isFaucet ? (
+              {isFaucet || isIncoming ? (
                 <ArrowDownToLine className="size-3" />
               ) : (
                 <ArrowRight className="size-3" />
@@ -92,9 +111,9 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
         </td>
 
         <td className="max-sm:hidden">
-          <PoolLabel pool={activity.source_pool} />
+          <PoolLabel pool={activity.source_pool} pools={activity.source_pools} />
           <span className="text-ink-muted px-1.5">→</span>
-          <PoolLabel pool={activity.destination_pool} />
+          <PoolLabel pool={activity.destination_pool} pools={activity.destination_pools} />
         </td>
 
         <td className="min-w-0">
@@ -113,9 +132,15 @@ function ActivityRow({ activity, index }: { activity: Activity; index: number })
         <NumCell className="font-semibold">{formatZecAmount(activity.amount_zatoshi)}</NumCell>
 
         <NumCell className="text-ink-muted max-sm:hidden">
-          <time dateTime={activity.created_at} title={absoluteTime(activity.created_at)}>
-            {timeAgo(activity.created_at)}
-          </time>
+          {activity.created_at ? (
+            <time dateTime={activity.created_at} title={absoluteTime(activity.created_at)}>
+              {timeAgo(activity.created_at, now)}
+            </time>
+          ) : activity.mined_height !== null && activity.mined_height !== undefined ? (
+            `Block ${activity.mined_height}`
+          ) : (
+            <span aria-label="Time unknown">—</span>
+          )}
         </NumCell>
 
         <td className="text-right">
@@ -163,6 +188,14 @@ export function ActivityList({
   };
 }) {
   const count = activity.data?.length ?? 0;
+  const [now, setNow] = useState(() => new Date());
+  const hasActivity = count > 0;
+  useEffect(() => {
+    if (!hasActivity) return;
+    // Relative labels age independently of server events and query updates.
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActivity]);
 
   return (
     <Panel
@@ -182,7 +215,7 @@ export function ActivityList({
         ) : (
           <DataTable columns={COLUMNS}>
             {activity.data.map((item, index) => (
-              <ActivityRow key={item.id} activity={item} index={index} />
+              <ActivityRow key={item.id} activity={item} index={index} now={now} />
             ))}
           </DataTable>
         ))}

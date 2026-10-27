@@ -54,28 +54,28 @@ pub(crate) struct Instance {
 }
 
 impl Runtime {
-    pub fn status(&self, name: &InstanceName, json: bool) -> Result<()> {
-        let endpoints = self
+    pub fn status(&self, name: &InstanceName, json: bool) -> Result<bool> {
+        let instance = self
             .read_instance(name)
-            .map(|i| i.endpoints)
-            .or_else(|_| inspect_endpoints(&prefix(name)))?;
-        let running = container_running(&format!("{}-app", prefix(name)))?;
+            .or_else(|_| inspect_unrecorded_instance(name, &DockerCli))?;
+        let environment = inspect_environment(instance, &DockerCli)?;
+        let running = environment.state == "running";
         if json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"name": name.to_string(), "running": running, "endpoints": endpoints})
-                )?
+                serde_json::to_string_pretty(&StatusOutput::from(&environment))?
             );
         } else {
-            println!("{}", status_text(name, running, &endpoints));
+            println!("{}", status_text(&environment));
         }
-        Ok(())
+        Ok(running)
     }
 
-    pub fn endpoints(&self, name: &InstanceName, json: bool) -> Result<()> {
+    pub fn endpoints(&self, name: &InstanceName, json: bool, env: bool) -> Result<()> {
         let endpoints = self.read_instance(name)?.endpoints;
-        if json {
+        if env {
+            println!("{}", endpoint_exports(name, &endpoints));
+        } else if json {
             println!("{}", serde_json::to_string_pretty(&endpoints)?);
         } else {
             println!("{}", endpoint_lines(&endpoints));
@@ -127,7 +127,30 @@ impl Runtime {
     }
 }
 
-#[derive(Debug)]
+fn inspect_unrecorded_instance(
+    name: &InstanceName,
+    docker: &impl DockerResourceCommands,
+) -> Result<Instance> {
+    let containers = SERVICES
+        .into_iter()
+        .map(|service| container_status(docker, name, service))
+        .collect::<Result<Vec<_>>>()?;
+    let has_owned_service = containers
+        .iter()
+        .any(|container| !matches!(container.state.as_str(), "missing" | "foreign"));
+    if !has_owned_service {
+        bail!("environment {name} is not running; start it with `ths --name {name}`");
+    }
+    Ok(Instance {
+        name: name.to_string(),
+        version: 1,
+        endpoints: inspect_endpoints(&prefix(name))?,
+        created_at: None,
+        session: None,
+    })
+}
+
+#[derive(Debug, Default)]
 pub(super) struct HostPorts {
     pub(super) dashboard: u16,
     pub(super) rpc: u16,
@@ -156,7 +179,11 @@ pub(super) fn host_ports(offset: u16) -> Result<HostPorts> {
 }
 
 pub(super) fn loopback_publish(host: u16, container: u16) -> String {
-    format!("127.0.0.1:{host}:{container}")
+    if host == 0 {
+        format!("127.0.0.1::{container}")
+    } else {
+        format!("127.0.0.1:{host}:{container}")
+    }
 }
 
 pub(super) fn require_free_loopback(port: u16) -> Result<()> {
@@ -187,10 +214,6 @@ pub(super) fn endpoints_for(ports: &HostPorts) -> Endpoints {
     }
 }
 
-pub(super) fn status_text(name: &InstanceName, running: bool, e: &Endpoints) -> String {
-    let state = if running { "running" } else { "stopped" };
-    format!("{name}: {state}\n{}", endpoint_lines(e))
-}
 pub(super) fn endpoint_lines(e: &Endpoints) -> String {
     format!(
         "  Dashboard    {}\n  Zakura RPC   {}\n  lightwalletd {}  (network={}, tls={})\n  P2P          {}",
@@ -198,10 +221,96 @@ pub(super) fn endpoint_lines(e: &Endpoints) -> String {
     )
 }
 
-pub(super) struct InstanceLock(File);
+pub(super) struct InstanceLock {
+    file: File,
+    path: PathBuf,
+    remove_on_drop: bool,
+}
+
+fn lock_registry(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(TryLockError::WouldBlock) => bail!("instance lock registry is busy; try again"),
+            Err(TryLockError::Error(error)) => {
+                return Err(error).context("locking instance registry");
+            }
+        }
+    }
+}
+
+impl InstanceLock {
+    pub(super) fn remove_when_dropped(&mut self) {
+        self.remove_on_drop = true;
+    }
+
+    pub(super) fn finish(mut self) -> Result<()> {
+        self.remove_on_drop = false;
+        let _registry = lock_registry(&self.path.with_file_name(".registry.lock"))?;
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("removing the instance lock"),
+        }
+        self.file.unlock().context("releasing the instance lock")
+    }
+}
+
+/// Variables `ths run` passes to its child. `endpoints --env` prints this list.
+/// `THS_NETWORK` is `regtest` and `THS_LIGHTWALLETD_TLS` is `false`.
+pub(super) fn child_environment(
+    name: &InstanceName,
+    endpoints: &Endpoints,
+) -> [(&'static str, String); 7] {
+    [
+        ("THS_INSTANCE", name.to_string()),
+        ("THS_NETWORK", "regtest".to_owned()),
+        ("THS_API_URL", endpoints.dashboard.clone()),
+        ("THS_ZAKURA_RPC_URL", endpoints.rpc.clone()),
+        ("THS_LIGHTWALLETD_URL", endpoints.lightwalletd.clone()),
+        ("THS_LIGHTWALLETD_TLS", "false".to_owned()),
+        ("THS_P2P_ADDR", endpoints.p2p.clone()),
+    ]
+}
+
+pub(super) fn endpoint_exports(name: &InstanceName, endpoints: &Endpoints) -> String {
+    child_environment(name, endpoints)
+        .into_iter()
+        .map(|(key, value)| format!("export {key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl Drop for InstanceLock {
     fn drop(&mut self) {
-        if let Err(error) = self.0.unlock() {
+        let registry = if self.remove_on_drop {
+            match lock_registry(&self.path.with_file_name(".registry.lock")) {
+                Ok(registry) => Some(registry),
+                Err(error) => {
+                    eprintln!("could not remove the instance lock: {error:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if registry.is_some()
+            && let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("could not remove the instance lock: {error}");
+        }
+        if let Err(error) = self.file.unlock() {
             eprintln!("could not release the instance lock: {error}");
         }
     }
@@ -413,7 +522,9 @@ impl Runtime {
                 let _stopping = self.mark_stopping(name)?;
                 remove_if_present(&self.session_path(name))?;
                 let _lock = self.lock_instance(name)?;
-                return cleanup();
+                let mut report = cleanup()?;
+                report.environment_found |= requested.is_some();
+                return Ok(report);
             }
             let session = self.read_session(name)?;
             if self.read_owner(name)? != claimed {
@@ -524,8 +635,8 @@ impl Runtime {
             let mut ready = self
                 .acquire(&format!("{name}.ready"), LOCK_PROBE_GRACE)?
                 .context("another command holds the readiness lock")?;
-            ready.0.set_len(0)?;
-            std::io::Write::write_all(&mut ready.0, session._session.id.as_bytes())?;
+            ready.file.set_len(0)?;
+            std::io::Write::write_all(&mut ready.file, session._session.id.as_bytes())?;
             *session.ready.lock().unwrap_or_else(PoisonError::into_inner) = Some(ready);
             Ok(())
         })()
@@ -606,14 +717,22 @@ impl Runtime {
     fn try_lock(&self, file_name: &str) -> Result<Option<InstanceLock>> {
         let lock_dir = self.root.join(".locks");
         fs::create_dir_all(&lock_dir)?;
+        // Serialize opening and unlinking locks so a contender cannot lock an
+        // unlinked inode while another command locks a newly created file.
+        let _registry = lock_registry(&lock_dir.join(".registry.lock"))?;
+        let path = lock_dir.join(file_name);
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(lock_dir.join(file_name))?;
+            .open(&path)?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(InstanceLock(file))),
+            Ok(()) => Ok(Some(InstanceLock {
+                file,
+                path,
+                remove_on_drop: false,
+            })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error).context("locking environment"),
         }
@@ -651,12 +770,7 @@ impl Runtime {
                 let path = entry?.path().join("instance.json");
                 if path.exists() {
                     let instance = serde_json::from_slice::<Instance>(&fs::read(&path)?)?;
-                    let name = instance.name.parse()?;
-                    let containers = SERVICES
-                        .into_iter()
-                        .map(|service| container_status(docker, &name, service))
-                        .collect::<Result<Vec<_>>>();
-                    environments.push(environment_status(instance, containers));
+                    environments.push(inspect_environment(instance, docker)?);
                 }
             }
         }
@@ -687,7 +801,40 @@ pub(super) struct EnvironmentStatus {
     pub(super) containers: Vec<ContainerStatus>,
 }
 
+#[derive(Serialize)]
+pub(super) struct StatusOutput<'a> {
+    name: &'a str,
+    running: bool,
+    state: &'static str,
+    endpoints: &'a Endpoints,
+    containers: &'a [ContainerStatus],
+}
+
+impl<'a> From<&'a EnvironmentStatus> for StatusOutput<'a> {
+    fn from(environment: &'a EnvironmentStatus) -> Self {
+        Self {
+            name: &environment.instance.name,
+            running: environment.state == "running",
+            state: environment.state,
+            endpoints: &environment.instance.endpoints,
+            containers: &environment.containers,
+        }
+    }
+}
+
 pub(super) const SERVICES: [&str; 4] = ["app", "zakura", "lightwalletd", "init"];
+
+fn inspect_environment(
+    instance: Instance,
+    docker: &impl DockerResourceCommands,
+) -> Result<EnvironmentStatus> {
+    let name = instance.name.parse()?;
+    let containers = SERVICES
+        .into_iter()
+        .map(|service| container_status(docker, &name, service))
+        .collect::<Result<Vec<_>>>();
+    Ok(environment_status(instance, containers))
+}
 
 /// keeps an environment whose containers can't be read, such as while docker is stopped, with
 /// its live status unknown.
@@ -708,6 +855,15 @@ pub(super) fn environment_status(
         instance,
         containers,
     }
+}
+
+pub(super) fn status_text(environment: &EnvironmentStatus) -> String {
+    format!(
+        "{}: {}\n{}",
+        environment.instance.name,
+        environment.state,
+        endpoint_lines(&environment.instance.endpoints)
+    )
 }
 
 /// an environment's state from its long-running services; `init` is not one of them. a paused

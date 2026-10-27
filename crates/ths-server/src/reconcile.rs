@@ -12,7 +12,7 @@ use zcash_client_backend::{
         compact_formats::CompactBlock,
         service::{
             BlockId, BlockRange, ChainSpec, GetAddressUtxosArg, GetSubtreeRootsArg,
-            ShieldedProtocol as ProtoShieldedProtocol,
+            ShieldedProtocol as ProtoShieldedProtocol, TxFilter,
             compact_tx_streamer_client::CompactTxStreamerClient,
         },
     },
@@ -31,6 +31,10 @@ pub(crate) struct ReconciliationDeadline;
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 const SCAN_BATCH_SIZE: u32 = 100;
+const REORG_REPAIR_POLL: Duration = Duration::from_millis(250);
+const ENHANCEMENT_BATCH_SIZE: usize = 100;
+
+mod transparent_history;
 
 pub(crate) async fn find_rewind<F, Fut>(
     wallet: &RealWallet,
@@ -78,6 +82,33 @@ pub async fn sync_wallet(
     deadline: Instant,
 ) -> Result<()> {
     let mut rewind = find_rewind(wallet, target, deadline, |height| rpc.block_hash(height)).await?;
+    for cursor in wallet.transparent_history_checkpoints().await? {
+        let canonical = if cursor.height <= target.height {
+            Some(
+                within_deadline(
+                    deadline,
+                    "validating transparent history cursor",
+                    rpc.block_hash(u32::try_from(cursor.height)?),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        if canonical.as_deref() != Some(cursor.hash.as_str()) {
+            let floor = WALLET_BIRTHDAY_HEIGHT - 1;
+            rewind = Some(ChainCheckpoint {
+                height: u64::from(floor),
+                hash: within_deadline(
+                    deadline,
+                    "validating transparent history rewind floor",
+                    rpc.block_hash(floor),
+                )
+                .await?,
+            });
+            break;
+        }
+    }
     if let Some(cursor) = wallet.treasury_cursor().await? {
         let canonical = if target.height >= u64::from(cursor.height) {
             Some(
@@ -117,8 +148,75 @@ pub async fn sync_wallet(
         rewind_wallet(wallet, &mut client, &checkpoint, deadline).await?;
     }
     update_subtree_roots(wallet, &mut client, deadline).await?;
-    while sync_pass(wallet, rpc, &mut client, deadline).await? {}
+    loop {
+        match sync_pass(wallet, rpc, &mut client, deadline).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) if repairing_reorg(&error) => {
+                check_deadline(deadline)?;
+                tokio::time::sleep(REORG_REPAIR_POLL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    enhance_transactions(wallet, &mut client, deadline).await?;
+    transparent_history::synchronize(wallet, rpc, &mut client, deadline).await?;
     check_deadline(deadline)
+}
+
+/// lightwalletd aborts `GetBlockRange` while its ingestor replaces the blocks a rollback removed:
+/// until it has re-indexed them its cache still ends in the old chain, and it refuses to stream
+/// those blocks together with the new ones it reads straight from Zakura. The blocks become
+/// readable once the repair finishes, so the scan retries instead of failing the sync.
+fn repairing_reorg(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tonic::Status>()
+            .is_some_and(|status| status.code() == tonic::Code::Aborted)
+    })
+}
+
+async fn enhance_transactions(
+    wallet: &RealWallet,
+    client: &mut CompactTxStreamerClient<tonic::transport::Channel>,
+    deadline: Instant,
+) -> Result<()> {
+    for txid in wallet
+        .public_transaction_enhancements(ENHANCEMENT_BATCH_SIZE)
+        .await?
+    {
+        let response = within_deadline(
+            deadline,
+            "downloading transaction enhancement",
+            client.get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.as_ref().to_vec(),
+            }),
+        )
+        .await;
+        let raw = match response {
+            Ok(response) => response.into_inner(),
+            Err(error)
+                if error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == tonic::Code::NotFound) =>
+            {
+                wallet.transaction_enhancement_not_found(txid).await?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let height = u32::try_from(raw.height)
+            .context("lightwalletd returned an invalid transaction enhancement height")?;
+        anyhow::ensure!(
+            height > 0,
+            "lightwalletd returned an unmined transaction enhancement"
+        );
+        check_deadline(deadline)?;
+        wallet.enhance_transaction(txid, raw.data, height).await?;
+    }
+    Ok(())
 }
 
 async fn rewind_wallet(

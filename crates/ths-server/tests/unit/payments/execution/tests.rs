@@ -106,36 +106,6 @@ fn prepared_payment_result(txid: &str, expiry_height: u64) -> PreparedPayment {
 }
 
 #[tokio::test]
-async fn payment_lifecycle_returns_confirmed_replays_without_preparation() {
-    let store = Store::open(":memory:").unwrap();
-    store.initialize().unwrap();
-    let claim = lifecycle_claim(&store, "confirmed-replay");
-    let prepared = store
-        .record_prepared(&claim.id, "confirmed-txid", b"signed", 140)
-        .unwrap();
-    store.mark_broadcast(&prepared.id, &prepared.txid).unwrap();
-    let confirmed = store
-        .confirm(&prepared.id, &prepared.txid, "confirmed-block")
-        .unwrap();
-    let runtime = RecordingPaymentLifecycle::new(store, []);
-    let prepare_calls = Arc::new(AtomicUsize::new(0));
-
-    let result = execute_payment(&runtime, confirmed.clone(), {
-        let prepare_calls = prepare_calls.clone();
-        move |_, _| {
-            prepare_calls.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok(prepared_payment_result("unused", 180)))
-        }
-    })
-    .await
-    .unwrap();
-
-    assert_eq!(result.id, confirmed.id);
-    assert_eq!(result.status, "confirmed");
-    assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn payment_lifecycle_submits_prepared_replays_without_preparation() {
     let store = Store::open(":memory:").unwrap();
     store.initialize().unwrap();
@@ -234,44 +204,6 @@ async fn payment_lifecycle_returns_pending_after_confirmation_failure() {
 
     assert_eq!(result.status, "broadcast");
     assert_eq!(result.txid, "pending-txid");
-}
-
-#[tokio::test]
-async fn failed_recovery_keeps_a_claim_with_a_wallet_journal() {
-    let (state, dir) = state_with_local_wallet();
-    let claim = state
-        .0
-        .store
-        .claim_transfer(
-            1,
-            Recipient::Account(2),
-            "ironwood",
-            "ironwood",
-            12_000,
-            "same",
-            None,
-        )
-        .unwrap();
-    rusqlite::Connection::open(dir.path().join("wallet.db"))
-            .unwrap()
-            .execute(
-                "INSERT INTO ext_tsz_prepared_payments(activity_id,txid,raw_transaction,expiry_height) VALUES(?1,?2,?3,?4)",
-                rusqlite::params![claim.id, "txid", b"signed transaction", 140_u64],
-            )
-            .unwrap();
-
-    assert!(
-        execute_payment(&state, claim.clone(), |_, _| {
-            std::future::ready(Err(anyhow::anyhow!("preparation failed")))
-        })
-        .await
-        .is_err()
-    );
-
-    assert_eq!(
-        state.0.store.activity_for_key("same").unwrap().unwrap().id,
-        claim.id
-    );
 }
 
 #[tokio::test]

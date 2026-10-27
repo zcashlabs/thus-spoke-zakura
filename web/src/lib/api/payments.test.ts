@@ -35,4 +35,33 @@ describe('exact payment status API', () => {
     expect(await api.payment('original/key')).toBeNull();
     await expect(api.payment('original/key')).rejects.toThrow('Unexpected response shape');
   });
+
+  it('reads address faucet status from its own endpoint and treats 404 as no record', async () => {
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            address: 'tmAg2wTARgKBHA9mFouqR727cU98MJmfjSq',
+            amount_zatoshi: 100_000_000,
+            txid: '',
+            block_hash: null,
+            status: 'broadcast',
+            last_error: null,
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'not found', status: 404 } }), {
+          status: 404,
+        }),
+      );
+    expect(await api.faucetAddressStatus('address/key')).toMatchObject({
+      status: 'broadcast',
+      to_account: null,
+      amount_zatoshi: 100_000_000n,
+    });
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/faucet/address?idempotency_key=address%2Fkey');
+    expect(await api.faucetAddressStatus('address/key')).toBeNull();
+  });
 });

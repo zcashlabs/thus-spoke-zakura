@@ -36,6 +36,91 @@ afterEach(() => {
 });
 
 describe('mining hooks', () => {
+  it('publishes an accepted job after unmount without reacquiring denied session storage', async () => {
+    let accept!: (job: MiningJob) => void;
+    const post = vi.spyOn(api, 'startMining').mockImplementation(
+      () =>
+        new Promise<MiningJob>((resolve) => {
+          accept = resolve;
+        }),
+    );
+    const { client, wrapper } = setup();
+    client.setQueryData(queryKeys.mining, { job: null });
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    const hook = renderHook(useStartMining, { wrapper });
+    let submission!: Promise<MiningJob>;
+    act(() => {
+      submission = hook.result.current.mutateAsync(10);
+    });
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    const storage = sessionStorage;
+    const retainedKey = storage.getItem('ths:mine:10');
+    expect(retainedKey).toBe(post.mock.calls[0]?.[1]);
+    hook.unmount();
+    const getter = vi.spyOn(window, 'sessionStorage', 'get').mockImplementation(() => {
+      throw new DOMException('Access denied', 'SecurityError');
+    });
+
+    await act(async () => {
+      accept(job);
+      await expect(submission).resolves.toEqual(job);
+    });
+    expect(getter).not.toHaveBeenCalled();
+    expect(client.getQueryData(queryKeys.mining)).toEqual({ job });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.mining });
+    expect(storage.getItem('ths:mine:10')).toBeNull();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the accepted result and reports cleanup failure without resubmitting', async () => {
+    const post = vi.spyOn(api, 'startMining').mockImplementation(() => {
+      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+        throw new DOMException('Access denied', 'SecurityError');
+      });
+      return Promise.resolve(job);
+    });
+    const { client, wrapper } = setup();
+    const hook = renderHook(useStartMining, { wrapper });
+    await act(async () => {
+      await expect(hook.result.current.mutateAsync(10)).resolves.toMatchObject(job);
+    });
+    expect(hook.result.current.isSuccess).toBe(true);
+    expect(hook.result.current.cleanupError).toBe('Access denied');
+    expect(client.getQueryData(queryKeys.mining)).toEqual({ job });
+    expect(sessionStorage.getItem('ths:mine:10')).toBe(post.mock.calls[0]?.[1]);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves an uncertain request key when a storage failure blocks its retry', async () => {
+    const post = vi.spyOn(api, 'startMining').mockRejectedValue(new Error('response lost'));
+    const first = setup();
+    const hook = renderHook(useStartMining, { wrapper: first.wrapper });
+    await act(async () => {
+      await expect(hook.result.current.mutateAsync(10)).rejects.toThrow('response lost');
+    });
+    const retainedKey = sessionStorage.getItem('ths:mine:10');
+    expect(retainedKey).toBe(post.mock.calls[0]?.[1]);
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Access denied', 'SecurityError');
+    });
+    await act(async () => {
+      await expect(hook.result.current.mutateAsync(10)).rejects.toThrow(/browser session storage/i);
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem('ths:mine:10')).toBe(retainedKey);
+    write.mockRestore();
+    hook.unmount();
+
+    post.mockResolvedValue(job);
+    const second = setup();
+    const retry = renderHook(useStartMining, { wrapper: second.wrapper });
+    await act(async () => {
+      await retry.result.current.mutateAsync(10);
+    });
+    expect(post).toHaveBeenLastCalledWith(10, retainedKey);
+    expect(sessionStorage.getItem('ths:mine:10')).toBeNull();
+  });
+
   it.each(['network', 'validation'])(
     'retains the POST key after a %s failure across a fresh cache',
     async (failure) => {
