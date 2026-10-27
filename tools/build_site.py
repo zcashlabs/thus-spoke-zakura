@@ -24,7 +24,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
 OUT = SITE / "public"
-BASE = "https://amiabix.github.io/thus-spoke-zakura-book"
+BASE = "https://ths.zypherpunk.xyz/book"
 
 TITLE = "Thus Spoke Zakura"
 SUMMARY = (

@@ -54,15 +54,15 @@ For another isolated network, run `ths --name second start --port-offset 10` and
 
 Start with the commands, then use the account and troubleshooting guides as your tests grow.
 
-- [Your first instance](https://amiabix.github.io/thus-spoke-zakura-book/getting-started.html): Install everything and bring up your first network.
-- [Components and state](https://amiabix.github.io/thus-spoke-zakura-book/architecture/overview.html): What each service owns, and where state actually lives.
-- [Accounts and balances](https://amiabix.github.io/thus-spoke-zakura-book/accounts-and-balances.html): The five development accounts, pools, and the public seed.
-- [Fund and send](https://amiabix.github.io/thus-spoke-zakura-book/using-the-dashboard.html): Move ZEC from the dashboard and from the CLI.
-- [Mining and wallet sync](https://amiabix.github.io/thus-spoke-zakura-book/mining-and-sync.html): Advance the chain and keep the wallet in step.
-- [Connect your application](https://amiabix.github.io/thus-spoke-zakura-book/connect-an-app.html): Point your app or test suite at the running network.
-- [The ths CLI](https://amiabix.github.io/thus-spoke-zakura-book/cli.html): Every command and option, with examples.
-- [Troubleshooting](https://amiabix.github.io/thus-spoke-zakura-book/troubleshooting.html): Docker permissions and services that will not start.
-- [Develop from source](https://amiabix.github.io/thus-spoke-zakura-book/development.html): Build it yourself, run the tests, and contribute.
+- [Your first instance](https://ths.zypherpunk.xyz/book/getting-started.html): Install everything and bring up your first network.
+- [Components and state](https://ths.zypherpunk.xyz/book/architecture/overview.html): What each service owns, and where state actually lives.
+- [Accounts and balances](https://ths.zypherpunk.xyz/book/accounts-and-balances.html): The five development accounts, pools, and the public seed.
+- [Fund and send](https://ths.zypherpunk.xyz/book/using-the-dashboard.html): Move ZEC from the dashboard and from the CLI.
+- [Mining and wallet sync](https://ths.zypherpunk.xyz/book/mining-and-sync.html): Advance the chain and keep the wallet in step.
+- [Connect your application](https://ths.zypherpunk.xyz/book/connect-an-app.html): Point your app or test suite at the running network.
+- [The ths CLI](https://ths.zypherpunk.xyz/book/cli.html): Every command and option, with examples.
+- [Troubleshooting](https://ths.zypherpunk.xyz/book/troubleshooting.html): Docker permissions and services that will not start.
+- [Develop from source](https://ths.zypherpunk.xyz/book/development.html): Build it yourself, run the tests, and contribute.
 
 ## Your first network is one command away.
 

@@ -4,21 +4,21 @@ Run a complete, private Zcash development network on your computer.
 
 ## Documentation
 
-**[Read the book →](https://amiabix.github.io/thus-spoke-zakura-book/)**
+**[Read the book →](https://ths.zypherpunk.xyz/book/)**
 
 It covers starting an instance, what each component owns, accounts and pools,
 funding and sending, mining and wallet synchronization, what an API response
 proves after a lost one, and connecting your own application. There is a
-[`ths` command reference](https://amiabix.github.io/thus-spoke-zakura-book/cli.html),
-a [guide to building from source](https://amiabix.github.io/thus-spoke-zakura-book/development.html),
-and a [troubleshooting appendix](https://amiabix.github.io/thus-spoke-zakura-book/troubleshooting.html).
+[`ths` command reference](https://ths.zypherpunk.xyz/book/cli.html),
+a [guide to building from source](https://ths.zypherpunk.xyz/book/development.html),
+and a [troubleshooting appendix](https://ths.zypherpunk.xyz/book/troubleshooting.html).
 The sources live in [`book/`](book/README.md).
 
 Every page is also served as markdown for tools that read rather than browse:
 append `.md` instead of `.html` to any page,
-[`book.md`](https://amiabix.github.io/thus-spoke-zakura-book/book.md) is the
+[`book.md`](https://ths.zypherpunk.xyz/book/book.md) is the
 whole book in one file, and
-[`llms.txt`](https://amiabix.github.io/thus-spoke-zakura-book/llms.txt) indexes
+[`llms.txt`](https://ths.zypherpunk.xyz/book/llms.txt) indexes
 both.
 
 Thus Spoke Zakura starts everything you need for local experiments:
@@ -153,8 +153,8 @@ Transparent outputs cannot carry a memo, so the field is disabled for them.
 The Send dialog also accepts a Regtest address or a single-payment ZIP-321 URI.
 Apply an edited URI, or clear it, before sending. Wallet's **Request** button
 creates a copyable URI and QR code for a development account without moving
-funds. See the book's [payment request walkthrough](https://amiabix.github.io/thus-spoke-zakura-book/using-the-dashboard.html#payment-request)
-and [API reference](https://amiabix.github.io/thus-spoke-zakura-book/connect-an-app.html#the-rest-of-the-api-surface).
+funds. See the book's [payment request walkthrough](https://ths.zypherpunk.xyz/book/using-the-dashboard.html#payment-request)
+and [API reference](https://ths.zypherpunk.xyz/book/connect-an-app.html#the-rest-of-the-api-surface).
 
 The same transfer from a terminal:
 

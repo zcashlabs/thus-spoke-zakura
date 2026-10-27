@@ -12,7 +12,7 @@ const notFound = await read('404.html');
 const styles = await read('styles.css');
 const vercel = JSON.parse(await read('vercel.json'));
 
-const BOOK = 'https://amiabix.github.io/thus-spoke-zakura-book/';
+const BOOK = 'https://ths.zypherpunk.xyz/book/';
 
 test('structured data is one valid graph describing the software', () => {
   const blocks = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
@@ -75,8 +75,8 @@ test('robots.txt keeps search and AI-search crawlers allowed', () => {
 });
 
 test('every inline script is allowed by the Content-Security-Policy hash list', () => {
-  const csp = vercel.headers.find(rule => rule.source === '/(.*)')
-    .headers.find(header => header.key === 'Content-Security-Policy').value;
+  const csp = vercel.headers.flatMap(rule => rule.headers)
+    .find(header => header.key === 'Content-Security-Policy').value;
   const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/g)]
     .filter(([, attrs]) => !attrs.includes('application/ld+json'));
   assert.ok(inline.length > 0);
@@ -90,6 +90,18 @@ test('every inline script is allowed by the Content-Security-Policy hash list', 
   if (html.includes('https://avatars.githubusercontent.com/')) assert.match(csp, /img-src[^;]*https:\/\/avatars\.githubusercontent\.com/);
   // styles.css draws its noise texture and petal from data: SVGs.
   if (/url\(["']?data:image\//.test(styles)) assert.match(csp, /img-src[^;]* data:/);
+});
+
+test('the landing page CSP does not block mdBook scripts', () => {
+  const rules = vercel.headers.filter(rule => rule.headers.some(header => header.key === 'Content-Security-Policy'));
+  assert.ok(rules.length > 0);
+  for (const rule of rules) {
+    const pattern = new RegExp(`^${rule.source}$`);
+    assert.ok(pattern.test('/'));
+    assert.ok(pattern.test('/index.html'));
+    assert.ok(!pattern.test('/book/index.html'));
+    assert.ok(!pattern.test('/book/architecture/overview.html'));
+  }
 });
 
 test('decorative rail links stay out of the tab order', () => {

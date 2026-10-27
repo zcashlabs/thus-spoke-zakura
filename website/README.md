@@ -1,6 +1,7 @@
 # Thus Spoke Zakura website
 
-Static public site for Thus Spoke Zakura. Host this directory as the site root; it has no build step.
+Static public site for Thus Spoke Zakura. The landing page has no build step;
+the production build combines it with the rendered book.
 The application dashboard remains in `web/`.
 
 Contributor faces are defined in the SVG near the end of `index.html`. `main.mjs` shuffles their profiles into the existing equal-size positions on each load; position never reflects commit count.
@@ -16,6 +17,56 @@ python3 -m http.server 8767 --bind 127.0.0.1 --directory website
 ```
 
 Open `http://127.0.0.1:8767/`. Run the site smoke checks with `node --test website/tests/*.test.mjs` from the repository root. Font licenses are in `assets/fonts/`.
+
+## Production deployment
+
+`.github/workflows/website.yml` checks and builds the website and book on pull
+requests and pushes to `main`. Successful builds on `main` deploy both to Vercel:
+
+- Website: <https://ths.zypherpunk.xyz/>
+- Book, including Markdown pages and `llms.txt`: <https://ths.zypherpunk.xyz/book/>
+
+Runs share a deployment concurrency group so production deployments do not
+overlap. The workflow can also be run manually from `main`; other branches
+only build. No deployment credentials are available to the pull-request job.
+
+Configure the existing Vercel project and GitHub repository once:
+
+1. Add `ths.zypherpunk.xyz` to the Vercel project's production domains and set
+   the DNS records Vercel requests. Allow public access to production.
+2. Clear the project's **Root Directory** setting. CI supplies an assembled
+   directory containing `vercel.json` and `public/`, rather than the source
+   `website/` directory. The checked-in configuration selects the static
+   framework, skips installation and compilation, and serves `public/`.
+3. Keep automatic Git deployments disabled. The repository-root and website
+   `vercel.json` files set `git.deploymentEnabled` to `false`, covering both
+   the new root setting and an existing project still rooted at `website/`.
+   GitHub Actions owns deployments; CLI deployments continue to work.
+4. In GitHub, create the `website-production` environment and restrict its
+   deployment branches to `main`. To deploy automatically, leave required
+   reviewers unset.
+5. Add `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` as GitHub Actions variables in
+   that environment (or at repository level), using the IDs from the project's
+   local `.vercel/project.json`. Add `VERCEL_TOKEN` as an environment secret,
+   using a token with access to that Vercel project. Enter credentials directly
+   in GitHub; do not commit them.
+
+To inspect the same public files locally, install mdBook 0.5.2 and run from the
+repository root:
+
+```sh
+mdbook build
+python3 tools/build_site.py
+python3 tools/build_website.py
+python3 -m http.server 8767 --bind 127.0.0.1 --directory site/deploy/public
+```
+
+Open `/` and `/book/`. `site/deploy/` is generated and ignored by Git. Only
+public site files and the rendered book enter the deployment; tests and local
+project metadata are excluded. Vercel's CLI builds this directory in CI, then
+uploads the prebuilt output in one production deployment. See the official
+[GitHub Actions deployment guide](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)
+and [Git deployment configuration](https://vercel.com/docs/project-configuration/git-configuration#turning-off-all-automatic-deployments).
 
 ## Browser checks
 
@@ -52,6 +103,7 @@ The page's title, description, social metadata, canonical URL and JSON-LD (`Soft
 **Keep in step.**
 
 - `index.md` must stay content-equivalent to `index.html`. Check product facts such as ports, pools and limits against `book/` before editing either one.
-- Documentation links point at the published book and must appear in `index.html`, `index.md` and `llms.txt` (tested).
+- Documentation links point at `/book/` on the public domain and must appear in `index.html`, `index.md` and `llms.txt` (tested).
 - After editing the inline importmap, update its `sha256-` hash in the `vercel.json` Content-Security-Policy. The test prints the expected value.
 - The CSP allows scripts only from the site and `cdn.jsdelivr.net`, and images only from the site, `data:` and GitHub avatars. Adding another origin means updating the policy.
+- The landing page CSP excludes `/book/`, where mdBook supplies its own scripts and inline initialization.
