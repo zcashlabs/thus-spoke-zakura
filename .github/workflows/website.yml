@@ -3,7 +3,27 @@ name: Deploy website and book
 on:
   push:
     branches: [main]
+    paths:
+      - "website/**"
+      - "book/**"
+      - "theme/**"
+      - "book.toml"
+      - "tools/build_site.py"
+      - "tools/build_website.py"
+      - "tests/book_links.py"
+      - "vercel.json"
+      - ".github/workflows/website.yml"
   pull_request:
+    paths:
+      - "website/**"
+      - "book/**"
+      - "theme/**"
+      - "book.toml"
+      - "tools/build_site.py"
+      - "tools/build_website.py"
+      - "tests/book_links.py"
+      - "vercel.json"
+      - ".github/workflows/website.yml"
   workflow_dispatch:
 
 permissions:

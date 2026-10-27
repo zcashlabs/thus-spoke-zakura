@@ -21,7 +21,9 @@ Open `http://127.0.0.1:8767/`. Run the site smoke checks with `node --test websi
 ## Production deployment
 
 `.github/workflows/website.yml` checks and builds the website and book on pull
-requests and pushes to `main`. Successful builds on `main` deploy both to Vercel:
+requests and pushes to `main` when the website, book, theme, or their build,
+validation, and deployment files change. Unrelated changes skip this workflow.
+Successful builds on `main` deploy both to Vercel:
 
 - Website: <https://ths.zypherpunk.xyz/>
 - Book, including Markdown pages and `llms.txt`: <https://ths.zypherpunk.xyz/book/>

@@ -106,7 +106,9 @@ the normal `ths` dashboard.
 The public website and this book deploy together on pushes to `main`, at
 <https://ths.zypherpunk.xyz/> and <https://ths.zypherpunk.xyz/book/>.
 The `Deploy website and book` workflow also builds pull requests without
-deploying them. For the Vercel project settings, GitHub Actions credentials,
+deploying them. Automatic runs are limited to changes in the website, book,
+theme, and their build, validation, and deployment files; manual runs remain
+available. For the Vercel project settings, GitHub Actions credentials,
 and a local preview of the combined site, see the
 [website deployment instructions](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/website/README.md#production-deployment).
 
