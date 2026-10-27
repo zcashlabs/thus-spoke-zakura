@@ -1,0 +1,107 @@
+name: Deploy website and book
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "book/**"
+      - "theme/**"
+      - "book.toml"
+      - "tools/build_site.py"
+      - "tools/build_website.py"
+      - "tests/book_links.py"
+      - "vercel.json"
+      - ".github/workflows/website.yml"
+  pull_request:
+    paths:
+      - "website/**"
+      - "book/**"
+      - "theme/**"
+      - "book.toml"
+      - "tools/build_site.py"
+      - "tools/build_website.py"
+      - "tests/book_links.py"
+      - "vercel.json"
+      - ".github/workflows/website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install mdBook
+        run: |
+          set -euo pipefail
+          version=0.5.2
+          url="https://github.com/rust-lang/mdBook/releases/download/v${version}"
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "${url}/mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" mdbook
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: node --test website/tests/*.test.mjs
+      - run: python3 tests/book_links.py
+      - run: mdbook build
+      - run: python3 tools/build_site.py
+      - run: python3 tools/build_website.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-website
+          path: site/deploy
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: website-production
+      url: https://ths.zypherpunk.xyz
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-website
+          path: site/deploy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Install Vercel CLI
+        run: npm install --global vercel@65.4.0
+      - name: Validate deployment configuration
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          test -n "$VERCEL_ORG_ID" || { echo "Set the VERCEL_ORG_ID variable" >&2; exit 1; }
+          test -n "$VERCEL_PROJECT_ID" || { echo "Set the VERCEL_PROJECT_ID variable" >&2; exit 1; }
+          test -n "$VERCEL_TOKEN" || { echo "Set the VERCEL_TOKEN secret" >&2; exit 1; }
+      - name: Pull production project settings
+        working-directory: site/deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel pull --yes --environment=production
+      - name: Build static deployment
+        working-directory: site/deploy
+        run: vercel build --prod
+      - name: Deploy website and book
+        working-directory: site/deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel deploy --prebuilt --prod --yes

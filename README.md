@@ -60,12 +60,17 @@ if cleanup fails, keep any recovery files that exist and follow the
 
 ## Documentation
 
-- [Read the book](book/README.md)
-- [Getting started](book/getting-started.md)
-- [Fund and send](book/using-the-dashboard.md)
-- [Connect your application and use the API](book/connect-an-app.md)
-- [CLI reference](book/cli.md)
-- [Develop from source and run tests](book/development.md)
-- [Troubleshooting](book/troubleshooting.md)
+- [Read the book](https://ths.zypherpunk.xyz/book/)
+- [Getting started](https://ths.zypherpunk.xyz/book/getting-started.html)
+- [Fund and send](https://ths.zypherpunk.xyz/book/using-the-dashboard.html)
+- [Connect your application and use the API](https://ths.zypherpunk.xyz/book/connect-an-app.html)
+- [CLI reference](https://ths.zypherpunk.xyz/book/cli.html)
+- [Develop from source and run tests](https://ths.zypherpunk.xyz/book/development.html)
+- [Troubleshooting](https://ths.zypherpunk.xyz/book/troubleshooting.html)
+
+Every book page is also available as Markdown by replacing `.html` with `.md`.
+Read the [whole book as Markdown](https://ths.zypherpunk.xyz/book/book.md),
+use the [Markdown index](https://ths.zypherpunk.xyz/book/llms.txt),
+or browse the [book sources](book/README.md).
 
 [Contributing](CONTRIBUTING.md) · [Releases](https://github.com/zcashlabs/thus-spoke-zakura/releases) · [MIT license](LICENSE)
