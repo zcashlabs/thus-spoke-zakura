@@ -8,7 +8,9 @@ fresh chain with the same five accounts.
 
 The dashboard has **Wallet**, **Explorer**, and **Network** pages. Use `ths
 open` to bring it up. On desktop, the **Mine** button sits at the top of
-each page; on a narrow screen you can always use `ths mine`.
+each page; on a narrow screen you can always use `ths mine`. If the browser
+blocks clipboard access, a copy button shows a notification with the value to
+copy by hand.
 
 ## First, observe the starting state
 
@@ -144,14 +146,16 @@ the server rejects a present memo there too.
 
 The server stores the supplied memo in its idempotency record to compare
 replayed requests. An absent memo and an explicit empty text memo are different
-payment identities. Activity has no memo field, and the dashboard's transaction views do not
-decrypt received memos. ZIP-321 parsing can return a memo supplied in its input;
+payment identities. To read a payment's memo, open its transaction ID from
+Recent activity and select **Decrypt actions**. ZIP-321 parsing can return a
+memo supplied in its input;
 that does not read a memo from the chain.
 
 `GET /api/v1/accounts` provides a `unified_full_viewing_key` for each user
 account. An external wallet imported with that key can decrypt memos sent to
 that account. Public Explorer data reveals neither memo plaintext nor private
-Ironwood recipient addresses.
+Ironwood recipient addresses; the Explorer's **Decrypt actions** button,
+described below, shows what this environment's wallet recorded.
 
 ## Create a request for another sender
 
@@ -211,6 +215,28 @@ Transparent inputs and outputs are public chain data; Ironwood details are
 not exposed as the user-account transfer shown by Recent activity. The
 server's activity record knows the development account IDs, while the
 Explorer follows the public chain.
+
+A transaction with shielded actions has a **Decrypt actions** button on its
+**Ironwood actions** row. It shows what this environment's wallet recorded
+about the transaction for accounts 1–5, below that row. It is local wallet
+state, not public chain data, and is read only when you select the button.
+Each output lists its pool and index, **From**, **To**, the memo, and the
+value. **From** is an account, **Faucet** for a treasury payment, or
+**External**; a shielded sender outside the accounts never reveals an address.
+**To** is an account, or else the address the wallet recorded. Accounts link to
+their account page and transparent addresses to their Explorer page; a unified
+address outside the accounts has no public page. Change returned to the sending
+account is marked **Change**; a non-text memo is shown as hex. Below the
+outputs, the notes the accounts spent are grouped by account and pool. The
+fee is the **Fee** row of the disclosure summary. A transaction none of the
+accounts sent or received shows **No local account is involved in this
+transaction.** A warning appears while the wallet has not fetched the full
+transaction yet, because a memo can be missing until then, and when it could
+not fetch it at all. A payment from outside the accounts appears only after it
+is mined and the wallet has scanned its block. The same data is available from
+`ths wallet tx` and `GET /api/v1/transactions/{txid}/wallet`; see [Read what
+the wallet recorded about a
+transaction](connect-an-app.md#read-what-the-wallet-recorded-about-a-transaction).
 
 The **Pending transactions** panel lists transactions the node has received but
 has not yet included in a block. It appears only while at least one is

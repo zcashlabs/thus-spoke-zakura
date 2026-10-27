@@ -8,13 +8,14 @@ import { queryKeys } from './queries';
  * it affects; React Query then refetches just what is actually mounted.
  */
 const TOPICS: Record<string, readonly unknown[][]> = {
-  wallet: [[...queryKeys.accounts], ['activity'], ['send-quote']],
+  wallet: [[...queryKeys.accounts], ['activity'], ['send-quote'], ['wallet-transaction']],
   chain: [
     [...queryKeys.status],
     ['blocks'],
     [...queryKeys.mempool],
     ['block'],
     ['transaction'],
+    ['wallet-transaction'],
     ['address'],
   ],
   sync: [[...queryKeys.status]],

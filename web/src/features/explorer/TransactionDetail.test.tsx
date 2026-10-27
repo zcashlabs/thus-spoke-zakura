@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { renderWithProviders, requestUrl } from '@/test/utils';
 import { TransactionDetail } from './TransactionDetail';
@@ -21,9 +22,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderTx(body: unknown, extras: Record<string, unknown> = {}) {
+function walletView(overrides: Record<string, unknown> = {}) {
+  return {
+    txid: TXID,
+    status: 'confirmed',
+    mined_height: 107,
+    confirmations: 1,
+    fee_zatoshi: null,
+    details: 'complete',
+    outputs: [],
+    spends: [],
+    ...overrides,
+  };
+}
+
+function renderTx(
+  body: unknown,
+  extras: Record<string, unknown> = {},
+  wallet: unknown = walletView(),
+) {
   const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const url = requestUrl(input);
+    if (url.endsWith('/wallet')) return json(wallet);
     if (url.includes(`/transactions/${TXID}`)) return json(body);
     for (const [id, payload] of Object.entries(extras)) {
       if (url.includes(`/transactions/${id}`)) return json(payload);
@@ -245,7 +265,7 @@ describe('TransactionDetail', () => {
     expect(screen.getByText('Sapling outputs')).toBeInTheDocument();
   });
 
-  it('shows both public pool values when an equal cross-pool transfer nets to zero', async () => {
+  it('says pool values are public without listing them when a cross-pool transfer nets to zero', async () => {
     renderTx({
       txid: TXID,
       vin: [],
@@ -257,12 +277,7 @@ describe('TransactionDetail', () => {
     expect(await screen.findByText('Pool value balances are public')).toBeInTheDocument();
     expect(screen.queryByText('Fully shielded')).not.toBeInTheDocument();
     expect(screen.queryByText('Nothing is public')).not.toBeInTheDocument();
-    expect(screen.getByText('Ironwood public value balance').nextElementSibling).toHaveTextContent(
-      '0.5 ZEC',
-    );
-    expect(screen.getByText('Orchard public value balance').nextElementSibling).toHaveTextContent(
-      '-0.5 ZEC',
-    );
+    expect(screen.queryByText(/public value balance/)).not.toBeInTheDocument();
   });
 
   it('explains an unknown fee when a transparent prevout is missing', async () => {
@@ -282,5 +297,218 @@ describe('TransactionDetail', () => {
     renderTx({ txid: TXID, vin: [{ coinbase: '03' }], vout: [{ n: 0, valueZat: 100_000_000 }] });
     expect(await screen.findByText('Fee')).toBeInTheDocument();
     expect(screen.getByText('Fee').nextElementSibling).toHaveTextContent('No fee (coinbase)');
+  });
+});
+
+describe('TransactionDetail decrypted actions', () => {
+  const tx = {
+    txid: TXID,
+    vin: [],
+    vout: [],
+    vShieldedSpend: [],
+    vShieldedOutput: [],
+    orchard: { actions: [{}, {}] },
+  };
+
+  async function decrypt() {
+    await userEvent.click(await screen.findByRole('button', { name: 'Decrypt actions' }));
+  }
+
+  function walletRequests(fetchSpy: ReturnType<typeof renderTx>) {
+    return fetchSpy.mock.calls
+      .map(([input]) => requestUrl(input))
+      .filter((url) => url.endsWith('/wallet'));
+  }
+
+  it('reads the local wallet only after Decrypt actions is pressed', async () => {
+    const fetchSpy = renderTx(tx);
+
+    expect(await screen.findByRole('button', { name: 'Decrypt actions' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(walletRequests(fetchSpy)).toHaveLength(0);
+
+    await decrypt();
+    expect(
+      await screen.findByText('No local account is involved in this transaction.'),
+    ).toBeInTheDocument();
+    expect(walletRequests(fetchSpy)).toEqual([
+      expect.stringContaining(`/api/v1/transactions/${TXID}/wallet`),
+    ]);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Hide decrypted actions' }));
+    expect(
+      screen.queryByText('No local account is involved in this transaction.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('offers no Decrypt button for a transaction without shielded actions', async () => {
+    renderTx({ txid: TXID, vin: [], vout: [{ n: 0, valueZat: 1 }] });
+
+    expect(await screen.findByText('Ironwood actions')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decrypt actions' })).not.toBeInTheDocument();
+  });
+
+  it('shows the outputs, memos, change and spent notes the wallet recorded', async () => {
+    renderTx(
+      tx,
+      {},
+      walletView({
+        fee_zatoshi: 10_000,
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 10_000_000,
+            from: 1,
+            to: 2,
+            to_address: 'uregtest1accounttwoaddress000000',
+            change: false,
+            memo: { text: 'order 42' },
+          },
+          {
+            pool: 'ironwood',
+            index: 1,
+            value_zatoshi: 189_990_000,
+            from: 1,
+            to: 1,
+            to_address: null,
+            change: true,
+            memo: null,
+          },
+          {
+            pool: 'ironwood',
+            index: 2,
+            value_zatoshi: 1,
+            from: 'faucet',
+            to: 3,
+            to_address: null,
+            change: false,
+            memo: { hex: 'ff01' },
+          },
+          {
+            pool: 'ironwood',
+            index: 3,
+            value_zatoshi: 2,
+            from: 1,
+            to: null,
+            to_address: 'uregtest1external',
+            change: false,
+            memo: { text: '' },
+          },
+          {
+            pool: 'transparent',
+            index: 0,
+            value_zatoshi: 3,
+            from: 1,
+            to: null,
+            to_address: 'tmExternalTransparentAddress',
+            change: false,
+            memo: null,
+          },
+        ],
+        spends: [
+          { account: 1, pool: 'ironwood', value_zatoshi: 100_000_000 },
+          { account: 1, pool: 'ironwood', value_zatoshi: 100_000_000 },
+        ],
+      }),
+    );
+    await decrypt();
+
+    const decrypted = await screen.findByRole('region', { name: 'Decrypted actions' });
+    await within(decrypted).findByText('order 42');
+    const cells = (row: HTMLElement) => within(row).getAllByRole('cell');
+    const payment = within(decrypted).getByText('order 42').closest('tr')!;
+    // From and To name accounts 1-5 and link to their account pages.
+    expect(within(cells(payment)[1]!).getByRole('link', { name: 'Account 1' })).toHaveAttribute(
+      'href',
+      '/wallet/accounts/1',
+    );
+    expect(within(cells(payment)[2]!).getByRole('link', { name: 'Account 2' })).toHaveAttribute(
+      'href',
+      '/wallet/accounts/2',
+    );
+    expect(within(payment).queryByText('Change')).not.toBeInTheDocument();
+    const change = within(decrypted).getByText('Change').closest('tr')!;
+    expect(within(cells(change)[2]!).getByRole('link', { name: 'Account 1' })).toBeInTheDocument();
+    const faucet = within(decrypted).getByText('0xff01').closest('tr')!;
+    expect(within(cells(faucet)[1]!).getByText('Faucet')).toBeInTheDocument();
+    expect(within(faucet).getByText('Not text:')).toBeInTheDocument();
+    // A unified address outside the accounts has no public page, so it is plain text.
+    const external = within(decrypted).getByText('Empty text').closest('tr')!;
+    expect(within(cells(external)[2]!).getByText('uregtest1external')).toBeInTheDocument();
+    expect(within(cells(external)[2]!).queryByRole('link')).not.toBeInTheDocument();
+    // A transparent address links to its public explorer page.
+    const transparent = within(decrypted).getByText('tmExternalTran…tAddress').closest('tr')!;
+    expect(
+      within(transparent).getByRole('link', { name: 'tmExternalTran…tAddress' }),
+    ).toHaveAttribute('href', '/explorer/address/tmExternalTransparentAddress');
+
+    // Two notes from the same account and pool read as one row.
+    const spent = within(decrypted).getByText('2 notes').closest('tr')!;
+    expect(within(spent).getByRole('link', { name: 'Account 1' })).toHaveAttribute(
+      'href',
+      '/wallet/accounts/1',
+    );
+    expect(within(spent).getByText('ironwood')).toBeInTheDocument();
+    expect(within(spent).getByText('2 ZEC')).toBeInTheDocument();
+    // The public fee row above already shows the fee.
+    expect(within(decrypted).queryByText('Fee')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['pending', 'Memos and change are not final yet'],
+    ['unavailable', 'Memos and change may be missing'],
+  ])('warns when details are %s', async (details, warning) => {
+    renderTx(
+      tx,
+      {},
+      walletView({
+        details,
+        outputs: [
+          {
+            pool: 'ironwood',
+            index: 0,
+            value_zatoshi: 10_000_000,
+            from: null,
+            to: 2,
+            to_address: null,
+            change: false,
+            memo: null,
+          },
+        ],
+      }),
+    );
+    await decrypt();
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.getByText('External')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Account 2' })).toBeInTheDocument();
+  });
+
+  it('shows a wallet read failure in place of the decrypted actions', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
+      requestUrl(input).endsWith('/wallet')
+        ? Promise.resolve(
+            new Response(JSON.stringify({ error: { message: 'wallet is busy', status: 500 } }), {
+              status: 500,
+              headers: { 'content-type': 'application/json' },
+            }),
+          )
+        : json(tx),
+    );
+    renderWithProviders(
+      <MemoryRouter initialEntries={[`/explorer/tx/${TXID}`]}>
+        <Routes>
+          <Route path="/explorer/tx/:txid" element={<TransactionDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await decrypt();
+
+    // A 500's server text is replaced by the dashboard's generic message.
+    expect(await screen.findByText(/The environment hit an unexpected error/)).toBeInTheDocument();
+    expect(screen.getByText('What this transaction reveals')).toBeInTheDocument();
   });
 });

@@ -18,14 +18,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const push = useCallback(
     (tone: ToastTone, title: string, detail?: string, action?: ToastAction) => {
-      setMessages((current) => [...current, { id: nextId++, tone, title, detail, action }]);
+      const id = nextId++;
+      setMessages((current) => [...current, { id, tone, title, detail, action }]);
+      return () => setMessages((current) => current.filter((message) => message.id !== id));
     },
     [],
   );
 
   const api = useMemo<ToastApi>(
     () => ({
-      success: (title, detail) => push('success', title, detail),
+      success: (title, detail) => {
+        push('success', title, detail);
+      },
       error: (title, detail, action) => push('error', title, detail, action),
     }),
     [push],

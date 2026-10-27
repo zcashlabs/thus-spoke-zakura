@@ -1,3 +1,4 @@
+import { useId, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Copy, EyeOff } from 'lucide-react';
 import { DataRow, Panel, PanelNote } from '@/components/ui/Panel';
@@ -15,6 +16,8 @@ import { actionSummary, summariseShielding, transactionFee } from './shielding';
 import { resolveTransparentInput } from './resolve-input';
 import { Stat } from '@/components/ui/Stat';
 import { BACK_LINK } from './back-link';
+import { DecryptedActions } from './DecryptedActions';
+import { Button } from '@/components/ui/Button';
 
 const IO_COLUMNS: Column[] = [
   { key: 'n', header: '#', width: '72px' },
@@ -94,6 +97,9 @@ export function TransactionDetail() {
   const { txid = '' } = useParams<{ txid: string }>();
   const transaction = useTransaction(txid);
   const accounts = useAccounts();
+  // Keyed by transaction, so opening another transaction starts closed.
+  const [decryptedTxid, setDecryptedTxid] = useState<string | null>(null);
+  const decryptedId = useId();
 
   if (transaction.isPending) return <LoadingState label="Loading transaction…" />;
   if (transaction.isError) {
@@ -117,6 +123,7 @@ export function TransactionDetail() {
   const fee = transactionFee(tx);
   const confirmations = tx.confirmations ?? 0;
   const transparentInputsComplete = tx.transparent_inputs_complete !== false;
+  const decrypting = decryptedTxid === tx.txid;
 
   return (
     <div className="grid gap-4">
@@ -212,7 +219,26 @@ export function TransactionDetail() {
         {/* Ironwood and transparent always; other pools only when the transaction uses
             them (this chain activates NU6.3 at height 1, so they're usually empty). */}
         <dl>
-          <DataRow label="Ironwood actions">{shielding.ironwoodActions}</DataRow>
+          <DataRow label="Ironwood actions">
+            <div className="flex items-center justify-between gap-3">
+              <span>{shielding.ironwoodActions}</span>
+              {shielding.shieldedActions > 0 && (
+                <Button
+                  size="sm"
+                  // Keeps the row as tall as its neighbours.
+                  className="-my-2"
+                  aria-expanded={decrypting}
+                  aria-controls={decrypting ? decryptedId : undefined}
+                  onClick={() => setDecryptedTxid(decrypting ? null : tx.txid)}
+                >
+                  {decrypting ? 'Hide decrypted actions' : 'Decrypt actions'}
+                </Button>
+              )}
+            </div>
+          </DataRow>
+        </dl>
+        {decrypting && <DecryptedActions txid={tx.txid} id={decryptedId} />}
+        <dl>
           {shielding.orchardActions > 0 && (
             <DataRow label="Orchard actions">{shielding.orchardActions}</DataRow>
           )}
@@ -224,13 +250,6 @@ export function TransactionDetail() {
           )}
           <DataRow label="Transparent inputs">{shielding.transparentInputs}</DataRow>
           <DataRow label="Transparent outputs">{shielding.transparentOutputs}</DataRow>
-          {shielding.publicValues.map(({ pool, zatoshi }) => (
-            <DataRow key={pool} label={`${pool} public value balance`}>
-              {zatoshi !== null && Number.isSafeInteger(zatoshi)
-                ? formatZecAmount(BigInt(zatoshi))
-                : 'Unavailable'}
-            </DataRow>
-          ))}
           <DataRow label="Fee">
             {fee.kind === 'coinbase'
               ? 'No fee (coinbase)'
@@ -239,13 +258,6 @@ export function TransactionDetail() {
                 : `${formatZecAmount(fee.zatoshi)} (${fee.zatoshi.toLocaleString()} zatoshi)`}
           </DataRow>
         </dl>
-
-        {shielding.publicValues.length > 0 && (
-          <PanelNote>
-            A positive pool balance means value leaves that pool. A negative balance means value
-            enters it. These values do not identify individual shielded notes.
-          </PanelNote>
-        )}
 
         {!shielding.shieldedOnly && !shielding.mixed && transparentInputsComplete && (
           <PanelNote>

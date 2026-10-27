@@ -199,6 +199,16 @@ pub(crate) enum WalletCommand {
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: Option<u32>,
     },
+    /// Show what the local wallet recorded about one transaction for accounts
+    /// 1-5: outputs, change, memos, spent notes, and fee.
+    Tx {
+        /// Transaction ID.
+        #[arg(value_parser = parse_txid)]
+        txid: String,
+        /// Only show outputs and spends of this account (1-5).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        account: Option<u8>,
+    },
     /// Show an account's spendable funds, fee, and maximum send for one pool
     /// route, without sending.
     Quote {
@@ -352,6 +362,13 @@ impl Pool {
 }
 
 fn _assert_pathbuf_send(_: PathBuf) {}
+
+fn parse_txid(value: &str) -> Result<String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("transaction ID must be 64 hexadecimal characters");
+    }
+    Ok(value.to_ascii_lowercase())
+}
 
 /// `--memo ""` is allowed and sends an explicit empty text memo.
 fn parse_memo(value: &str) -> Result<String> {

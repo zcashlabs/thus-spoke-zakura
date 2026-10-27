@@ -594,3 +594,28 @@ fn send_to_address_excludes_other_destinations() {
         assert!(send(conflicting).is_err(), "{conflicting:?}");
     }
 }
+
+#[test]
+fn wallet_tx_takes_a_transaction_id_and_an_optional_account() {
+    let txid = "AB".repeat(32);
+    let cli = Cli::try_parse_from(["ths", "wallet", "tx", &txid, "--account", "2"]).unwrap();
+    let Some(Command::Wallet {
+        action: WalletCommand::Tx { txid, account },
+    }) = cli.command
+    else {
+        panic!("expected wallet tx");
+    };
+    assert_eq!(txid, "ab".repeat(32));
+    assert_eq!(account, Some(2));
+
+    let txid = "ab".repeat(32);
+    for args in [
+        vec!["ths", "wallet", "tx"],
+        vec!["ths", "wallet", "tx", "abc"],
+        vec!["ths", "wallet", "tx", &"zz".repeat(32)],
+        vec!["ths", "wallet", "tx", &txid, "--account", "6"],
+        vec!["ths", "wallet", "tx", &txid, "--account", "0"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+}

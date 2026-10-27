@@ -1,6 +1,6 @@
 import { Search } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { classifyQuery } from './classify-query';
 import { Button } from '@/components/ui/Button';
@@ -13,6 +13,7 @@ export function SearchBar() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const requestId = useRef(0);
+  const errorId = useId();
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [resolving, setResolving] = useState<{ id: number; path: string } | null>(null);
@@ -96,9 +97,15 @@ export function SearchBar() {
           <Search className="text-ink-muted size-4 shrink-0" aria-hidden />
           <input
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              requestId.current += 1;
+              setQuery(event.target.value);
+              setError('');
+              setResolving(null);
+            }}
             aria-label="Search the chain"
             aria-invalid={Boolean(error)}
+            aria-describedby={error ? errorId : undefined}
             placeholder="Block, transaction, t-address, or local unified address"
             className="text-ink placeholder:text-ink-muted w-full border-0 bg-transparent py-2 text-[13px] outline-none focus:ring-0"
           />
@@ -108,7 +115,7 @@ export function SearchBar() {
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-negative mt-2 text-[12px]">
+        <p id={errorId} role="alert" className="text-negative mt-2 text-[12px]">
           {error}
         </p>
       )}

@@ -92,6 +92,9 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Wallet { action } => match action {
             WalletCommand::Balances => runtime.wallet_balances(&name, cli.json),
             WalletCommand::Activity { limit } => runtime.wallet_activity(&name, limit, cli.json),
+            WalletCommand::Tx { txid, account } => {
+                runtime.wallet_transaction(&name, &txid, account, cli.json)
+            }
             WalletCommand::Quote {
                 from,
                 source_pool,

@@ -490,6 +490,7 @@ and Send dialogs, from a script or terminal:
 | --- | --- |
 | `ths wallet balances` | Print each account's balances and addresses |
 | `ths wallet activity` | Print canonical incoming and outgoing wallet history, plus pending or failed payments |
+| `ths wallet tx` | Show one transaction's outputs, change, memos, spent notes, and fee as the local wallet recorded them |
 | `ths wallet quote` | Show the spendable funds, fee, and maximum send for one account and pool route, without sending |
 | `ths wallet faucet` | Fund one or more accounts from the treasury |
 | `ths wallet send` | Send funds between accounts or pools or to a Regtest address, with an optional memo, or pay a `zcash:` URI |
@@ -558,6 +559,32 @@ included in the displayed amount, recipients, or account lists. Detecting a
 transparent source for an external incoming transaction is best effort and
 uses one short, shared lookup budget, so an unavailable Zakura node does not
 hold up the activity response.
+
+### `ths wallet tx <TXID> [--account <N>]`
+
+Shows what the local wallet recorded about one transaction for accounts 1–5:
+each output with its pool, index, value, sender, recipient, recipient address,
+change flag, and memo, then the notes the accounts spent and the fee the wallet
+stored. `--account` keeps only the outputs that account sent or received and
+the notes it spent. Outputs the faucet paid show `faucet` as the sender; the
+faucet's own change is never shown.
+
+This reads the local wallet, not public chain data. A transaction no account is
+involved in prints `No local account is involved in this transaction.` The
+`Details` line says whether memos and change flags are final; see
+[Read what the wallet recorded about a
+transaction](connect-an-app.md#read-what-the-wallet-recorded-about-a-transaction).
+A transaction ID the node doesn't know exits nonzero with the server's 404
+message.
+
+```console
+ths wallet tx "$TXID"  # Set TXID to a transaction ID first.
+ths wallet tx "$TXID" --account 2
+ths wallet tx "$TXID" --json
+```
+
+`--json` prints the response of `GET /api/v1/transactions/{txid}/wallet`
+unchanged.
 
 ### `ths wallet quote --from <N> --source-pool <POOL> --destination-pool <POOL>`
 
@@ -815,8 +842,9 @@ account's keys can read it.
   bytes, so a trailing NUL would be lost when the memo is read.
 - The memo is attached to the recipient's output only. Change returned to the
   sender has no memo.
-- The block explorer shows public transaction data only. It never shows memo
-  plaintext.
+- The block explorer's public transaction data never shows memo plaintext.
+  `ths wallet tx` and the Explorer's **Decrypt actions** button show the memos
+  the local wallet recorded for accounts 1–5.
 - All five accounts and the treasury come from one seed as separate ZIP-32
   accounts. A viewing-only wallet imported with one account's viewing key can
   decrypt only the memos sent to that account.
@@ -824,8 +852,9 @@ account's keys can read it.
 The server stores the supplied memo separately in its idempotency record.
 An omitted memo and a `null` memo are equivalent; explicitly empty text is a
 different payment intent. Changing the memo under an existing direct API key
-returns HTTP 409. Activity has no memo field, and
-dashboard transaction views do not decrypt received memos. ZIP-321 parsing can
+returns HTTP 409. Activity's `memos` lists the text memos the wallet can
+decrypt; the dashboard shows memos on the Explorer transaction page instead of
+on activity rows. ZIP-321 parsing can
 return a supplied URI memo without reading one from a transaction.
 
 `GET /api/v1/accounts` returns a `unified_full_viewing_key` for each user

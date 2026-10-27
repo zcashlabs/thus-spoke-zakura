@@ -24,7 +24,14 @@ export type { SendVariables, FaucetVariables } from './payment-identity';
 
 /** Everything a successful money movement invalidates. */
 function walletKeys() {
-  return [[...queryKeys.accounts], ['activity'], [...queryKeys.status], ['blocks'], ['send-quote']];
+  return [
+    [...queryKeys.accounts],
+    ['activity'],
+    [...queryKeys.status],
+    ['blocks'],
+    ['send-quote'],
+    ['wallet-transaction'],
+  ];
 }
 
 function useInvalidateWallet() {
