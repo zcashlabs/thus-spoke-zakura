@@ -39,6 +39,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
         no_open: false,
+        detach: false,
         port_offset: 0,
         block_time: None,
         mine_on_mempool: false,
@@ -46,13 +47,14 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }) {
         Command::Start {
             no_open,
+            detach,
             port_offset,
             block_time,
             mine_on_mempool,
             no_auto_mine,
         } => {
             let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
-            runtime.start(&name, no_open, cli.json, port_offset, mining)
+            runtime.start(&name, no_open, detach, cli.json, port_offset, mining)
         }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run { timeout, command } => {

@@ -5,6 +5,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         mining: MiningConfig,
@@ -47,6 +48,7 @@ impl Runtime {
         self.start_owned(
             name,
             no_open,
+            detach,
             json,
             port_offset,
             mining,
@@ -720,17 +722,28 @@ impl Drop for CleanupOnDrop<'_> {
 
 impl Runtime {
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_with(
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         host: &dyn StartHost,
         shutdown: &Shutdown,
     ) -> Result<()> {
         let context = LifecycleContext::new(LifecyclePolicy::default());
-        self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
+        self.start_with_policy(
+            name,
+            no_open,
+            detach,
+            json,
+            port_offset,
+            host,
+            shutdown,
+            &context,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -739,6 +752,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         host: &dyn StartHost,
@@ -750,6 +764,7 @@ impl Runtime {
         self.start_owned(
             name,
             no_open,
+            detach,
             json,
             port_offset,
             MiningConfig::default(),
@@ -781,6 +796,7 @@ impl Runtime {
         &self,
         name: &InstanceName,
         no_open: bool,
+        detach: bool,
         json: bool,
         port_offset: u16,
         mining: MiningConfig,
@@ -826,6 +842,10 @@ impl Runtime {
             }
             shutdown.check()?;
             host.wait_ready(&allocated, shutdown, context)?;
+            if detach {
+                self.mark_detached(name, ownership.session())
+                    .with_context(|| format!("recording that {name} is detached"))?;
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&allocated.endpoints)?);
             } else {
@@ -835,6 +855,14 @@ impl Runtime {
                 );
             }
             ownership.release_lifecycle();
+            if detach {
+                if !json {
+                    println!(
+                        "\nRunning in the background. Delete it with `ths --name {name} stop`."
+                    );
+                }
+                return Ok(None);
+            }
             if !no_open
                 && let Err(error) = host.open_url(&allocated.endpoints.dashboard, shutdown, context)
                 && !shutdown.try_interrupted()
@@ -851,8 +879,13 @@ impl Runtime {
             let ready = self.mark_ready(name, ownership.session())?;
             let ended = host.wait_for_shutdown(&allocated.app_container, shutdown);
             drop(ready);
-            ended
+            ended.map(Some)
         })();
+        // `None`: detached once ready, so the environment belongs to `stop` / `reset` now.
+        let Some(primary) = primary.transpose() else {
+            cleanup.state = CleanupGuard::Inactive;
+            return Ok(());
+        };
         cleanup.state = CleanupGuard::Explicit;
         let primary = primary.map_err(|error| ownership.session().explain(name, error));
         if matches!(primary, Ok(Ended::DeletedElsewhere)) {
