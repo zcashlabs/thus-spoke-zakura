@@ -149,6 +149,21 @@ array contains exactly one account. A transaction appears once even when it
 affects multiple development accounts. Outputs to the hidden treasury account
 are excluded from the user-facing amount, recipients, and account lists.
 
+The unkeyed list accepts `limit` (default 30, maximum 100), `account` (1–5),
+`kind` (`send`, `faucet`, or `transaction`), and `status` filters. Filters
+combine and are applied before the limit. To read the next older page, pass the
+last returned activity's `id` as `before`; for example,
+`GET /api/v1/activity?account=2&limit=30&before=<activity-id>`. The response
+remains a JSON array. `X-THS-Has-More` is `true` only when an older matching row
+exists after the returned page. The server records an immutable first-seen
+sequence for each activity identity and orders every later page by that
+sequence. Preparation, confirmation, rollback, and reorg therefore cannot move
+a row across an existing cursor boundary. If the cursor activity disappears or
+no longer belongs to the filtered list, the server returns 409 with `activity
+cursor is stale; reload from the first page`. Start again without `before`. The
+keyed `idempotency_key` lookup remains a separate exact journal lookup and
+ignores list filters.
+
 `amount_zatoshi` remains the value paid to the relevant user or external
 recipient. Canonical wallet entries additionally expose the aggregate effects
 across development accounts 1–5 as `received_zatoshi`, `spent_zatoshi`, and the
@@ -163,8 +178,15 @@ When a transaction uses more than one pool, `source_pool` or
 
 For external incoming transactions, transparent-source detection requires a
 Zakura transaction lookup. These lookups run concurrently within one short,
-shared budget and fail open: if Zakura is slow or unavailable, activity still
-returns and the unknown source pool remains absent.
+shared budget after filtering and pagination, so only entries in the returned
+page are enriched. They fail open: if Zakura is slow or unavailable, activity
+still returns and the unknown source pool remains absent.
+
+Activity listing also separates page selection from wallet-detail loading. It
+first combines lightweight journal and wallet identities, applies filters and
+the stable first-seen cursor, and selects `limit + 1` candidates. The extra
+candidate determines whether another page exists; full amounts, memos, pools,
+and recipients are loaded only for the `limit` entries returned to the client.
 
 For the keyed payment-journal object, read `txid`, `status`, and `block_hash`
 first; do not infer confirmation merely because HTTP returned 200. That object

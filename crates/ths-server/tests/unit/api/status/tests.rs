@@ -63,6 +63,50 @@ fn canonical_activity(direction: &'static str, txid: &str) -> CanonicalActivity 
     }
 }
 
+fn canonical_index(txid: &str, account: u8) -> CanonicalActivityIndex {
+    CanonicalActivityIndex {
+        txid: txid.to_owned(),
+        mined_height: Some(120),
+        tx_index: Some(0),
+        affected_accounts: vec![account],
+        created_at: None,
+    }
+}
+
+fn journal_entry(id: &str, status: &str, created_at: &str) -> Activity {
+    let mut activity = journal_send("");
+    activity.id = id.to_owned();
+    activity.status = status.to_owned();
+    activity.created_at = created_at.to_owned();
+    activity
+}
+
+fn page(
+    limit: Option<u32>,
+    account: Option<u8>,
+    kind: Option<&str>,
+    status: Option<&str>,
+    before: Option<&str>,
+) -> Page {
+    Page {
+        limit,
+        idempotency_key: None,
+        account,
+        kind: kind.map(str::to_owned),
+        status: status.map(str::to_owned),
+        before: before.map(str::to_owned),
+    }
+}
+
+fn persist_first_seen_order(store: &crate::db::Store, activity: &mut [ActivityEntry]) {
+    let ids = activity
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let sequences = store.activity_sequences(&ids).unwrap();
+    order_activity_by_first_seen(activity, &sequences).unwrap();
+}
+
 fn transparent_receive(receiver: &str) -> Transaction {
     let Address::Transparent(receiver) = Address::decode(&regtest_network(), receiver).unwrap()
     else {
@@ -290,16 +334,16 @@ fn transparent_inputs_are_reported_as_a_public_source_pool() {
     incoming.from_accounts.clear();
     incoming.source_pools.clear();
 
+    let mut activity = ActivityEntry::canonical(incoming);
     add_public_source_pools(
-        &mut incoming,
+        &mut activity,
         &serde_json::json!({
             "vin": [{"txid": "previous-transaction", "vout": 0}]
         }),
     );
 
-    let activity = unified_activity(Vec::new(), vec![incoming], 30);
-    assert_eq!(activity[0].source_pool.as_deref(), Some("transparent"));
-    assert_eq!(activity[0].source_pools, ["transparent"]);
+    assert_eq!(activity.source_pool.as_deref(), Some("transparent"));
+    assert_eq!(activity.source_pools, ["transparent"]);
 }
 
 #[test]
@@ -309,14 +353,14 @@ fn coinbase_does_not_look_like_a_transparent_payment_source() {
     incoming.from_accounts.clear();
     incoming.source_pools.clear();
 
+    let mut activity = ActivityEntry::canonical(incoming);
     add_public_source_pools(
-        &mut incoming,
+        &mut activity,
         &serde_json::json!({"vin": [{"coinbase": "00"}]}),
     );
 
-    let activity = unified_activity(Vec::new(), vec![incoming], 30);
-    assert_eq!(activity[0].source_pool, None);
-    assert!(activity[0].source_pools.is_empty());
+    assert_eq!(activity.source_pool, None);
+    assert!(activity.source_pools.is_empty());
 }
 
 #[test]
@@ -358,6 +402,223 @@ fn confirmed_journal_outside_the_canonical_window_does_not_displace_recent_histo
     assert_eq!(activity[0].mined_height, Some(200));
 }
 
+#[test]
+fn activity_filters_combine_before_the_limit() {
+    let mut matching = canonical_activity("internal", "matching");
+    matching.to_account = None;
+    matching.to_accounts = vec![2, 3];
+    let wrong_account = canonical_activity("internal", "wrong-account");
+    let wrong_kind = journal_entry("wrong-kind", "confirmed", "2026-10-15 10:00:00");
+    let mut wrong_status = canonical_activity("internal", "wrong-status");
+    wrong_status.to_accounts = vec![2, 3];
+    wrong_status.mined_height = None;
+
+    let activity = unified_activity_with_prepared(
+        vec![wrong_kind],
+        vec![wrong_account, matching, wrong_status],
+        &HashMap::new(),
+    );
+    let filtered = page_activity(
+        activity,
+        &page(
+            Some(1),
+            Some(3),
+            Some("transaction"),
+            Some("confirmed"),
+            None,
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].txid, "matching");
+}
+
+#[test]
+fn activity_id_cursor_is_stable_when_newer_activity_arrives() {
+    let original = vec![
+        journal_entry("a", "preparing", "2026-10-15 10:03:00"),
+        journal_entry("b", "preparing", "2026-10-15 10:02:00"),
+        journal_entry("c", "preparing", "2026-10-15 10:01:00"),
+        journal_entry("d", "preparing", "2026-10-15 10:00:00"),
+    ];
+    let first = page_activity(
+        unified_activity_with_prepared(original.clone(), Vec::new(), &HashMap::new()),
+        &page(Some(2), None, None, None, None),
+    )
+    .unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+
+    let mut with_newer = original;
+    with_newer.push(journal_entry("new", "preparing", "2026-10-15 10:04:00"));
+    let second = page_activity(
+        unified_activity_with_prepared(with_newer, Vec::new(), &HashMap::new()),
+        &page(Some(2), None, None, None, Some("b")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        second
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "d"]
+    );
+}
+
+#[test]
+fn confirming_an_activity_between_pages_does_not_repeat_it() {
+    let store = crate::db::Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let x = journal_entry("x", "preparing", "2026-10-15 10:03:00");
+    let y = journal_entry("y", "preparing", "2026-10-15 10:02:00");
+    let older = canonical_activity("incoming", "older");
+    let mut first_view = unified_activity_with_prepared(
+        vec![x.clone(), y.clone()],
+        vec![older.clone()],
+        &HashMap::new(),
+    );
+    persist_first_seen_order(&store, &mut first_view);
+    let first_page = page_activity(first_view, &page(Some(2), None, None, None, None)).unwrap();
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "y"]
+    );
+
+    let mut confirmed_x = x;
+    confirmed_x.status = "confirmed".to_owned();
+    confirmed_x.txid = "confirmed-x".to_owned();
+    let confirmed_x_wallet = canonical_activity("internal", "confirmed-x");
+    let mut second_view = unified_activity_with_prepared(
+        vec![confirmed_x, y],
+        vec![confirmed_x_wallet, older],
+        &HashMap::new(),
+    );
+    persist_first_seen_order(&store, &mut second_view);
+    let second_page =
+        page_activity(second_view, &page(Some(2), None, None, None, Some("y"))).unwrap();
+
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].id, "wallet:older");
+}
+
+#[test]
+fn unmining_an_activity_between_pages_does_not_skip_it() {
+    let store = crate::db::Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let x = journal_entry("x", "preparing", "2026-10-15 10:03:00");
+    let y = journal_entry("y", "preparing", "2026-10-15 10:02:00");
+    let mut rollback = canonical_activity("incoming", "rollback");
+    rollback.created_at = Some("2026-10-15 10:04:00".to_owned());
+    let mut first_view = unified_activity_with_prepared(
+        vec![x.clone(), y.clone()],
+        vec![rollback.clone()],
+        &HashMap::new(),
+    );
+    persist_first_seen_order(&store, &mut first_view);
+    let first_page = page_activity(first_view, &page(Some(2), None, None, None, None)).unwrap();
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "y"]
+    );
+
+    rollback.mined_height = None;
+    rollback.tx_index = None;
+    rollback.block_hash = None;
+    rollback.confirmations = 0;
+    let mut second_view =
+        unified_activity_with_prepared(vec![x, y], vec![rollback], &HashMap::new());
+    persist_first_seen_order(&store, &mut second_view);
+    let second_page =
+        page_activity(second_view, &page(Some(2), None, None, None, Some("y"))).unwrap();
+
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].id, "wallet:rollback");
+}
+
+#[test]
+fn activity_page_reports_more_only_when_an_older_row_exists() {
+    let rows = (0..11)
+        .map(|index| {
+            journal_entry(
+                &format!("row-{index}"),
+                "preparing",
+                &format!("2026-10-15 10:{:02}:00", 59 - index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let activity = unified_activity_with_prepared(rows, Vec::new(), &HashMap::new());
+
+    let (full_page, has_more) =
+        activity_page(activity.clone(), &page(Some(10), None, None, None, None)).unwrap();
+    assert_eq!(full_page.len(), 10);
+    assert!(has_more);
+
+    let (exact_page, has_more) = activity_page(
+        activity[..10].to_vec(),
+        &page(Some(10), None, None, None, None),
+    )
+    .unwrap();
+    assert_eq!(exact_page.len(), 10);
+    assert!(!has_more);
+}
+
+#[test]
+fn changed_cursor_outside_the_filter_is_stale() {
+    let cursor = journal_entry("cursor", "confirmed", "2026-10-15 10:00:00");
+    let pending = journal_entry("pending", "preparing", "2026-10-15 09:59:00");
+
+    let error = page_activity(
+        unified_activity_with_prepared(vec![cursor, pending], Vec::new(), &HashMap::new()),
+        &page(None, None, None, Some("preparing"), Some("cursor")),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(
+        error.message,
+        "activity cursor is stale; reload from the first page"
+    );
+}
+
+#[test]
+fn activity_rejects_invalid_filters_and_empty_cursors() {
+    for (page, expected) in [
+        (
+            page(None, Some(6), None, None, None),
+            "account must be between 1 and 5",
+        ),
+        (
+            page(None, None, Some("unknown"), None, None),
+            "kind must be send, faucet, or transaction",
+        ),
+        (
+            page(None, None, None, Some("unknown"), None),
+            "status must be preparing, prepared, broadcast, pending, confirmed, unconfirmed, or failed",
+        ),
+        (
+            page(None, None, None, None, Some("")),
+            "before must not be empty",
+        ),
+    ] {
+        let error = page_activity(Vec::new(), &page).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, expected);
+    }
+}
+
 #[tokio::test]
 async fn stalled_node_uses_one_bounded_enrichment_budget() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -368,7 +629,7 @@ async fn stalled_node_uses_one_bounded_enrichment_budget() {
             activity.from_account = None;
             activity.from_accounts.clear();
             activity.source_pools.clear();
-            activity
+            ActivityEntry::canonical(activity)
         })
         .collect::<Vec<_>>();
 
@@ -383,6 +644,72 @@ async fn stalled_node_uses_one_bounded_enrichment_budget() {
             .iter()
             .all(|activity| activity.source_pools.is_empty())
     );
+}
+
+#[tokio::test]
+async fn source_pool_enrichment_is_limited_to_the_returned_page() {
+    async fn rpc_response(
+        State(requests): State<Arc<AtomicUsize>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        requests.fetch_add(1, Ordering::Relaxed);
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"vin": []},
+            "error": null
+        }))
+    }
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rpc = NodeRpc::new(format!("http://{}", listener.local_addr().unwrap()));
+    let app = axum::Router::new()
+        .route("/", axum::routing::post(rpc_response))
+        .with_state(requests.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let activity = (0..11)
+        .map(|index| {
+            let mut activity = canonical_activity("incoming", &format!("incoming-{index}"));
+            activity.from_account = None;
+            activity.from_accounts.clear();
+            activity.source_pools.clear();
+            ActivityEntry::canonical(activity)
+        })
+        .collect::<Vec<_>>();
+
+    let (entries, has_more) = enriched_activity_page(
+        &rpc,
+        activity,
+        &page(Some(3), None, None, None, None),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(entries.len(), 3);
+    assert!(has_more);
+    assert_eq!(requests.load(Ordering::Relaxed), 3);
+    server.abort();
+}
+
+#[test]
+fn full_wallet_details_are_selected_only_for_the_returned_page() {
+    let canonical = (0..25)
+        .map(|index| canonical_index(&format!("tx-{index}"), 1))
+        .collect::<Vec<_>>();
+    let candidates = activity_candidates(Vec::new(), canonical, &HashMap::new());
+
+    let (selected, has_more) =
+        candidate_page(candidates, &page(Some(10), None, None, None, None)).unwrap();
+    let selected_txids = selected
+        .iter()
+        .filter_map(|entry| entry.canonical_txid.as_deref())
+        .collect::<Vec<_>>();
+
+    assert!(has_more);
+    assert_eq!(selected.len(), 10);
+    assert_eq!(selected_txids.len(), 10);
 }
 
 #[tokio::test]
@@ -695,7 +1022,7 @@ fn settlement_waits_for_startup_after_the_components_agree() {
 use crate::state::tests::{api_get, counting_rpc};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn lightwalletd_probe(
@@ -930,19 +1257,47 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
     assert_eq!(
         listed,
         [
-            (json!(failed.id), json!("failed"), json!("")),
-            (json!(pending.id), json!("broadcast"), json!("pending-txid")),
-            (json!(preparing.id), json!("preparing"), json!("")),
             (
                 json!(confirmed.id),
                 json!("confirmed"),
                 json!("confirmed-txid")
             ),
+            (json!(failed.id), json!("failed"), json!("")),
+            (json!(pending.id), json!("broadcast"), json!("pending-txid")),
+            (json!(preparing.id), json!("preparing"), json!("")),
         ]
     );
 
+    let (code, filtered) = api_get(
+        &state,
+        "/api/v1/activity?account=3&kind=faucet&status=confirmed",
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(filtered.as_array().unwrap().len(), 1);
+    assert_eq!(filtered[0]["id"], confirmed.id);
+
+    let (code, invalid_account) = api_get(&state, "/api/v1/activity?account=6").await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_account["error"]["message"],
+        "account must be between 1 and 5"
+    );
+
+    let (code, stale) = api_get(
+        &state,
+        &format!("/api/v1/activity?status=preparing&before={}", failed.id),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert_eq!(
+        stale["error"]["message"],
+        "activity cursor is stale; reload from the first page"
+    );
+
+    let mut oldest_filler_id = None;
     for index in 0..101 {
-        store
+        let filler = store
             .claim_transfer(
                 1,
                 crate::db::Recipient::Account(3),
@@ -953,6 +1308,9 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
                 None,
             )
             .unwrap();
+        if index == 0 {
+            oldest_filler_id = Some(filler.id);
+        }
     }
     let (_, listed) = api_get(&state, "/api/v1/activity?limit=100").await;
     assert_eq!(listed.as_array().unwrap().len(), 100);
@@ -963,6 +1321,16 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
             .iter()
             .all(|row| row["id"] != json!(preparing.id))
     );
+    let (code, older) = api_get(
+        &state,
+        &format!(
+            "/api/v1/activity?limit=1&before={}",
+            oldest_filler_id.unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(older.as_array().unwrap().len(), 1);
 
     for (key, id, status, txid, last_error) in [
         (
@@ -996,7 +1364,9 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
     ] {
         let (code, found) = api_get(
             &state,
-            &format!("/api/v1/activity?limit=1&idempotency_key={key}"),
+            &format!(
+                "/api/v1/activity?limit=1&account=6&kind=unknown&status=unknown&before=&idempotency_key={key}"
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{key}");

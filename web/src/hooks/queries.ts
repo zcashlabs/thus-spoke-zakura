@@ -1,7 +1,14 @@
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+} from '@tanstack/react-query';
+import { useEffect, useMemo } from 'react';
 import { userAccounts } from '@/lib/accounts';
 import {
   api,
+  ApiError,
   type Account,
   type Activity,
   type AddressInfo,
@@ -13,6 +20,7 @@ import {
   type SendQuoteInput,
   type Status,
   type Transaction,
+  type ActivityListOptions,
   type WalletTransaction,
 } from '@/lib/api';
 
@@ -25,6 +33,7 @@ export const queryKeys = {
   mining: ['mining'] as const,
   accounts: ['accounts'] as const,
   activity: (limit: number) => ['activity', limit] as const,
+  activityPages: (options: ActivityListOptions) => ['activity', 'pages', options] as const,
   payment: (key: string) => ['activity', 'payment', key] as const,
   blocks: (before?: number) => ['blocks', before ?? 'tip'] as const,
   mempool: ['mempool'] as const,
@@ -47,6 +56,48 @@ export function useAccounts(): UseQueryResult<Account[]> {
 
 export function useActivity(limit = 30): UseQueryResult<Activity[]> {
   return useQuery({ queryKey: queryKeys.activity(limit), queryFn: () => api.activity(limit) });
+}
+
+export function useActivityPages(options: ActivityListOptions = {}) {
+  const limit = options.limit ?? 30;
+  const { account, kind, status } = options;
+  const queryClient = useQueryClient();
+  const queryKey = useMemo(
+    () =>
+      queryKeys.activityPages({
+        limit,
+        ...(account === undefined ? {} : { account }),
+        ...(kind === undefined ? {} : { kind }),
+        ...(status === undefined ? {} : { status }),
+      }),
+    [account, kind, limit, status],
+  );
+  const query = useInfiniteQuery({
+    queryKey,
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      api.activityPage({
+        limit,
+        ...(account === undefined ? {} : { account }),
+        ...(kind === undefined ? {} : { kind }),
+        ...(status === undefined ? {} : { status }),
+        ...(pageParam === undefined ? {} : { before: pageParam }),
+      }),
+    getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.entries.at(-1)?.id : undefined),
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 409) && failureCount < 3,
+  });
+
+  // A pending row can become mined and leave the selected filter between
+  // pages. The server reports that stale cursor instead of silently skipping
+  // rows; restart from the first page so the dashboard heals itself.
+  useEffect(() => {
+    if (query.error instanceof ApiError && query.error.status === 409) {
+      void queryClient.resetQueries({ queryKey, exact: true });
+    }
+  }, [query.error, queryClient, queryKey]);
+
+  return query;
 }
 
 export function isTerminalPayment(activity: Activity | null | undefined): boolean {

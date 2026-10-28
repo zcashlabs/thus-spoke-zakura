@@ -19,11 +19,38 @@ const TXID = 'ab'.repeat(32);
 const PAYMENT_URI = 'zcash:uregtest1account2?amount=1.23456789&memo=cmVudCBmb3IgT2N0b2Jlcg';
 const testLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')!;
 
-function json(body: unknown): Promise<Response> {
+function activityRow(
+  id: string,
+  overrides: Partial<{
+    kind: 'send' | 'faucet' | 'transaction';
+    status: string;
+    to_account: number;
+  }> = {},
+) {
+  return {
+    id,
+    kind: overrides.kind ?? 'transaction',
+    from_account: null,
+    to_account: overrides.to_account ?? 1,
+    to_address: null,
+    source_pool: null,
+    destination_pool: 'ironwood',
+    amount_zatoshi: 1_000_000,
+    txid: id.padEnd(64, '0'),
+    block_hash: 'cd'.repeat(32),
+    status: overrides.status ?? 'confirmed',
+    last_error: null,
+    created_at: '2026-10-18 10:00:00',
+  };
+}
+
+function json(body: unknown, headers?: HeadersInit): Promise<Response> {
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set('content-type', 'application/json');
   return Promise.resolve(
     new Response(JSON.stringify(body), {
       status: 200,
-      headers: { 'content-type': 'application/json' },
+      headers: responseHeaders,
     }),
   );
 }
@@ -1053,4 +1080,217 @@ describe('WalletPage', () => {
       }
     },
   );
+
+  it('combines activity filters in the server request', async () => {
+    Object.assign(Element.prototype, {
+      hasPointerCapture: () => false,
+      releasePointerCapture: () => undefined,
+      scrollIntoView: () => undefined,
+    });
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('/activity')) {
+        requests.push(url);
+        return json([activityRow('filtered', { kind: 'send', status: 'failed', to_account: 2 })]);
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText('1 event');
+
+    await userEvent.click(screen.getByLabelText('Account'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Account 2' }));
+    await userEvent.click(screen.getByLabelText('Kind'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Send' }));
+    await userEvent.click(screen.getByLabelText('Status'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Failed' }));
+
+    await waitFor(() =>
+      expect(requests).toContain('/api/v1/activity?limit=10&account=2&kind=send&status=failed'),
+    );
+  });
+
+  it('loads the next activity page from the last displayed id', async () => {
+    const firstPage = Array.from({ length: 10 }, (_, index) => activityRow(`page-${index + 1}`));
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('/activity')) {
+        requests.push(url);
+        return url.includes('before=page-10')
+          ? json([activityRow('page-11')], { 'x-ths-has-more': 'false' })
+          : json(firstPage, { 'x-ths-has-more': 'true' });
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('10 events')).toBeInTheDocument();
+    expect(screen.getByText('Page 1')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'First' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('1 event')).toBeInTheDocument();
+    expect(screen.getByText('Page 2')).toBeInTheDocument();
+    expect(requests).toContain('/api/v1/activity?limit=10&before=page-10');
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+    expect(await screen.findByText('10 events')).toBeInTheDocument();
+    expect(screen.getByText('Page 1')).toBeInTheDocument();
+  });
+
+  it('disables next when the first page contains exactly the selected number of entries', async () => {
+    const exactPage = Array.from({ length: 10 }, (_, index) => activityRow(`exact-${index + 1}`));
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('/activity')) {
+        return json(exactPage, { 'x-ths-has-more': 'false' });
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('10 events')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Last' })).toBeDisabled();
+  });
+
+  it('loads every remaining cursor page before showing the last page', async () => {
+    const firstPage = Array.from({ length: 10 }, (_, index) => activityRow(`first-${index + 1}`));
+    const secondPage = Array.from({ length: 10 }, (_, index) => activityRow(`second-${index + 1}`));
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('/activity')) {
+        requests.push(url);
+        if (url.includes('before=second-10')) {
+          return json([activityRow('last-1')], { 'x-ths-has-more': 'false' });
+        }
+        if (url.includes('before=first-10')) {
+          return json(secondPage, { 'x-ths-has-more': 'true' });
+        }
+        return json(firstPage, { 'x-ths-has-more': 'true' });
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Page 1')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Last' }));
+
+    expect(await screen.findByText('Page 3')).toBeInTheDocument();
+    expect(screen.getByText('1 event')).toBeInTheDocument();
+    expect(requests).toContain('/api/v1/activity?limit=10&before=first-10');
+    expect(requests).toContain('/api/v1/activity?limit=10&before=second-10');
+    expect(screen.getByRole('button', { name: 'Last' })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+    expect(await screen.findByText('Page 2')).toBeInTheDocument();
+    expect(screen.getByText('10 events')).toBeInTheDocument();
+  });
+
+  it('reloads the first page when an activity cursor becomes stale', async () => {
+    const firstPage = Array.from({ length: 10 }, (_, index) => activityRow(`stale-${index + 1}`));
+    let firstPageReads = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('before=stale-10')) {
+        return Promise.resolve(
+          Response.json(
+            {
+              error: {
+                message: 'activity cursor is stale; reload from the first page',
+                status: 409,
+              },
+            },
+            { status: 409 },
+          ),
+        );
+      }
+      if (url.includes('/activity')) {
+        firstPageReads += 1;
+        return json(firstPageReads === 1 ? firstPage : [activityRow('refreshed')], {
+          'x-ths-has-more': firstPageReads === 1 ? 'true' : 'false',
+        });
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('10 events')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('1 event')).toBeInTheDocument();
+    expect(screen.getByText('Page 1')).toBeInTheDocument();
+    expect(firstPageReads).toBe(2);
+    expect(screen.queryByText(/cursor is stale/i)).not.toBeInTheDocument();
+  });
+
+  it('changes the activity page size and starts again from the first page', async () => {
+    Object.assign(Element.prototype, {
+      hasPointerCapture: () => false,
+      releasePointerCapture: () => undefined,
+      scrollIntoView: () => undefined,
+    });
+    const requests: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = requestUrl(input);
+      if (url.includes('/accounts')) return json([]);
+      if (url.includes('/activity')) {
+        requests.push(url);
+        return json([]);
+      }
+      return json({ instance: 'default', node: null, account_count: 5 });
+    });
+    renderWithProviders(
+      <MemoryRouter>
+        <WalletActionsProvider>
+          <WalletPage />
+        </WalletActionsProvider>
+      </MemoryRouter>,
+    );
+
+    const pageSize = await screen.findByRole('combobox', { name: /Show.*entries/ });
+    expect(pageSize).toHaveTextContent('10');
+    expect(requests).toContain('/api/v1/activity?limit=10');
+    await userEvent.click(pageSize);
+    await userEvent.click(await screen.findByRole('option', { name: '25' }));
+    await waitFor(() => expect(requests).toContain('/api/v1/activity?limit=25'));
+    expect(screen.getByRole('combobox', { name: /Show.*entries/ })).toHaveTextContent('25');
+    expect(requests.at(-1)).not.toContain('before=');
+  });
 });

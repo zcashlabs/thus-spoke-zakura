@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { post, request } from './client';
+import { post, request, requestWithResponse } from './client';
 import { ApiError } from './errors';
 import {
   accountSchema,
@@ -22,6 +22,25 @@ import {
   type AddressFaucet,
   type Activity,
 } from './schemas';
+
+export type ActivityListOptions = {
+  limit?: number;
+  account?: number;
+  kind?: 'send' | 'faucet' | 'transaction';
+  status?: string;
+  before?: string;
+};
+
+function activityPath(options: number | ActivityListOptions = {}): string {
+  const page = typeof options === 'number' ? { limit: options } : options;
+  const params = new URLSearchParams();
+  params.set('limit', String(page.limit ?? 30));
+  if (page.account !== undefined) params.set('account', String(page.account));
+  if (page.kind !== undefined) params.set('kind', page.kind);
+  if (page.status !== undefined) params.set('status', page.status);
+  if (page.before !== undefined) params.set('before', page.before);
+  return `/activity?${params.toString()}`;
+}
 
 /** Adapt the address faucet's smaller status response to the shared payment UI. */
 function addressFaucetActivity(payment: AddressFaucet, key: string): Activity {
@@ -47,7 +66,34 @@ export const api = {
 
   accounts: () => request('/accounts', z.array(accountSchema)),
 
-  activity: (limit = 30) => request(`/activity?limit=${limit}`, z.array(activitySchema)),
+  activity: (options: number | ActivityListOptions = {}) =>
+    request(activityPath(options), z.array(activitySchema)),
+
+  activityPage: async (options: ActivityListOptions = {}) => {
+    const { data, response } = await requestWithResponse(
+      activityPath(options),
+      z.array(activitySchema),
+    );
+    const header = response.headers.get('x-ths-has-more');
+    let hasMore = header === 'true';
+    // A running environment may predate the response header while Vite serves
+    // the new dashboard. Probe one older row so UI-only iteration remains
+    // accurate without forcing the developer to discard that environment.
+    if (header === null && data.length === (options.limit ?? 30)) {
+      const cursor = data.at(-1)?.id;
+      if (cursor) {
+        const older = await request(
+          activityPath({ ...options, limit: 1, before: cursor }),
+          z.array(activitySchema),
+        );
+        hasMore = older.length > 0;
+      }
+    }
+    return {
+      entries: data,
+      hasMore,
+    };
+  },
 
   payment: async (key: string) => {
     const rows = await request(
