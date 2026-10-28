@@ -1,4 +1,5 @@
 use super::progression::PAYMENT_LOOKUP_TIMEOUT;
+use crate::mining::MiningMode;
 use crate::state::AppState;
 use crate::state::notify;
 use anyhow::Context;
@@ -80,6 +81,27 @@ impl PaymentAttempt<'_> {
         if self.state.started() && !self.state.mining_config().mode.auto_mine() {
             return Ok(Vec::new());
         }
+        self.generate_and_sync(blocks).await
+    }
+
+    /// Mines blocks that only advance the height, such as coinbase maturity for
+    /// the treasury. Mempool mode never mines while the mempool is empty, so
+    /// these blocks are mined here instead; interval and manual modes still
+    /// leave them to the background task or `ths mine`.
+    pub(crate) async fn mine_empty_and_sync(&self, blocks: u32) -> anyhow::Result<Vec<String>> {
+        self.check_can_start()?;
+        if self.state.started()
+            && !matches!(
+                self.state.mining_config().mode,
+                MiningMode::Auto | MiningMode::Mempool
+            )
+        {
+            return Ok(Vec::new());
+        }
+        self.generate_and_sync(blocks).await
+    }
+
+    async fn generate_and_sync(&self, blocks: u32) -> anyhow::Result<Vec<String>> {
         let _chain = self
             .network(
                 Duration::from_secs(120),

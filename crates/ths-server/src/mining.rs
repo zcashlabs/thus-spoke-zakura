@@ -28,6 +28,8 @@ pub enum MiningMode {
     /// A background task mines an empty block every `block_time` seconds.
     Interval,
     /// A background task mines when the mempool has a new, nonempty transaction set.
+    /// Faucet payments still mine the empty blocks that treasury coinbase
+    /// maturity needs, since an empty mempool never wakes this task.
     Mempool,
     /// No automatic blocks; unresolved work waits for an explicit `ths mine`.
     Manual,

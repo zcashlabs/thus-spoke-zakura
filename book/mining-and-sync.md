@@ -48,7 +48,10 @@ startup:
   interleaved with them.
 - `mempool` remembers the last transaction set it tried to mine. It only mines
   a new block when that set changes, so a transaction the node cannot include
-  does not make the server generate a stream of empty blocks.
+  does not make the server generate a stream of empty blocks. The one
+  exception is a faucet payment waiting on treasury coinbase maturity: it mines
+  the blocks it needs itself, because an empty mempool never triggers the
+  background task.
 - In `manual`, a payment is submitted and left pending. It confirms once a block
   that includes it arrives, normally from `ths mine`.
 
