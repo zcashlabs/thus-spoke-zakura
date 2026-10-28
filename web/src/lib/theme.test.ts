@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyTheme, isThemePreference, readStoredTheme, THEME_STORAGE_KEY } from './theme';
+import {
+  applyTheme,
+  isThemePreference,
+  readStoredTheme,
+  THEME_STORAGE_KEY,
+  updateThemeColor,
+} from './theme';
 
 describe('theme preference', () => {
   beforeEach(() => {
@@ -53,5 +59,69 @@ describe('theme preference', () => {
   it('applies explicit themes', () => {
     applyTheme('light');
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+  });
+});
+
+describe('theme-color meta', () => {
+  let meta: HTMLMetaElement;
+
+  beforeEach(() => {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    meta.content = '#090b0a';
+    document.head.appendChild(meta);
+  });
+
+  afterEach(() => {
+    document.head.removeChild(meta);
+    vi.restoreAllMocks();
+  });
+
+  it('sets the light canvas color for light', () => {
+    updateThemeColor('light');
+    expect(meta.content).toBe('#f2f0f1');
+  });
+
+  it('sets the dark canvas color for dark', () => {
+    updateThemeColor('dark');
+    expect(meta.content).toBe('#0e0f11');
+  });
+
+  it('resolves system mode via matchMedia — light OS', () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+    updateThemeColor('system');
+    expect(meta.content).toBe('#f2f0f1');
+  });
+
+  it('resolves system mode via matchMedia — dark OS', () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: true,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+    updateThemeColor('system');
+    expect(meta.content).toBe('#0e0f11');
+  });
+
+  it('does nothing when the meta tag is absent', () => {
+    document.head.removeChild(meta);
+    expect(() => updateThemeColor('dark')).not.toThrow();
+    document.head.appendChild(meta);
+  });
+
+  it('applyTheme updates the meta tag alongside the data-theme attribute', () => {
+    applyTheme('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(meta.content).toBe('#0e0f11');
+
+    applyTheme('light');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    expect(meta.content).toBe('#f2f0f1');
   });
 });
