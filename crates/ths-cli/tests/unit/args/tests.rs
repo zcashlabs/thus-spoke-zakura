@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn run_and_wait_require_positive_timeouts() {
+    for args in [
+        &["ths", "run", "--timeout", "0", "--", "true"][..],
+        &["ths", "wait", "--timeout", "0"],
+    ] {
+        let error = match Cli::try_parse_from(args) {
+            Ok(_) => panic!("accepted {args:?}"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(message.contains("not in 1.."), "{message}");
+        assert!(!message.contains("Docker"), "{message}");
+    }
+
+    let run = Cli::try_parse_from(["ths", "run", "--timeout", "1", "--", "true"]).unwrap();
+    assert!(matches!(run.command, Some(Command::Run { timeout: 1, .. })));
+    let wait = Cli::try_parse_from(["ths", "wait", "--timeout", "1"]).unwrap();
+    assert!(matches!(wait.command, Some(Command::Wait { timeout: 1 })));
+
+    let run = Cli::try_parse_from(["ths", "run", "--", "true"]).unwrap();
+    assert!(matches!(
+        run.command,
+        Some(Command::Run { timeout: 120, .. })
+    ));
+    let wait = Cli::try_parse_from(["ths", "wait"]).unwrap();
+    assert!(matches!(wait.command, Some(Command::Wait { timeout: 120 })));
+}
+
+#[test]
 fn parses_explorer_commands_with_global_options() {
     for args in [
         vec!["ths", "--name", "alice", "--json", "tx", "txid"],
