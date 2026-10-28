@@ -1,5 +1,11 @@
 import { useCallback, useSyncExternalStore } from 'react';
-import { applyTheme, readStoredTheme, THEME_STORAGE_KEY, type ThemePreference } from './theme';
+import {
+  applyTheme,
+  readStoredTheme,
+  THEME_STORAGE_KEY,
+  updateThemeColor,
+  type ThemePreference,
+} from './theme';
 
 const listeners = new Set<() => void>();
 
@@ -30,9 +36,18 @@ function subscribe(onChange: () => void): () => void {
     onChange();
   };
   window.addEventListener('storage', onStorage);
+  // Keep the toolbar color in step when the OS theme changes while following
+  // the system. Only theme-color needs updating: the CSS media query already
+  // re-themes the page itself.
+  const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  const onMedia = () => {
+    if (readPreference() === 'system') updateThemeColor('system');
+  };
+  mediaQuery.addEventListener('change', onMedia);
   return () => {
     listeners.delete(onChange);
     window.removeEventListener('storage', onStorage);
+    mediaQuery.removeEventListener('change', onMedia);
   };
 }
 
