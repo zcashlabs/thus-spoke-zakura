@@ -22,7 +22,7 @@ mod schema;
 
 pub use accounts::{Account, DevelopmentAccountSecret, DevelopmentSecrets};
 pub(crate) use activity::ActivityRecovery;
-pub use activity::{Activity, ActivityIntent, PreparedTransaction, Recipient};
+pub use activity::{Activity, ActivityIntent, ActivityOutput, PreparedTransaction, Recipient};
 pub use address_faucet::AddressFaucet;
 
 pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;

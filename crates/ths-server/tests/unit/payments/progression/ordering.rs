@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::ActivityOutput;
 use crate::payments::execution::PaymentLifecycle;
 use crate::payments::submission::PreparedSubmission;
 
@@ -295,6 +296,55 @@ async fn only_earlier_matching_unresolved_funding_defers_insufficient_failure() 
                 | "prepared"
                 | "broadcast"
         ) {
+            "preparing"
+        } else {
+            "failed"
+        };
+        assert_eq!(
+            state.0.store.activity(&send.id).unwrap().status,
+            expected,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_earlier_batch_output_defers_insufficient_failure_like_a_single_send() {
+    let output = |to_account, to_address: Option<&str>, destination_pool: &str| ActivityOutput {
+        to_account,
+        to_address: to_address.map(str::to_owned),
+        destination_pool: destination_pool.to_owned(),
+        amount_zatoshi: 100_000,
+        memo: None,
+    };
+    for case in ["account", "address", "wrong-pool", "other-accounts"] {
+        let (state, _dir) = state_with_local_wallet();
+        let address = state.0.store.account(2).unwrap().unified_address;
+        let funding = match case {
+            "account" => output(Some(2), None, "ironwood"),
+            "address" => output(None, Some(&address), "ironwood"),
+            "wrong-pool" => output(Some(2), None, "transparent"),
+            _ => output(Some(5), None, "ironwood"),
+        };
+        state
+            .0
+            .store
+            .claim_batch_transfer(
+                1,
+                "ironwood",
+                &[funding, output(Some(4), None, "ironwood")],
+                "funder",
+            )
+            .unwrap();
+        let send = dependent_send(&state.0.store, "matching-send", "ironwood");
+        assert!(
+            execute_payment(&state, send.clone(), |_, _| std::future::ready(
+                insufficient()
+            ))
+            .await
+            .is_err()
+        );
+        let expected = if matches!(case, "account" | "address") {
             "preparing"
         } else {
             "failed"

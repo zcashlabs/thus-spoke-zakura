@@ -1275,3 +1275,221 @@ fn clearing_payment_errors_requires_the_exact_pending_state_and_transaction() {
         confirmed
     );
 }
+
+fn batch_output(
+    to_account: Option<u8>,
+    to_address: Option<&str>,
+    destination_pool: &str,
+    amount_zatoshi: u64,
+    memo: Option<&str>,
+) -> ActivityOutput {
+    ActivityOutput {
+        to_account,
+        to_address: to_address.map(str::to_owned),
+        destination_pool: destination_pool.to_owned(),
+        amount_zatoshi,
+        memo: memo.map(str::to_owned),
+    }
+}
+
+fn mixed_batch() -> Vec<ActivityOutput> {
+    vec![
+        batch_output(Some(2), None, "ironwood", 10_000, Some("payroll")),
+        batch_output(Some(3), None, "transparent", 20_000, None),
+        batch_output(None, Some("uregtest1external"), "ironwood", 30_000, None),
+    ]
+}
+
+#[test]
+fn batch_claim_records_every_output_with_the_total() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let outputs = mixed_batch();
+
+    let claim = store
+        .claim_batch_transfer(1, "ironwood", &outputs, "batch")
+        .unwrap();
+
+    assert_eq!(claim.kind, "send");
+    assert_eq!(claim.from_account, Some(1));
+    assert_eq!(
+        (claim.to_account, claim.to_address.as_deref()),
+        (None, None)
+    );
+    assert_eq!(claim.source_pool, "ironwood");
+    assert_eq!(claim.destination_pool, "mixed");
+    assert_eq!(claim.amount_zatoshi, 60_000);
+    assert_eq!(claim.status, "preparing");
+    assert_eq!(store.activity_outputs(&claim.id).unwrap(), outputs);
+
+    let shielded = vec![
+        batch_output(Some(2), None, "ironwood", 10_000, None),
+        batch_output(Some(3), None, "ironwood", 20_000, None),
+    ];
+    let claim = store
+        .claim_batch_transfer(1, "transparent", &shielded, "shielded-batch")
+        .unwrap();
+    assert_eq!(claim.destination_pool, "ironwood");
+    assert_eq!(store.activity_outputs(&claim.id).unwrap(), shielded);
+}
+
+#[test]
+fn single_recipient_sends_store_no_outputs() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let claim = store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            12_000,
+            "single",
+            None,
+        )
+        .unwrap();
+
+    assert!(store.activity_outputs(&claim.id).unwrap().is_empty());
+}
+
+#[test]
+fn batch_replay_returns_the_saved_payment_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.db");
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+    let outputs = mixed_batch();
+    let claim = store
+        .claim_batch_transfer(1, "ironwood", &outputs, "batch")
+        .unwrap();
+    store
+        .record_prepared(&claim.id, "batch-txid", b"batch bytes", 140)
+        .unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    reopened.initialize().unwrap();
+    let replay = reopened
+        .claim_batch_transfer(1, "ironwood", &outputs, "batch")
+        .unwrap();
+
+    assert_eq!(replay.id, claim.id);
+    assert_eq!(replay.txid, "batch-txid");
+    assert_eq!(replay.status, "prepared");
+    assert_eq!(reopened.activity_outputs(&claim.id).unwrap(), outputs);
+    assert_eq!(reopened.activities(10).unwrap().len(), 1);
+}
+
+#[test]
+fn batch_replay_conflicts_on_any_change_to_the_payment() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let outputs = mixed_batch();
+    store
+        .claim_batch_transfer(1, "ironwood", &outputs, "batch")
+        .unwrap();
+
+    let changed = |change: fn(&mut Vec<ActivityOutput>)| {
+        let mut outputs = mixed_batch();
+        change(&mut outputs);
+        outputs
+    };
+    let variants = [
+        changed(|outputs| outputs[0].amount_zatoshi += 1),
+        changed(|outputs| outputs[0].to_account = Some(4)),
+        changed(|outputs| outputs[2].to_address = Some("uregtest1other".into())),
+        changed(|outputs| outputs[1].destination_pool = "ironwood".into()),
+        changed(|outputs| outputs[0].memo = None),
+        changed(|outputs| outputs[0].memo = Some(String::new())),
+        changed(|outputs| {
+            outputs.pop();
+        }),
+        changed(|outputs| outputs.push(batch_output(Some(5), None, "ironwood", 1_000, None))),
+    ];
+    for variant in variants {
+        let error = store
+            .claim_batch_transfer(1, "ironwood", &variant, "batch")
+            .expect_err(&format!("{variant:?}"));
+        assert!(error.downcast_ref::<IdempotencyConflict>().is_some());
+    }
+    for (from, source_pool) in [(2, "ironwood"), (1, "transparent")] {
+        let error = store
+            .claim_batch_transfer(from, source_pool, &outputs, "batch")
+            .unwrap_err();
+        assert!(error.downcast_ref::<IdempotencyConflict>().is_some());
+    }
+    let error = store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            10_000,
+            "batch",
+            Some("payroll"),
+        )
+        .unwrap_err();
+    assert!(error.downcast_ref::<IdempotencyConflict>().is_some());
+
+    store
+        .claim_transfer(
+            1,
+            Recipient::Account(2),
+            "ironwood",
+            "ironwood",
+            60_000,
+            "single",
+            None,
+        )
+        .unwrap();
+    let error = store
+        .claim_batch_transfer(1, "ironwood", &outputs, "single")
+        .unwrap_err();
+    assert!(error.downcast_ref::<IdempotencyConflict>().is_some());
+}
+
+#[test]
+fn invalid_batches_claim_nothing() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let valid = mixed_batch();
+    let invalid: [(&str, Vec<ActivityOutput>); 5] = [
+        ("one output", valid[..1].to_vec()),
+        (
+            "unknown account",
+            vec![
+                valid[0].clone(),
+                batch_output(Some(9), None, "ironwood", 1, None),
+            ],
+        ),
+        (
+            "invalid pool",
+            vec![
+                valid[0].clone(),
+                batch_output(Some(3), None, "orchard", 1, None),
+            ],
+        ),
+        (
+            "zero amount",
+            vec![
+                valid[0].clone(),
+                batch_output(Some(3), None, "ironwood", 0, None),
+            ],
+        ),
+        (
+            "no recipient",
+            vec![
+                valid[0].clone(),
+                batch_output(None, None, "ironwood", 1, None),
+            ],
+        ),
+    ];
+    for (case, outputs) in invalid {
+        let key = format!("invalid-{}", case.replace(' ', "-"));
+        store
+            .claim_batch_transfer(1, "ironwood", &outputs, &key)
+            .expect_err(case);
+        assert_eq!(store.activity_for_key(&key).unwrap(), None, "{case}");
+    }
+    assert!(store.activities(10).unwrap().is_empty());
+}

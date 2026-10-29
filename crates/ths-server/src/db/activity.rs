@@ -1,6 +1,10 @@
 use super::address_faucet::address_for_key;
 use super::*;
 
+/// Stored as a batch send's `destination_pool` when its outputs span pools.
+/// Each output keeps its own pool in `activity_outputs`.
+pub(crate) const MIXED_POOLS: &str = "mixed";
+
 /// Qualified so it also reads unambiguously in joins. The order must match `row_activity`.
 const ACTIVITY_COLUMNS: &str = "a.id,a.kind,a.from_account,a.to_account,a.to_address,a.source_pool,a.destination_pool,a.amount_zatoshi,a.txid,a.block_hash,a.status,a.created_at,a.last_error";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -11,6 +15,7 @@ pub struct Activity {
     pub to_account: Option<u8>,
     pub to_address: Option<String>,
     pub source_pool: String,
+    #[serde(serialize_with = "serialize_destination_pool")]
     pub destination_pool: String,
     pub amount_zatoshi: u64,
     pub txid: String,
@@ -18,6 +23,32 @@ pub struct Activity {
     pub status: String,
     pub created_at: String,
     pub last_error: Option<String>,
+    /// Empty for a single-recipient payment, whose recipient is on the row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<ActivityOutput>,
+}
+
+/// A batch spanning pools has no single destination pool; its outputs name each.
+fn serialize_destination_pool<S: serde::Serializer>(
+    pool: &str,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    if pool == MIXED_POOLS {
+        serializer.serialize_none()
+    } else {
+        serializer.serialize_some(pool)
+    }
+}
+
+/// One payment of a multi-recipient send. Field order defines the canonical
+/// sort, so equal payment sets compare equal however a URI ordered them.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct ActivityOutput {
+    pub to_account: Option<u8>,
+    pub to_address: Option<String>,
+    pub destination_pool: String,
+    pub amount_zatoshi: u64,
+    pub memo: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +110,9 @@ impl Store {
             "SELECT {ACTIVITY_COLUMNS} FROM activity a ORDER BY a.rowid DESC LIMIT ?1"
         ))?;
         Ok(query
-            .query_map([limit.min(100)], row_activity)?
+            .query_map([limit.min(100)], |row| {
+                with_outputs(&db, row_activity(row)?)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -115,12 +148,64 @@ impl Store {
         let request = new_activity(
             "send",
             Some(from),
-            to,
+            Some(to),
             source_pool,
             destination_pool,
             amount,
         );
-        self.claim(request, key, memo)
+        self.claim(request, key, memo, &[])
+    }
+
+    /// Claims one send that pays every output in a single transaction. The
+    /// activity row carries the total; the outputs are stored with it so
+    /// preparation and replays after a restart use exactly these recipients.
+    pub fn claim_batch_transfer(
+        &self,
+        from: u8,
+        source_pool: &str,
+        outputs: &[ActivityOutput],
+        key: &str,
+    ) -> Result<Activity> {
+        validate_pool(source_pool)?;
+        if outputs.len() < 2 {
+            bail!("a batch send needs at least two outputs");
+        }
+        let mut amount = 0u64;
+        for output in outputs {
+            validate_pool(&output.destination_pool)?;
+            if output.amount_zatoshi == 0 {
+                bail!("amount must be greater than zero");
+            }
+            if output.to_account.is_some() == output.to_address.is_some() {
+                bail!("each output needs exactly one of an account or an address");
+            }
+            amount = amount
+                .checked_add(output.amount_zatoshi)
+                .context("batch amount overflows")?;
+        }
+        let first_pool = &outputs[0].destination_pool;
+        let destination_pool = if outputs
+            .iter()
+            .all(|output| &output.destination_pool == first_pool)
+        {
+            first_pool.as_str()
+        } else {
+            MIXED_POOLS
+        };
+        let request = new_activity(
+            "send",
+            Some(from),
+            None,
+            source_pool,
+            destination_pool,
+            amount,
+        );
+        self.claim(request, key, None, outputs)
+    }
+
+    pub fn activity_outputs(&self, id: &str) -> Result<Vec<ActivityOutput>> {
+        let db = self.0.lock().unwrap();
+        activity_outputs(&db, id).map_err(Into::into)
     }
 
     pub fn claim_faucet(&self, to: u8, pool: &str, amount: u64, key: &str) -> Result<Activity> {
@@ -128,17 +213,24 @@ impl Store {
         let request = new_activity(
             "faucet",
             None,
-            Recipient::Account(to),
+            Some(Recipient::Account(to)),
             "ironwood",
             pool,
             amount,
         );
-        self.claim(request, key, None)
+        self.claim(request, key, None, &[])
     }
 
     /// Returns the payment already claimed with `key`, or records `request` as a new
     /// `preparing` claim. Submission and recovery happen outside this function.
-    fn claim(&self, request: Activity, key: &str, memo: Option<&str>) -> Result<Activity> {
+    /// `outputs` is empty for a single-recipient payment.
+    fn claim(
+        &self,
+        mut request: Activity,
+        key: &str,
+        memo: Option<&str>,
+        outputs: &[ActivityOutput],
+    ) -> Result<Activity> {
         if request.amount_zatoshi == 0 {
             bail!("amount must be greater than zero");
         }
@@ -150,7 +242,10 @@ impl Store {
                     row.get(0)
                 })?;
             // An absent memo and an empty memo are different payments.
-            if !same_payment(&activity, &request) || saved_memo.as_deref() != memo {
+            if !same_payment(&activity, &request)
+                || saved_memo.as_deref() != memo
+                || activity.outputs != outputs
+            {
                 return Err(IdempotencyConflict.into());
             }
             return Ok(activity);
@@ -158,7 +253,13 @@ impl Store {
         if address_for_key(&db, key)?.is_some() {
             return Err(IdempotencyConflict.into());
         }
-        for id in request.from_account.into_iter().chain(request.to_account) {
+        let output_accounts = outputs.iter().filter_map(|output| output.to_account);
+        for id in request
+            .from_account
+            .into_iter()
+            .chain(request.to_account)
+            .chain(output_accounts)
+        {
             if !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1)",
                 [id],
@@ -169,7 +270,14 @@ impl Store {
         }
         let tx = db.transaction()?;
         insert_activity(&tx, &request, key, memo)?;
+        for (position, output) in outputs.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO activity_outputs(activity_id,position,to_account,to_address,destination_pool,amount_zatoshi,memo) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![request.id, position, output.to_account, output.to_address, output.destination_pool, output.amount_zatoshi, output.memo],
+            )?;
+        }
         tx.commit()?;
+        request.outputs = outputs.to_vec();
         Ok(request)
     }
 
@@ -183,6 +291,7 @@ impl Store {
         )? == 1
         {
             tx.execute("DELETE FROM idempotency WHERE activity_id=?1", [id])?;
+            tx.execute("DELETE FROM activity_outputs WHERE activity_id=?1", [id])?;
         }
         tx.commit()?;
         Ok(())
@@ -317,6 +426,14 @@ impl Store {
                                UNION ALL SELECT transparent_address FROM accounts WHERE id=target.from_account
                            )
                        ))
+                       OR EXISTS (
+                           SELECT 1 FROM activity_outputs o
+                           WHERE o.activity_id=earlier.id AND o.destination_pool=target.source_pool
+                             AND (o.to_account=target.from_account OR o.to_address IN (
+                                 SELECT unified_address FROM accounts WHERE id=target.from_account
+                                 UNION ALL SELECT transparent_address FROM accounts WHERE id=target.from_account
+                             ))
+                       )
                        OR (earlier.kind='send' AND earlier.from_account=target.from_account AND target.source_pool='ironwood')
                    )
              )",
@@ -335,12 +452,36 @@ fn insert_activity(db: &Connection, a: &Activity, key: &str, memo: Option<&str>)
     Ok(())
 }
 
+fn activity_outputs(db: &Connection, id: &str) -> rusqlite::Result<Vec<ActivityOutput>> {
+    let mut query = db.prepare_cached(
+        "SELECT to_account,to_address,destination_pool,amount_zatoshi,memo FROM activity_outputs WHERE activity_id=?1 ORDER BY position",
+    )?;
+    query
+        .query_map([id], |row| {
+            Ok(ActivityOutput {
+                to_account: row.get(0)?,
+                to_address: row.get(1)?,
+                destination_pool: row.get(2)?,
+                amount_zatoshi: row.get(3)?,
+                memo: row.get(4)?,
+            })
+        })?
+        .collect()
+}
+
+/// Rows carry no outputs; every read that returns an activity attaches them.
+fn with_outputs(db: &Connection, mut activity: Activity) -> rusqlite::Result<Activity> {
+    activity.outputs = activity_outputs(db, &activity.id)?;
+    Ok(activity)
+}
+
 fn activity_by_id(db: &Connection, id: &str) -> rusqlite::Result<Activity> {
-    db.query_row(
+    let activity = db.query_row(
         &format!("SELECT {ACTIVITY_COLUMNS} FROM activity a WHERE a.id=?1"),
         [id],
         row_activity,
-    )
+    )?;
+    with_outputs(db, activity)
 }
 
 pub(super) fn activity_for_key(db: &Connection, key: &str) -> Result<Option<Activity>> {
@@ -351,13 +492,16 @@ pub(super) fn activity_for_key(db: &Connection, key: &str) -> Result<Option<Acti
         [key],
         row_activity,
     )
-    .optional()
+    .optional()?
+    .map(|activity| with_outputs(db, activity))
+    .transpose()
     .map_err(Into::into)
 }
 fn new_activity(
     kind: &str,
     from: Option<u8>,
-    to: Recipient<'_>,
+    // `None` for a batch send, whose recipients live in `activity_outputs`.
+    to: Option<Recipient<'_>>,
     source: &str,
     destination: &str,
     amount: u64,
@@ -368,12 +512,12 @@ fn new_activity(
         kind: kind.into(),
         from_account: from,
         to_account: match to {
-            Recipient::Account(id) => Some(id),
-            Recipient::Address(_) => None,
+            Some(Recipient::Account(id)) => Some(id),
+            Some(Recipient::Address(_)) | None => None,
         },
         to_address: match to {
-            Recipient::Account(_) => None,
-            Recipient::Address(address) => Some(address.to_owned()),
+            Some(Recipient::Address(address)) => Some(address.to_owned()),
+            Some(Recipient::Account(_)) | None => None,
         },
         source_pool: source.into(),
         destination_pool: destination.into(),
@@ -383,6 +527,7 @@ fn new_activity(
         status: "preparing".into(),
         created_at: String::new(),
         last_error: None,
+        outputs: Vec::new(),
     }
 }
 fn validate_pool(pool: &str) -> Result<()> {
@@ -417,6 +562,7 @@ fn row_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Activity> {
         status: row.get(10)?,
         created_at: row.get(11)?,
         last_error: row.get(12)?,
+        outputs: Vec::new(),
     })
 }
 
@@ -458,7 +604,7 @@ impl Store {
         ))?;
         Ok(query
             .query_map([], |row| {
-                let activity = row_activity(row)?;
+                let activity = with_outputs(&db, row_activity(row)?)?;
                 let key: Option<String> = row.get(13)?;
                 let recovery = match key {
                     Some(key) => ActivityRecovery::Intent(ActivityIntent {

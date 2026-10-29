@@ -143,6 +143,141 @@ describe('ActivityList incoming transactions', () => {
   });
 });
 
+describe('ActivityList multi-recipient batches', () => {
+  it.each([
+    ['preparing', ''],
+    ['broadcast', 'ba'.repeat(32)],
+    ['confirmed', 'bb'.repeat(32)],
+  ] as const)('labels a %s batch to several addresses by its recipient count', (status, txid) => {
+    renderWithProviders(
+      <MemoryRouter>
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'batch-external',
+                kind: 'send',
+                direction: 'outgoing',
+                from_account: 1,
+                to_account: null,
+                from_accounts: [1],
+                to_accounts: [],
+                to_address: null,
+                recipient_addresses: ['uregtest1first', 'uregtest1second'],
+                external_addresses: ['uregtest1first', 'uregtest1second'],
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 200_000_000n,
+                txid,
+                block_hash: status === 'confirmed' ? 'cd'.repeat(32) : null,
+                mined_height: status === 'confirmed' ? 121 : null,
+                status,
+                last_error: null,
+                created_at: '2026-10-02 12:00:00',
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    const transfer = screen.getByText('Account 1 → 2 recipients');
+    const row = transfer.closest('tr');
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText(status)).toBeInTheDocument();
+    expect(screen.queryByText(/Account 1 → —/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['broadcast', 'bc'.repeat(32)],
+    ['confirmed', 'bd'.repeat(32)],
+  ] as const)(
+    'counts both recipients of a %s batch to an account and an address',
+    (status, txid) => {
+      renderWithProviders(
+        <MemoryRouter>
+          <ActivityList
+            activity={{
+              isPending: false,
+              isError: false,
+              error: null,
+              data: [
+                {
+                  id: 'batch-mixed',
+                  kind: 'send',
+                  direction: 'internal',
+                  from_account: 1,
+                  to_account: 2,
+                  from_accounts: [1],
+                  to_accounts: [2],
+                  to_address: null,
+                  recipient_addresses: ['uregtest1account2', 'uregtest1external'],
+                  external_addresses: ['uregtest1external'],
+                  source_pool: 'ironwood',
+                  destination_pool: 'ironwood',
+                  amount_zatoshi: 300_000_000n,
+                  txid,
+                  block_hash: status === 'confirmed' ? 'ce'.repeat(32) : null,
+                  mined_height: status === 'confirmed' ? 122 : null,
+                  status,
+                  last_error: null,
+                  created_at: '2026-10-02 12:00:00',
+                },
+              ],
+            }}
+          />
+        </MemoryRouter>,
+      );
+
+      expect(screen.getByText('Account 1 → 2 recipients')).toBeInTheDocument();
+      expect(screen.queryByText('Account 1 → Account 2')).not.toBeInTheDocument();
+    },
+  );
+
+  it('labels a confirmed single send by its account even though its address is listed', () => {
+    renderWithProviders(
+      <MemoryRouter>
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'single-to-account',
+                kind: 'send',
+                direction: 'internal',
+                from_account: 1,
+                to_account: 2,
+                from_accounts: [1],
+                to_accounts: [2],
+                to_address: null,
+                recipient_addresses: ['uregtest1account2'],
+                external_addresses: [],
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 100_000_000n,
+                txid: 'be'.repeat(32),
+                block_hash: 'cf'.repeat(32),
+                mined_height: 123,
+                status: 'confirmed',
+                last_error: null,
+                created_at: '2026-10-02 12:00:00',
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Account 1 → Account 2')).toBeInTheDocument();
+    expect(screen.queryByText(/recipients/)).not.toBeInTheDocument();
+  });
+});
+
 describe('ActivityList multi-pool transactions', () => {
   it('uses the known pool arrays when no singular pool is available', () => {
     const txid = 'bd'.repeat(32);

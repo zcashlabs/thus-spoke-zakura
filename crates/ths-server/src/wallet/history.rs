@@ -24,6 +24,7 @@ pub(crate) struct CanonicalActivity {
     pub(crate) from_accounts: Vec<u8>,
     pub(crate) to_accounts: Vec<u8>,
     pub(crate) recipient_addresses: Vec<String>,
+    pub(crate) external_addresses: Vec<String>,
     pub(crate) source_pools: Vec<String>,
     pub(crate) destination_pools: Vec<String>,
     pub(crate) amount_zatoshi: u64,
@@ -125,14 +126,28 @@ struct OutputSummary {
     from_accounts: Vec<u8>,
     to_accounts: Vec<u8>,
     recipient_addresses: Vec<String>,
+    external_addresses: Vec<String>,
     destination_pools: Vec<String>,
     amount_zatoshi: u64,
     memos: Vec<String>,
 }
 
-fn direction(from_accounts: &[u8], to_accounts: &[u8]) -> &'static str {
+/// A payment back to its own sender is `self` only when nothing else leaves
+/// the development accounts; a batch that also pays an external address is
+/// `outgoing`.
+pub(crate) fn direction(
+    from_accounts: &[u8],
+    to_accounts: &[u8],
+    pays_external: bool,
+) -> &'static str {
     match (from_accounts, to_accounts) {
-        ([from], [to]) if from == to => "self",
+        ([from], [to]) if from == to => {
+            if pays_external {
+                "outgoing"
+            } else {
+                "self"
+            }
+        }
         ([], []) => "unknown",
         ([], _) => "incoming",
         (_, []) => "outgoing",
@@ -159,13 +174,20 @@ fn summarize_outputs(outputs: &[Output]) -> Result<OutputSummary> {
             .checked_add(output.value)
             .context("wallet transaction output value overflowed")
     })?;
+    let external_addresses = unique(
+        relevant
+            .iter()
+            .filter(|output| output.to_account.is_none())
+            .filter_map(|output| output.address.clone()),
+    );
     Ok(OutputSummary {
-        direction: direction(&from_accounts, &to_accounts),
+        direction: direction(&from_accounts, &to_accounts, !external_addresses.is_empty()),
         from_account: only(&from_accounts),
         to_account: only(&to_accounts),
         from_accounts,
         to_accounts,
         recipient_addresses: unique(relevant.iter().filter_map(|output| output.address.clone())),
+        external_addresses,
         destination_pools: unique(relevant.iter().filter_map(|output| output.pool.clone())),
         amount_zatoshi,
         memos: unique(relevant.iter().filter_map(|output| output.memo.clone())),
@@ -299,6 +321,7 @@ fn read_canonical_activity(
             from_accounts: summary.from_accounts,
             to_accounts: summary.to_accounts,
             recipient_addresses: summary.recipient_addresses,
+            external_addresses: summary.external_addresses,
             source_pools,
             destination_pools: summary.destination_pools,
             amount_zatoshi: summary.amount_zatoshi,
@@ -654,7 +677,39 @@ mod tests {
 
         assert_eq!(summary.to_accounts, [2]);
         assert_eq!(summary.recipient_addresses, ["uregtest1account2"]);
+        assert!(summary.external_addresses.is_empty());
         assert_eq!(summary.amount_zatoshi, 100_000_000);
+    }
+
+    #[test]
+    fn external_addresses_exclude_development_accounts() {
+        let summary = summarize_outputs(&[
+            output(Some(2), "uregtest1account2", 100_000_000),
+            output(None, "uregtest1external", 200_000_000),
+        ])
+        .unwrap();
+
+        assert_eq!(summary.to_accounts, [2]);
+        assert_eq!(
+            summary.recipient_addresses,
+            ["uregtest1account2", "uregtest1external"]
+        );
+        assert_eq!(summary.external_addresses, ["uregtest1external"]);
+    }
+
+    #[test]
+    fn paying_the_sender_and_an_external_address_is_outgoing() {
+        let mut own = output(Some(1), "tmaccount1", 100_000_000);
+        own.from_account = Some(1);
+        let mut external = output(None, "uregtest1external", 200_000_000);
+        external.from_account = Some(1);
+
+        let summary = summarize_outputs(&[own.clone(), external]).unwrap();
+        assert_eq!(summary.direction, "outgoing");
+        assert_eq!(summary.to_accounts, [1]);
+        assert_eq!(summary.external_addresses, ["uregtest1external"]);
+
+        assert_eq!(summarize_outputs(&[own]).unwrap().direction, "self");
     }
 
     #[test]

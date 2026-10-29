@@ -25,7 +25,8 @@ The terms are deliberately narrow:
    and destination pools, amount, memo rules, and an `idempotency_key` of
    **8–128 visible ASCII characters**. Same-account sends are allowed when
    the pools differ. A recipient can also be a Regtest address matching the
-   destination pool.
+   destination pool. Instead of a recipient, amount, pool, and memo, a send can
+   name a ZIP-321 `uri`; see [multi-recipient sends](#multi-recipient-sends).
 2. `POST /api/v1/faucet` validates its user account, pool,
    amount greater than zero and at most 5 ZEC, and key. Validation happens
    before the recorded-key lookup.
@@ -66,6 +67,41 @@ Automatic Sends mine at most one prerequisite block and retry once. In manual
 or mempool mode, use `ths mine 1`; interval mode supplies the next block on its
 schedule. While waiting, the operation stays `preparing` with its original key.
 New ordinary NU7 payments expire 120 blocks after their candidate inclusion height.
+
+## Multi-recipient sends
+
+A `POST /api/v1/send` body with `uri` replaces `to_account`, `to_address`,
+`destination_pool`, `amount_zatoshi`, and `memo`, which must then be omitted:
+
+```json
+{"from_account": 1, "source_pool": "ironwood", "idempotency_key": "payroll-2026-10",
+ "uri": "zcash:?address=uregtest1...&amount=0.1&address.1=tm...&amount.1=0.2"}
+```
+
+- The server validates **every** payment before recording anything: a Regtest
+  address, a positive amount the URI sets explicitly, at least 54 zatoshi for a
+  transparent output, a text memo only for Ironwood, and no return to the source
+  account in the source pool. One invalid payment rejects the whole request
+  with HTTP 400, so there is no partial payout. A URI with no payments, such
+  as `zcash:` or `zcash:?`, is rejected with HTTP 400 too.
+- A URI with one payment is recorded as an ordinary send, so it replays like
+  the same send made with explicit fields.
+- With two or more payments, the claim stores the complete output list with
+  the activity in one database transaction. Preparation reloads that list, so
+  a retry or a restart at any stage builds one transaction paying exactly the
+  claimed recipients.
+- The activity has one id, txid, and status. `amount_zatoshi` is the total, the
+  recipient fields are null, and `outputs` lists each payment.
+  `destination_pool` is null when the outputs use more than one pool.
+- A replay compares the parsed payments, not the URI text: reordering or
+  renumbering the URI's payments resumes the same payment, while any change to
+  a recipient, amount, pool, memo, source account, or source pool returns
+  **HTTP 409**.
+- A later send that is short of funds keeps waiting while an earlier unresolved
+  batch pays into its account and pool, as it does for a single-recipient
+  payment.
+
+The dashboard's **Payment request** field still accepts single-payment URIs only.
 
 ## HTTP admission and status
 
@@ -145,9 +181,18 @@ these journal records with transactions observed by the wallet and adds chain
 metadata, memos, recipient and pool lists, and `from_accounts` and
 `to_accounts`. The arrays preserve every affected development account;
 `from_account` and `to_account` are only populated when their corresponding
-array contains exactly one account. A transaction appears once even when it
-affects multiple development accounts. Outputs to the hidden treasury account
-are excluded from the user-facing amount, recipients, and account lists.
+array contains exactly one account. `recipient_addresses` lists every address
+the wallet saw paid, including a development account's own address once the
+transaction is confirmed. `external_addresses` lists only addresses outside the
+development accounts, and is the same pending or confirmed. `to_address` is set
+only when the entry pays no development account and exactly one external
+address. A batch to several addresses, or to both accounts and addresses, keeps
+it `null`; the dashboard shows such a row as "N recipients". `direction` is
+`self` only when an account pays nothing but itself: a batch that pays the
+sender's other pool and an external address is `outgoing`. A
+transaction appears once even when it affects multiple development accounts.
+Outputs to the hidden treasury account are excluded from the user-facing
+amount, recipients, and account lists.
 
 `amount_zatoshi` remains the value paid to the relevant user or external
 recipient. Canonical wallet entries additionally expose the aggregate effects

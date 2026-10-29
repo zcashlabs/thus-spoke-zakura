@@ -258,7 +258,7 @@ These are every route the server serves today, from
 | `GET /api/v1/activity` | Unified development-wallet history. Each transaction appears once; account arrays retain every affected user account and treasury outputs are hidden. See [Chapter 6](architecture/operations.md#call-the-api-with-a-deliberate-key). |
 | `GET /api/v1/activity?idempotency_key=<key>` | Read one payment's stored activity as a one-item array, or `[]`; the read does not resume it. |
 | `POST /api/v1/send/quote` | Dry run: `available_zatoshi`, `fee_zatoshi`, `max_zatoshi` for one account and pool pair. Builds and broadcasts nothing. Check an intended amount against `max_zatoshi` before calling `send`. Returns 503 while the environment is still starting, like `send` and `faucet`. |
-| `POST /api/v1/send` | Payment to a user account or supported Regtest address. Needs an idempotency key. |
+| `POST /api/v1/send` | Payment to a user account or supported Regtest address, or every payment of a ZIP-321 `uri` in one transaction. Needs an idempotency key. |
 | `POST /api/v1/faucet` | Treasury payment to an account. Needs an idempotency key. |
 | `POST /api/v1/faucet/address` | Treasury payment to a supported Regtest address. Needs an idempotency key; external recipients have a separate stored faucet record. |
 | `GET /api/v1/faucet/address?idempotency_key=<key>` | Read an internal or external address-faucet result, or 404 if none is stored. |

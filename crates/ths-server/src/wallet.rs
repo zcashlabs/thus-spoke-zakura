@@ -82,10 +82,10 @@ mod transparent_history;
 
 pub(crate) use transparent_history::{HistoryQuery, HistoryTransaction};
 
-pub(crate) use history::CanonicalActivity;
+pub(crate) use history::{CanonicalActivity, direction as payment_direction};
 pub use journal::PreparedPayment;
 use journal::{PreparedPaymentsMigration, prepared_payment};
-pub use payments::{PaymentError, SendQuote};
+pub use payments::{PaymentError, SendPayment, SendQuote};
 #[cfg(test)]
 pub(crate) use submission::check_broadcast_response;
 
