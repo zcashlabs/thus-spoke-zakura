@@ -154,15 +154,13 @@ impl Runtime {
         if json {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        if let Ok(version) = docker {
-            if !json {
-                print_progress(
-                    diagnostics_to_stderr,
-                    format_args!("✓ Docker {version}\n✓ Config: {}", self.root.display()),
-                );
-            }
-        } else {
-            bail!("Docker is not reachable; start Docker Desktop or the Docker daemon");
+        let version =
+            docker.context("Docker is not reachable; start Docker Desktop or the Docker daemon")?;
+        if !json {
+            print_progress(
+                diagnostics_to_stderr,
+                format_args!("✓ Docker {version}\n✓ Config: {}", self.root.display()),
+            );
         }
         Ok(())
     }
