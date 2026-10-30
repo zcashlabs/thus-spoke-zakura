@@ -61,8 +61,20 @@ pub(super) fn logs_args(container: &str, follow: bool, tail: Option<u64>) -> Vec
 /// docker has no head option, so stream both of its output streams through
 /// one pipe and stop the `docker logs` process once enough lines have been printed.
 pub(super) fn print_log_head(container: &str, lines: u64) -> Result<()> {
+    // Docker's own errors would arrive through the same pipe and print as log
+    // lines, so a missing container or unreachable daemon is reported first.
+    if !docker_listed([
+        "container",
+        "ls",
+        "--all",
+        "--quiet",
+        "--filter",
+        &format!("name=^{container}$"),
+    ])? {
+        bail!("container {container} does not exist");
+    }
     let (reader, writer) = std::io::pipe().context("creating log pipe")?;
-    let mut child = Command::new("docker")
+    let mut child = docker_cli()
         .args(["logs", container])
         .stdout(writer.try_clone()?)
         .stderr(writer)

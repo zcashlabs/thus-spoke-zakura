@@ -68,7 +68,7 @@ fn docker_failure_message_survives_non_utf8_stderr() {
 /// Writes a stub that stands in for `docker`, then runs `test` against it so a
 /// real invocation can be driven without a daemon or a process-wide PATH change.
 #[cfg(unix)]
-fn with_stub_docker<T>(body: &str, test: impl FnOnce() -> T) -> T {
+pub(super) fn with_stub_docker<T>(body: &str, test: impl FnOnce() -> T) -> T {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();

@@ -245,7 +245,8 @@ all available Docker logs. Counts must be positive. `--head` conflicts with
 `--tail` and `--follow`; `--tail` can be combined with `--follow`. Output remains
 log text even with the global `--json` flag. App lines are plain text, without
 terminal color codes. If the reader closes the pipe, the command stops without an
-error.
+error. If the service's container does not exist or Docker is unreachable, the
+command fails before printing any log text.
 
 ```console
 ths logs                       # available logs from the app service
