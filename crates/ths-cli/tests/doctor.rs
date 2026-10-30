@@ -27,25 +27,30 @@ fn doctor(dir: &TempDir, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-fn assert_failed_json(output: &std::process::Output) {
+fn assert_failed_json(output: &std::process::Output, cause: &str) {
     assert_eq!(output.status.code(), Some(1));
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["ok"], false);
     assert!(result["docker"].is_null());
     assert!(result["config_dir"].as_str().is_some());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Docker is not reachable"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Docker is not reachable"), "{stderr}");
+    assert!(stderr.contains(cause), "{stderr}");
 }
 
 #[test]
 fn doctor_json_reports_unreachable_docker_with_a_failing_exit_status() {
     let dir = docker_fixture(false);
-    assert_failed_json(&doctor(&dir, &["--json", "doctor"]));
+    assert_failed_json(
+        &doctor(&dir, &["--json", "doctor"]),
+        "Docker daemon unavailable",
+    );
 }
 
 #[test]
 fn doctor_json_reports_missing_docker_with_a_failing_exit_status() {
     let dir = tempfile::tempdir().unwrap();
-    assert_failed_json(&doctor(&dir, &["doctor", "--json"]));
+    assert_failed_json(&doctor(&dir, &["doctor", "--json"]), "running Docker");
 }
 
 #[test]
@@ -74,5 +79,7 @@ fn doctor_human_output_preserves_reachable_and_unreachable_exit_status() {
     let output = doctor(&unavailable, &["doctor"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Docker is not reachable"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Docker is not reachable"), "{stderr}");
+    assert!(stderr.contains("Docker daemon unavailable"), "{stderr}");
 }
