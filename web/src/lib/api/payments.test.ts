@@ -43,6 +43,7 @@ describe('exact payment status API', () => {
         new Response(
           JSON.stringify({
             address: 'tmAg2wTARgKBHA9mFouqR727cU98MJmfjSq',
+            destination_pool: 'transparent',
             amount_zatoshi: 100_000_000,
             txid: '',
             block_hash: null,
@@ -59,9 +60,32 @@ describe('exact payment status API', () => {
     expect(await api.faucetAddressStatus('address/key')).toMatchObject({
       status: 'broadcast',
       to_account: null,
+      destination_pool: 'transparent',
       amount_zatoshi: 100_000_000n,
     });
     expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/faucet/address?idempotency_key=address%2Fkey');
     expect(await api.faucetAddressStatus('address/key')).toBeNull();
+  });
+
+  it('reports the server-resolved pool, not a guess from the address prefix', async () => {
+    // A unified address with only a transparent receiver starts with `u`, not
+    // `t`, but the server resolves it to the transparent pool. Regression for
+    // https://github.com/zcashlabs/thus-spoke-zakura/issues/438.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          address: 'uregtest1transparentonly',
+          destination_pool: 'transparent',
+          amount_zatoshi: 100_000_000,
+          txid: '',
+          block_hash: null,
+          status: 'preparing',
+          last_error: null,
+        }),
+      ),
+    );
+    expect(await api.faucetAddressStatus('address/key')).toMatchObject({
+      destination_pool: 'transparent',
+    });
   });
 });

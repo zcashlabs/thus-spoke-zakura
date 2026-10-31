@@ -114,7 +114,7 @@ async fn stored_status_survives_repeated_rpc_response_disconnects() {
         )
         .unwrap();
     let faucet = store
-        .claim_address_faucet("tm-external", 7, "disconnect-faucet")
+        .claim_address_faucet("uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z", 7, "disconnect-faucet")
         .unwrap();
     store
         .record_address_error(&faucet.id, "preparing", "", "awaiting node")
@@ -401,7 +401,7 @@ async fn stored_payments_are_served_after_restart_while_dependencies_are_unavail
         .unwrap();
     store.fail(&failed.id, "insufficient funds").unwrap();
     let external = store
-        .claim_address_faucet("tm-external", 7, "restart-external")
+        .claim_address_faucet("uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z", 7, "restart-external")
         .unwrap();
     store
         .record_address_error(&external.id, "preparing", "", "node unavailable")

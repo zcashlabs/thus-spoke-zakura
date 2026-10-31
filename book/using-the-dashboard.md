@@ -74,8 +74,8 @@ compares these callers.
 ## Fund an external Regtest address
 
 On Wallet, open **Faucet** and set **Destination** to **External address**.
-Enter a transparent Regtest address or a unified Regtest address with an
-Ironwood receiver, choose an amount of at most 5 ZEC, and select **Add funds**.
+Enter a transparent or unified Regtest address, choose an amount of at most
+5 ZEC, and select **Add funds**.
 The dashboard checks the address with the server before submitting the
 payment. If the response is lost, open **Payments** to resume the saved
 request with the same idempotency key. Do not start a second request for the

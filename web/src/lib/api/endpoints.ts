@@ -8,6 +8,7 @@ import {
   addressSchema,
   blockPageSchema,
   blockSchema,
+  faucetAddressParsedSchema,
   mempoolSchema,
   miningJobSchema,
   miningJobResponseSchema,
@@ -32,7 +33,7 @@ function addressFaucetActivity(payment: AddressFaucet, key: string): Activity {
     to_account: null,
     to_address: payment.address,
     source_pool: 'ironwood',
-    destination_pool: payment.address.startsWith('t') ? 'transparent' : 'ironwood',
+    destination_pool: payment.destination_pool,
     amount_zatoshi: payment.amount_zatoshi,
     txid: payment.txid,
     block_hash: payment.block_hash,
@@ -122,6 +123,10 @@ export const api = {
       ...input,
       amount_zatoshi: Number(input.amount_zatoshi),
     }),
+
+  /** Validates an address for the faucet's own (looser) rule, not Send's. */
+  parseFaucetAddress: (address: string) =>
+    post('/faucet/address/parse', faucetAddressParsedSchema, { address }),
 
   faucetAddress: async (input: {
     address: string;

@@ -110,6 +110,7 @@ export type WalletTransaction = z.infer<typeof walletTransactionSchema>;
 
 export const addressFaucetSchema = z.object({
   address: z.string(),
+  destination_pool: poolSchema,
   amount_zatoshi: zatoshi,
   txid: z.string(),
   block_hash: z.string().nullable(),
@@ -127,6 +128,12 @@ export const paymentUriSchema = z.object({
   memo: z.string().nullable(),
 });
 export type PaymentUri = z.infer<typeof paymentUriSchema>;
+
+/** A Regtest address as resolved by the address faucet's own (looser) rule. */
+export const faucetAddressParsedSchema = z.object({
+  to_account: z.number().int().nullable(),
+});
+export type FaucetAddressParsed = z.infer<typeof faucetAddressParsedSchema>;
 
 export const chainInfoSchema = z.object({
   chain: z.string(),
