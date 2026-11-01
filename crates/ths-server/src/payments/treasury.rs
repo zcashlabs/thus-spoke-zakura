@@ -88,10 +88,14 @@ pub(crate) trait FaucetRuntime: Sync {
         self.mine_and_sync(1).await
     }
     async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<()>;
+    async fn mine_empty_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
+        self.mine_and_sync(blocks).await
+    }
     async fn mine_to_height(&self, height: u64) -> anyhow::Result<()> {
         let current = self.chain_height().await?;
         if height > current {
-            self.mine_and_sync(u32::try_from(height - current)?).await?;
+            self.mine_empty_and_sync(u32::try_from(height - current)?)
+                .await?;
         }
         anyhow::ensure!(
             self.chain_height().await? >= height,
@@ -226,6 +230,16 @@ impl FaucetRuntime for AppState {
     }
     async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
         FaucetRuntime::mine_and_sync(
+            &PaymentAttempt {
+                state: self,
+                dispatch_deadline: None,
+            },
+            blocks,
+        )
+        .await
+    }
+    async fn mine_empty_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
+        FaucetRuntime::mine_empty_and_sync(
             &PaymentAttempt {
                 state: self,
                 dispatch_deadline: None,
@@ -382,6 +396,11 @@ impl FaucetRuntime for PaymentAttempt<'_> {
 
     async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
         PaymentAttempt::mine_and_sync(self, blocks).await?;
+        Ok(())
+    }
+
+    async fn mine_empty_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
+        PaymentAttempt::mine_empty_and_sync(self, blocks).await?;
         Ok(())
     }
 }
@@ -625,8 +644,13 @@ where
                     if advanced_anchor {
                         return Err(error);
                     }
-                    if runtime.chain_height().await? < *height {
-                        runtime.mine_and_sync(1).await?;
+                    let current = runtime.chain_height().await?;
+                    if current < *height {
+                        // Same path as maturity mining: mempool mode never
+                        // mines this block on its own with an empty mempool.
+                        runtime
+                            .mine_empty_and_sync(u32::try_from(*height - current)?)
+                            .await?;
                     }
                     if runtime.chain_height().await? < *height {
                         return Err(error);
