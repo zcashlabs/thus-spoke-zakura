@@ -52,13 +52,13 @@ pub(crate) enum Command {
     /// Wait until an existing environment is settled.
     Wait {
         /// Maximum time for settlement, in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
         /// Maximum time for startup and settlement, in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
         /// Command and arguments to execute.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
