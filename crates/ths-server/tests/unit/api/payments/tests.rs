@@ -77,7 +77,7 @@ fn address_faucet_response_preserves_pending_and_confirmed_status() {
     let (state, _dir) = state_with_local_wallet();
     let address = state.0.store.account(2).unwrap().transparent_address;
     let row = address_faucet_activity(&state.0.store);
-    let pending = faucet_address_response(address.clone(), row.clone()).unwrap();
+    let pending = faucet_address_response(address.clone(), "transparent", row.clone()).unwrap();
     assert_eq!(pending.status, "broadcast");
     assert_eq!(pending.block_hash, None);
     let row = state
@@ -85,17 +85,18 @@ fn address_faucet_response_preserves_pending_and_confirmed_status() {
         .store
         .confirm(&row.id, &row.txid, "inclusion-hash")
         .unwrap();
-    let value =
-        serde_json::to_value(faucet_address_response(address.clone(), row.clone()).unwrap())
-            .unwrap();
+    let value = serde_json::to_value(
+        faucet_address_response(address.clone(), "transparent", row.clone()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         value,
-        json!({"address": address, "amount_zatoshi": 100_000_000, "txid": "faucet-txid", "block_hash": "inclusion-hash", "status": "confirmed", "last_error": null})
+        json!({"address": address, "destination_pool": "transparent", "amount_zatoshi": 100_000_000, "txid": "faucet-txid", "block_hash": "inclusion-hash", "status": "confirmed", "last_error": null})
     );
     for block_hash in [None, Some(String::new())] {
         let mut invalid = row.clone();
         invalid.block_hash = block_hash;
-        assert!(faucet_address_response(address.clone(), invalid).is_err());
+        assert!(faucet_address_response(address.clone(), "transparent", invalid).is_err());
     }
 }
 
@@ -147,6 +148,9 @@ impl AddressFaucetRuntime for RecordingAddressFaucetRuntime {
             .push((req.address.clone(), req.amount_zatoshi));
         anyhow::ensure!(!self.fail_external, "external funding failed");
         Ok(FaucetAddressResponse {
+            destination_pool: Address::decode(&regtest_network(), &req.address)
+                .and_then(|address| faucet_destination_pool(&address))
+                .unwrap_or("ironwood"),
             address: req.address,
             amount_zatoshi: req.amount_zatoshi,
             txid: "external-txid".into(),
@@ -400,6 +404,97 @@ async fn address_faucet_rejects_dust_for_unified_transparent_fallbacks() {
             assert!(state.0.store.activities(100).unwrap().is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn address_faucet_reports_the_pool_for_a_transparent_only_unified_address() {
+    // Regtest UA with unknown typecode 4 ([1; 32]) and a P2PKH receiver ([2; 20]);
+    // the same fixture `address_faucet_rejects_dust_for_unified_transparent_fallbacks`
+    // confirms decodes with only a transparent receiver.
+    let address = "uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z";
+    let (state, _dir) = offline_state();
+    let body = json!({"address": address, "amount_zatoshi": 100_000,
+        "idempotency_key": "transparent-fallback-pool"});
+    let (status, response) = api_request(&state, "POST", "/api/v1/faucet/address", body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+    assert_eq!(response["destination_pool"], "transparent");
+    let (status, response) = api_get(
+        &state,
+        "/api/v1/faucet/address?idempotency_key=transparent-fallback-pool",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["destination_pool"], "transparent");
+}
+
+#[tokio::test]
+async fn parse_faucet_address_accepts_what_the_send_rule_rejects() {
+    let (state, _dir) = state_with_local_wallet();
+    // require_send_address rejects a unified address without an Orchard
+    // receiver; the faucet's own rule accepts it (confirmed above).
+    let transparent_only_unified = "uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z";
+    assert!(require_send_address(transparent_only_unified).is_err());
+    let (status, response) = api_request(
+        &state,
+        "POST",
+        "/api/v1/faucet/address/parse",
+        json!({"address": transparent_only_unified}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["to_account"], Value::Null);
+
+    // A development account's own address is reported, so the dialog can
+    // route it through the account Faucet instead.
+    let account = state.0.store.account(2).unwrap();
+    for address in [account.transparent_address, account.unified_address] {
+        let (status, response) = api_request(
+            &state,
+            "POST",
+            "/api/v1/faucet/address/parse",
+            json!({"address": address}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["to_account"], 2);
+    }
+
+    let (status, response) = api_request(
+        &state,
+        "POST",
+        "/api/v1/faucet/address/parse",
+        json!({"address": "not-an-address"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+}
+
+#[tokio::test]
+async fn faucet_rejects_a_unified_address_with_sapling_but_no_orchard_receiver() {
+    // A Sapling-only unified address has no pool value this system can
+    // report: the wallet would select Sapling, but the pool vocabulary is
+    // transparent/ironwood only. Reject the shape rather than mislabel it.
+    let (state, _dir) = offline_state();
+    let address = sapling_only_unified_address(&regtest_network());
+
+    let (status, response) = api_request(
+        &state,
+        "POST",
+        "/api/v1/faucet/address/parse",
+        json!({"address": address}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+
+    let (status, response) = api_request(
+        &state,
+        "POST",
+        "/api/v1/faucet/address",
+        json!({"address": address, "amount_zatoshi": 100_000,
+            "idempotency_key": "sapling-only-pool"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
 }
 
 /// A state with a real store and offline wallet whose node RPC refuses
@@ -930,7 +1025,7 @@ async fn address_faucet_status_reads_internal_and_external_records() {
     let (state, _dir) = state_with_local_wallet();
     let store = &state.0.store;
     let external = store
-        .claim_address_faucet("tm-external", 50, "status-external")
+        .claim_address_faucet("uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z", 50, "status-external")
         .unwrap();
     store
         .record_address_error(&external.id, "preparing", "", "treasury is syncing")
@@ -983,19 +1078,19 @@ async fn address_faucet_status_reads_internal_and_external_records() {
     for (key, expected) in [
         (
             "status-external",
-            json!({"address": "tm-external", "amount_zatoshi": 50, "txid": "", "block_hash": null, "status": "preparing", "last_error": "treasury is syncing"}),
+            json!({"address": "uregtest1zclnxv0zjpp8sljklmdlnfg8v0tlskqzvd53y7ywm4clm3zrdj5nasgynnwtyenxgvn9eunzz06qp27gxczny2jjswtjdq2vy6hfh5s4efzlxd0mmedqm5xj0z", "destination_pool": "transparent", "amount_zatoshi": 50, "txid": "", "block_hash": null, "status": "preparing", "last_error": "treasury is syncing"}),
         ),
         (
             "status-transparent",
-            json!({"address": transparent_address, "amount_zatoshi": 60, "txid": "transparent-txid", "block_hash": null, "status": "broadcast", "last_error": null}),
+            json!({"address": transparent_address, "destination_pool": "transparent", "amount_zatoshi": 60, "txid": "transparent-txid", "block_hash": null, "status": "broadcast", "last_error": null}),
         ),
         (
             "status-ironwood",
-            json!({"address": unified_address, "amount_zatoshi": 70, "txid": "ironwood-txid", "block_hash": "ironwood-block", "status": "confirmed", "last_error": null}),
+            json!({"address": unified_address, "destination_pool": "ironwood", "amount_zatoshi": 70, "txid": "ironwood-txid", "block_hash": "ironwood-block", "status": "confirmed", "last_error": null}),
         ),
         (
             "status-confirmed-external",
-            json!({"address": external_address, "amount_zatoshi": 80, "txid": "external-txid", "block_hash": "external-block", "status": "confirmed", "last_error": null}),
+            json!({"address": external_address, "destination_pool": "transparent", "amount_zatoshi": 80, "txid": "external-txid", "block_hash": "external-block", "status": "confirmed", "last_error": null}),
         ),
     ] {
         assert_eq!(
@@ -1059,6 +1154,23 @@ fn foreign_unified_address<P: zcash_protocol::consensus::Parameters>(params: &P)
     let (address, _) = usk
         .to_unified_full_viewing_key()
         .default_address(UnifiedAddressRequest::AllAvailableKeys)
+        .unwrap();
+    address.encode(params)
+}
+
+/// A unified address with a Sapling receiver and no Orchard receiver.
+fn sapling_only_unified_address<P: zcash_protocol::consensus::Parameters>(params: &P) -> String {
+    use zcash_keys::keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedSpendingKey};
+    let usk = UnifiedSpendingKey::from_seed(params, &[9u8; 32], zip32::AccountId::ZERO).unwrap();
+    let request = UnifiedAddressRequest::custom(
+        ReceiverRequirement::Omit,
+        ReceiverRequirement::Require,
+        ReceiverRequirement::Omit,
+    )
+    .unwrap();
+    let (address, _) = usk
+        .to_unified_full_viewing_key()
+        .default_address(request)
         .unwrap();
     address.encode(params)
 }
@@ -1490,14 +1602,16 @@ async fn payment_replays_use_stored_status_and_exact_encoded_location() {
             let expected = if endpoint == "send" || endpoint == "faucet" {
                 serde_json::to_value(store.activity_for_key(KEY).unwrap().unwrap()).unwrap()
             } else if external {
-                serde_json::to_value(external_faucet_response(
-                    store.address_faucet_for_key(KEY).unwrap().unwrap(),
-                ))
+                serde_json::to_value(
+                    external_faucet_response(store.address_faucet_for_key(KEY).unwrap().unwrap())
+                        .unwrap(),
+                )
                 .unwrap()
             } else {
                 serde_json::to_value(
                     faucet_address_response(
                         address.clone(),
+                        "ironwood",
                         store.activity_for_key(KEY).unwrap().unwrap(),
                     )
                     .unwrap(),

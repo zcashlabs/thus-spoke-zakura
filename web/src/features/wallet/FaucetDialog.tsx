@@ -117,11 +117,7 @@ export function FaucetDialog({
       checkingAddress.current = true;
       setValidatingAddress(true);
       try {
-        const parsed = await api.parsePaymentUri(`zcash:${variables.address}`);
-        if (parsed.address !== variables.address) {
-          form.setError('to_address', { message: 'Enter a valid Regtest address.' });
-          return;
-        }
+        const parsed = await api.parseFaucetAddress(variables.address);
         if (parsed.to_account !== null) {
           form.setError('to_address', {
             message: `This is Account ${parsed.to_account}'s address. Choose Account ${parsed.to_account} as the destination.`,
@@ -228,7 +224,7 @@ export function FaucetDialog({
         {destination === ADDRESS_DESTINATION ? (
           <Field
             label="Destination address"
-            hint="A transparent Regtest address or a unified address with an Ironwood receiver."
+            hint="A transparent or unified Regtest address."
             error={form.formState.errors.to_address?.message}
           >
             {(aria) => (
