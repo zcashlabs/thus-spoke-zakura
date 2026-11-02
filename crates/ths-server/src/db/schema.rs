@@ -3,6 +3,46 @@ use super::*;
 
 impl Store {
     pub fn initialize(&self) -> Result<()> {
+        self.create_or_migrate().map(|_| ())
+    }
+
+    /// Initializes the store for `init`. A new instance records
+    /// `nu7_activation_height`; an existing instance must already use it, because
+    /// its chain and wallet were built under the schedule it was created with.
+    pub fn initialize_instance(&self, nu7_activation_height: u32) -> Result<()> {
+        let created = self.create_or_migrate()?;
+        let db = self.0.lock().unwrap();
+        let stored = stored_nu7_activation_height(&db)?;
+        // Stores created before the height was configurable activated NU7 at height 1.
+        let existing = stored.or((!created).then_some(DEFAULT_NU7_ACTIVATION_HEIGHT));
+        if let Some(existing) = existing {
+            if existing != nu7_activation_height {
+                bail!(
+                    "this instance was created with NU7 activation height {existing} and cannot \
+                     change to {nu7_activation_height}; start a new instance to use another height"
+                );
+            }
+            if stored.is_some() {
+                return Ok(());
+            }
+        }
+        db.execute(
+            "INSERT INTO metadata(key, value) VALUES('nu7_activation_height', ?1)",
+            [nu7_activation_height.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The NU7 activation height this instance was created with. Stores created
+    /// before the height was configurable record none and activated NU7 at 1.
+    pub fn nu7_activation_height(&self) -> Result<u32> {
+        let db = self.0.lock().unwrap();
+        Ok(stored_nu7_activation_height(&db)?.unwrap_or(DEFAULT_NU7_ACTIVATION_HEIGHT))
+    }
+
+    /// Creates or upgrades every table and returns whether this call created the
+    /// wallet seed, which is the moment a new instance comes into existence.
+    fn create_or_migrate(&self) -> Result<bool> {
         let db = self.0.lock().unwrap();
         db.execute_batch(
             r#"
@@ -36,6 +76,7 @@ impl Store {
                 r.get::<_, String>(0)
             })
             .optional()?;
+        let created = stored_seed.is_none();
         let seed = if let Some(seed) = stored_seed {
             hex::decode(seed).context("invalid wallet seed")?
         } else {
@@ -57,7 +98,7 @@ impl Store {
             let (ua, taddr) = derived_addresses(&seed, id)?;
             db.execute("INSERT OR IGNORE INTO accounts(id,name,unified_address,transparent_address) VALUES(?1,?2,?3,?4)", params![id, format!("Account {id}"), ua, taddr])?;
         }
-        Ok(())
+        Ok(created)
     }
 
     pub fn seed(&self) -> Result<String> {
@@ -77,6 +118,21 @@ impl Store {
             })
             .context("wallet mnemonic is missing; restart this disposable environment")
     }
+}
+
+fn stored_nu7_activation_height(db: &Connection) -> Result<Option<u32>> {
+    db.query_row(
+        "SELECT value FROM metadata WHERE key='nu7_activation_height'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value| {
+        value
+            .parse()
+            .with_context(|| format!("invalid stored NU7 activation height {value:?}"))
+    })
+    .transpose()
 }
 
 fn add_missing_column(db: &Connection, table: &str, column: &str) -> Result<()> {

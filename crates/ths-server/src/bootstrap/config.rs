@@ -38,8 +38,11 @@ pub(super) fn development_credentials(store: &Store) -> Result<String> {
 /// network generator uses the same marker.
 const LOCKBOX_MARKER_ADDRESS: &str = "t26YoyZ1iPgiMEWL4zGUm74eVWfhyDMXzY2";
 
-pub(super) fn zakura_config(miner: &str) -> String {
-    // Keep these heights in sync with `crate::network::regtest_network()`.
+pub(super) fn zakura_config(miner: &str, nu7_activation_height: u32) -> String {
+    // Keep these heights in sync with `crate::network::regtest_network_with_nu7()`.
+    // Zakura moves every unlisted upgrade after Canopy to the next listed height,
+    // so NU5 through NU6.3 must stay explicit for Ironwood to remain active at
+    // height 1 when NU7 activates later.
     format!(
         r#"[network]
 network = "Regtest"
@@ -47,7 +50,12 @@ listen_addr = "0.0.0.0:18233"
 [network.testnet_parameters]
 lockbox_disbursements = [{{ address = "{LOCKBOX_MARKER_ADDRESS}", amount = 0 }}]
 [network.testnet_parameters.activation_heights]
-"NU7" = 1
+"NU5" = 1
+"NU6" = 1
+"NU6.1" = 1
+"NU6.2" = 1
+"NU6.3" = 1
+"NU7" = {nu7_activation_height}
 
 [rpc]
 listen_addr = "0.0.0.0:18232"

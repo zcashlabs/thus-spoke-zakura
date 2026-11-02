@@ -51,7 +51,8 @@ addresses and amounts are public chain data. Ironwood value lives in shielded
 **notes**. The wallet learns which notes belong to it by scanning compact
 blocks; the public explorer cannot identify their recipient or read a memo.
 
-This Regtest chain activates NU7 at height 1. The API offers transparent and
+This Regtest chain activates NU6.3 at height 1, and NU7 at height 1 unless the
+instance was started with [`--nu7-height`](cli.md#ths-ths-start). The API offers transparent and
 Ironwood pools; it rejects `orchard` because Orchard no longer accepts deposits
 under NU6.3. Ironwood is this chain's shielded pool;
 
