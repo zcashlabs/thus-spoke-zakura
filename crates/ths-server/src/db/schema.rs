@@ -31,6 +31,14 @@ impl Store {
         add_missing_column(&db, "activity", "last_error")?;
         add_missing_column(&db, "address_faucets", "last_error")?;
         migrate_activity_recipients(&db)?;
+        db.execute_batch(ACTIVITY_ORDER_TABLE)?;
+        // Existing journals already have an immutable insertion order. Preserve
+        // it when first-seen ordering is introduced for an older database.
+        db.execute(
+            "INSERT OR IGNORE INTO activity_order(activity_id)
+             SELECT id FROM activity ORDER BY rowid ASC",
+            [],
+        )?;
         let stored_seed = db
             .query_row("SELECT value FROM metadata WHERE key='seed'", [], |r| {
                 r.get::<_, String>(0)
@@ -98,6 +106,13 @@ const ACTIVITY_TABLE: &str = r#"
         to_address TEXT, source_pool TEXT NOT NULL, destination_pool TEXT NOT NULL,
         amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT
+    );
+"#;
+
+const ACTIVITY_ORDER_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS activity_order (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        activity_id TEXT NOT NULL UNIQUE
     );
 "#;
 

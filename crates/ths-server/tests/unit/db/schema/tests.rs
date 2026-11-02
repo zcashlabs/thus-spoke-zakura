@@ -1,4 +1,39 @@
 use super::*;
+
+#[test]
+fn existing_activity_rows_gain_a_stable_first_seen_order() {
+    let store = Store::open(":memory:").unwrap();
+    store
+        .0
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE activity (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_account INTEGER,
+                to_account INTEGER, to_address TEXT, source_pool TEXT NOT NULL,
+                destination_pool TEXT NOT NULL, amount_zatoshi INTEGER NOT NULL,
+                txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT
+            );
+            INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,status)
+                VALUES('first','send',1,2,'ironwood','ironwood',1,'','preparing'),
+                      ('second','send',1,2,'ironwood','ironwood',1,'','preparing');",
+        )
+        .unwrap();
+
+    store.initialize().unwrap();
+    let initial = store
+        .activity_sequences(&["second".to_owned(), "first".to_owned()])
+        .unwrap();
+    assert!(initial["first"] < initial["second"]);
+
+    store.initialize().unwrap();
+    let reopened = store
+        .activity_sequences(&["first".to_owned(), "second".to_owned()])
+        .unwrap();
+    assert_eq!(reopened, initial);
+}
+
 #[test]
 fn restores_the_hidden_treasury_for_existing_stores() {
     let store = Store::open(":memory:").unwrap();

@@ -3,7 +3,7 @@ use crate::db::{TREASURY_ACCOUNT_ID, USER_ACCOUNT_COUNT};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Serialize, Serializer};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 use zcash_client_backend::data_api::{
     WalletRead,
@@ -37,6 +37,15 @@ pub(crate) struct CanonicalActivity {
     pub(crate) confirmations: u32,
     pub(crate) created_at: Option<String>,
     pub(crate) memos: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalActivityIndex {
+    pub(crate) txid: String,
+    pub(crate) mined_height: Option<u32>,
+    pub(crate) tx_index: Option<u32>,
+    pub(crate) affected_accounts: Vec<u8>,
+    pub(crate) created_at: Option<String>,
 }
 
 #[derive(Clone)]
@@ -252,7 +261,8 @@ fn value_effects_for(
 fn read_canonical_activity(
     db: &Connection,
     account_ids: &[Uuid],
-    limit: u32,
+    limit: Option<u32>,
+    selected_txids: Option<&HashSet<String>>,
 ) -> Result<Vec<CanonicalActivity>> {
     let tip: Option<u32> = db.query_row("SELECT MAX(height) FROM blocks", [], |row| row.get(0))?;
     let mut query = db.prepare(
@@ -270,7 +280,7 @@ fn read_canonical_activity(
         account_ids[2],
         account_ids[3],
         account_ids[4],
-        limit.min(100),
+        limit.map(i64::from).unwrap_or(-1),
     ])?;
     let mut summaries = Vec::new();
     while let Some(row) = rows.next()? {
@@ -284,6 +294,10 @@ fn read_canonical_activity(
         // the transaction. An incoming shielded payment does not reveal the
         // sender's creation time; the Regtest block clock is not a substitute.
         let created_at: Option<String> = row.get(4)?;
+        let txid = TxId::from_bytes(txid_bytes).to_string();
+        if selected_txids.is_some_and(|selected| !selected.contains(&txid)) {
+            continue;
+        }
         let summary = summarize_outputs(&outputs_for(db, &txid_bytes, account_ids)?)?;
         let source_pools = source_pools_for(db, &txid_bytes, account_ids)?;
         let (received_zatoshi, spent_zatoshi, net_zatoshi) =
@@ -305,7 +319,7 @@ fn read_canonical_activity(
             received_zatoshi,
             spent_zatoshi,
             net_zatoshi,
-            txid: TxId::from_bytes(txid_bytes).to_string(),
+            txid,
             block_hash,
             mined_height,
             tx_index,
@@ -315,6 +329,49 @@ fn read_canonical_activity(
         });
     }
     Ok(summaries)
+}
+
+fn read_canonical_activity_index(
+    db: &Connection,
+    account_ids: &[Uuid],
+) -> Result<Vec<CanonicalActivityIndex>> {
+    let mut query = db.prepare(
+        "SELECT vt.txid,vt.mined_height,vt.tx_index,vt.account_uuid,t.created
+         FROM v_transactions vt
+         JOIN transactions t ON t.txid=vt.txid
+         WHERE vt.account_uuid IN (?1,?2,?3,?4,?5)
+         ORDER BY vt.mined_height DESC,vt.tx_index DESC,vt.txid",
+    )?;
+    let mut rows = query.query(params![
+        account_ids[0],
+        account_ids[1],
+        account_ids[2],
+        account_ids[3],
+        account_ids[4],
+    ])?;
+    let mut activity = Vec::<CanonicalActivityIndex>::new();
+    while let Some(row) = rows.next()? {
+        let txid_bytes: [u8; 32] = row.get(0)?;
+        let txid = TxId::from_bytes(txid_bytes).to_string();
+        let account = user_account(account_ids, row.get(3)?);
+        if let Some(existing) = activity.last_mut().filter(|entry| entry.txid == txid) {
+            if let Some(account) = account
+                && !existing.affected_accounts.contains(&account)
+            {
+                existing.affected_accounts.push(account);
+                existing.affected_accounts.sort_unstable();
+            }
+            continue;
+        }
+        activity.push(CanonicalActivityIndex {
+            txid,
+            mined_height: row.get(1)?,
+            tx_index: row.get(2)?,
+            affected_accounts: account.into_iter().collect(),
+            created_at: row.get(4)?,
+        });
+    }
+    Ok(activity)
 }
 
 /// Who sent or received one output, as the wallet transaction view reports it.
@@ -581,11 +638,10 @@ impl RealWallet {
         .await
     }
 
-    pub(crate) async fn canonical_activity(
+    pub(crate) async fn canonical_activity_index(
         &self,
-        limit: u32,
         journal_ids: Vec<String>,
-    ) -> Result<(Vec<CanonicalActivity>, HashMap<String, String>)> {
+    ) -> Result<(Vec<CanonicalActivityIndex>, HashMap<String, String>)> {
         let path = self.wallet_path.clone();
         let account_ids = self
             .account_ids
@@ -599,9 +655,29 @@ impl RealWallet {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
             Ok((
-                read_canonical_activity(&db, &account_ids, limit)?,
+                read_canonical_activity_index(&db, &account_ids)?,
                 prepared_txids,
             ))
+        })
+        .await
+    }
+
+    pub(crate) async fn canonical_activity_by_txids(
+        &self,
+        txids: HashSet<String>,
+    ) -> Result<Vec<CanonicalActivity>> {
+        let path = self.wallet_path.clone();
+        let account_ids = self
+            .account_ids
+            .iter()
+            .map(|id| id.expose_uuid())
+            .collect::<Vec<_>>();
+        self.with_db(move |_| {
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            read_canonical_activity(&db, &account_ids, None, Some(&txids))
         })
         .await
     }
