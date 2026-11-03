@@ -297,25 +297,24 @@ def send_choices():
 
 def payment_flow():
     d = D("payment-flow", 1000, 420, "Save the payment before submitting it",
-          "A validated payment is durably claimed as preparing. The wallet and server save "
-          "prepared transaction bytes before broadcast, then the server checks confirmation. "
-          "Identical keys resume the saved payment; changed details or memo conflict.")
+          "A validated payment is durably claimed as preparing, and the POST returns that stored "
+          "claim. Background work saves prepared transaction bytes before broadcast, then checks "
+          "confirmation. An identical key returns the recorded outcome and leaves confirmation to "
+          "background work; changed details or memo conflict.")
     xs, w = d.row(4)
     y, h = 92, 64
     for x, (t, sub), kind in zip(xs, [("Payment request", "send or either faucet"),
                                       ("Validate intent", "recipient, pools, key"),
                                       ("Claim in ths.db", "durable preparing state"),
-                                      ("Resume saved state", "same key + same details")],
+                                      ("Return the claim", "202 pending, 200 terminal")],
                                  ["plain", "plain", "accent", "note"]):
         d.card(x, y, w, h, t, sub, kind=kind)
-    for i in range(2):
+    for i in range(3):
         d.arrow([(xs[i] + w, y + 32), (xs[i + 1] - 8, y + 32)])
-    d.arrow([(xs[2] + w, y + 32), (xs[3] - 8, y + 32)], "same key",
-            lxy=((xs[2] + w + xs[3]) / 2, y - 12))
     bx, bw = d.row(3)
     d.arrow([(xs[2] + w / 2, y + h), (xs[2] + w / 2, 196),
              (bx[0] + bw / 2, 196), (bx[0] + bw / 2, 232)],
-            "new key", lxy=(500, 188))
+            "background", lxy=(500, 188))
     for x, (t, sub) in zip(bx, [("Save prepared bytes", "wallet journal + ths.db"),
                                ("Submit saved transaction", "known txid or broadcast"),
                                ("Check confirmation", "mine one block if needed")]):
@@ -390,10 +389,11 @@ def wallet_sync():
 
 def retry_decisions():
     d = D("retry-decisions", 1000, 420, "Retain the caller's payment identity",
-          "After a lost payment response, direct API callers reuse their saved key, dashboard "
-          "callers resume retained payments, and CLI callers rerun the same command and instance. "
-          "A new key requests a new payment. Activity omits keys and external faucet records; "
-          "inspect txids and wallet snapshots separately.")
+          "After a lost payment response, direct API callers reuse their saved key and read the "
+          "recorded outcome, dashboard callers resume retained payments, and CLI callers rerun the "
+          "same command and instance. A new key requests a new payment. A replay returns that "
+          "outcome. Activity omits keys and external faucet records; inspect txids and wallet "
+          "snapshots separately.")
     d.card(290, 76, 420, 54, "A payment response is uncertain", "which caller and result?", kind="accent")
     xs, w = d.row(3)
     for x, (t, sub) in zip(xs, [("API: saved key", "same request details"),
@@ -401,7 +401,7 @@ def retry_decisions():
                                ("CLI: same command", "same arguments and instance")]):
         d.card(x, 184, w, 64, t, sub)
         d.arrow([(500, 130), (500, 154), (x + w / 2, 154), (x + w / 2, 176)])
-    for x, (t, sub), kind in zip(xs, [("Resume same intent", "same key + same details"),
+    for x, (t, sub), kind in zip(xs, [("Read recorded outcome", "replay returns that result"),
                                      ("Keep pending payment", "broadcast is not terminal"),
                                      ("Resume saved intent", "terminal observation clears key")],
                                 ["accent", "note", "note"]):
