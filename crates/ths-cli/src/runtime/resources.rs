@@ -358,6 +358,35 @@ pub(super) fn volume_dependency(
         .with_context(|| format!("missing allocated dependency {target}"))
 }
 
+/// The one-shot `init` container writes the node configuration and stores the NU7
+/// height with the instance. The app reads that stored height on every start, so
+/// only `init` receives it.
+pub(super) fn init_container_args(
+    prefix: &str,
+    name: &InstanceName,
+    nu7_activation_height: u32,
+) -> Vec<String> {
+    vec![
+        "create".into(),
+        "--name".into(),
+        format!("{prefix}-init"),
+        "--label".into(),
+        label(name),
+        "-v".into(),
+        format!("{prefix}-wallet:/data"),
+        "-v".into(),
+        format!("{prefix}-config:/config"),
+        app_image(),
+        "init".into(),
+        "--data-dir".into(),
+        "/data".into(),
+        "--config-dir".into(),
+        "/config".into(),
+        "--nu7-height".into(),
+        nu7_activation_height.to_string(),
+    ]
+}
+
 pub(super) fn ensure_zakura(
     prefix: &str,
     name: &InstanceName,

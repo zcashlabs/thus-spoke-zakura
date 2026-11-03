@@ -86,6 +86,24 @@ ths start --mine-on-mempool     # mine whenever a transaction arrives
 ths start --no-auto-mine        # mine only when you run `ths mine`
 ```
 
+`start --nu7-height <HEIGHT>` chooses the block at which **NU7** activates
+(default: `1`). Every earlier upgrade, including NU6.3 and therefore Ironwood,
+still activates at height 1, so startup funds Account 1 in Ironwood as usual.
+With a height above the roughly 105 blocks startup mines, the instance becomes
+ready under NU6.3 rules, and NU7 activates when you mine up to the chosen
+height. Payments built before then use the NU6.3 branch ID; the block at the
+chosen height is the first NU7 block, and rollbacks and reorgs may cross it in
+either direction.
+
+The height is fixed for the life of the instance: it is stored with the
+instance's wallet data, kept when the app restarts, and reported as
+`nu7_activation_height` in `GET /api/v1/status`. To use another height, start a
+new instance. `ths run` always activates NU7 at height 1.
+
+```console
+ths start --nu7-height 150      # ready under NU6.3; mine to 150 to activate NU7
+```
+
 ### `ths wait [--timeout <SECONDS>]`
 
 Waits for an instance's node, lightwalletd index, and wallet to be settled at
@@ -939,6 +957,7 @@ compinit
 | `ths start --block-time <SECONDS>` | Interval mining: mine an empty block every `SECONDS` seconds |
 | `ths start --mine-on-mempool` | Mempool mining: mine when the mempool holds new transactions |
 | `ths start --no-auto-mine` | Manual mining: nothing is mined until `ths mine` |
+| `ths start --nu7-height <HEIGHT>` | Activate NU7 at `HEIGHT` instead of block 1, fixed for the instance |
 | `ths wait [--timeout]` | Wait for existing node/index/wallet settlement |
 | `ths run [--timeout] -- <command>` | Run a child in a fresh settled instance, then clean up |
 | `ths build [--dev]` | Build runtime images from source |

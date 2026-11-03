@@ -122,6 +122,7 @@ fn separates_building_from_starting() {
             block_time: None,
             mine_on_mempool: false,
             no_auto_mine: false,
+            nu7_height: 1,
         })
     ));
 
@@ -183,6 +184,30 @@ fn start_selects_one_mining_mode() {
     );
     assert!(Cli::try_parse_from(["ths", "start", "--block-time", "2", "--no-auto-mine"]).is_err());
     assert!(Cli::try_parse_from(["ths", "start", "--mine-on-mempool", "--no-auto-mine"]).is_err());
+}
+
+#[test]
+fn start_selects_the_nu7_activation_height_and_defaults_to_one() {
+    let cli = Cli::try_parse_from(["ths", "start"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start { nu7_height: 1, .. })
+    ));
+
+    let cli =
+        Cli::try_parse_from(["ths", "start", "--nu7-height", "150", "--no-auto-mine"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start {
+            nu7_height: 150,
+            no_auto_mine: true,
+            ..
+        })
+    ));
+
+    // Genesis cannot carry an upgrade, so the earliest activation is block 1.
+    assert!(Cli::try_parse_from(["ths", "start", "--nu7-height", "0"]).is_err());
+    assert!(Cli::try_parse_from(["ths", "start", "--nu7-height", "later"]).is_err());
 }
 
 #[test]

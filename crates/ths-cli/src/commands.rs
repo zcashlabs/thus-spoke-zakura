@@ -6,7 +6,7 @@ use clap::CommandFactory;
 
 use crate::{
     args::{Cli, Command, CompletionShell, Pool, SendArgs, WalletCommand},
-    runtime::{InstanceName, MiningConfig, Runtime},
+    runtime::{DEFAULT_NU7_ACTIVATION_HEIGHT, InstanceName, MiningConfig, Runtime},
     updater,
 };
 use wallet::send;
@@ -43,6 +43,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         block_time: None,
         mine_on_mempool: false,
         no_auto_mine: false,
+        nu7_height: DEFAULT_NU7_ACTIVATION_HEIGHT,
     }) {
         Command::Start {
             no_open,
@@ -50,9 +51,10 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             block_time,
             mine_on_mempool,
             no_auto_mine,
+            nu7_height,
         } => {
             let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
-            runtime.start(&name, no_open, cli.json, port_offset, mining)
+            runtime.start(&name, no_open, cli.json, port_offset, mining, nu7_height)
         }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run { timeout, command } => {

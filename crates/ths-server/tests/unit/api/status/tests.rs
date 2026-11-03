@@ -795,6 +795,18 @@ async fn status_reports_the_selected_mining_mode() {
         assert_eq!(status["block_time"], block_time, "{mode:?}");
     }
 }
+
+#[tokio::test]
+async fn status_reports_the_instance_nu7_activation_height() {
+    let (state, _dir) = state_with_mode(MiningMode::Auto);
+    let (code, status) = api_get(&state, "/api/v1/status").await;
+    assert_eq!(code, StatusCode::OK);
+    // Unit tests never select a height for the process, so the default applies.
+    assert_eq!(
+        status["nu7_activation_height"],
+        json!(crate::network::DEFAULT_NU7_ACTIVATION_HEIGHT)
+    );
+}
 use crate::wallet::WALLET_BIRTHDAY_HEIGHT;
 
 fn host(value: &str) -> HeaderMap {

@@ -71,6 +71,11 @@ pub struct Runtime {
     root: PathBuf,
 }
 
+/// NU7 activates at this height unless `ths start --nu7-height` selects another.
+/// The server's `init` stores the height with the instance, so it never changes
+/// after creation.
+pub(crate) const DEFAULT_NU7_ACTIVATION_HEIGHT: u32 = 1;
+
 /// The mining mode selected for a new environment. The server owns the actual
 /// behavior; the launcher only validates the flags and forwards the choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
