@@ -1,6 +1,7 @@
 import { SakuraMark } from '@/components/ui/SakuraMark';
 import { QrCode, Send } from 'lucide-react';
-import { useAccounts, useActivity } from '@/hooks/queries';
+import { useMemo, useState } from 'react';
+import { useAccounts, useActivityPages } from '@/hooks/queries';
 import { errorMessage } from '@/lib/api';
 import { AccountCard } from './AccountCard';
 import { ZecAmount } from '@/components/ui/ZecAmount';
@@ -11,10 +12,102 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { useWalletActions } from './wallet-actions-context';
 import { Button } from '@/components/ui/Button';
 import { EmptyState, ErrorState } from '@/components/ui/StateBlock';
+import { Select, type SelectOption } from '@/components/ui/Select';
+
+const ACCOUNT_FILTERS: ReadonlyArray<SelectOption<string>> = [
+  { value: 'all', label: 'All accounts' },
+  ...[1, 2, 3, 4, 5].map((account) => ({
+    value: String(account),
+    label: `Account ${account}`,
+  })),
+];
+const KIND_FILTERS: ReadonlyArray<SelectOption<string>> = [
+  { value: 'all', label: 'All kinds' },
+  { value: 'send', label: 'Send' },
+  { value: 'faucet', label: 'Faucet' },
+  { value: 'transaction', label: 'Transaction' },
+];
+const STATUS_FILTERS: ReadonlyArray<SelectOption<string>> = [
+  { value: 'all', label: 'All statuses' },
+  ...['preparing', 'prepared', 'broadcast', 'pending', 'confirmed', 'unconfirmed', 'failed'].map(
+    (status) => ({ value: status, label: status[0]!.toUpperCase() + status.slice(1) }),
+  ),
+];
+
+function ActivityFilter({
+  id,
+  label,
+  value,
+  options,
+  onValueChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  options: ReadonlyArray<SelectOption<string>>;
+  onValueChange: (value: string) => void;
+}) {
+  return (
+    <label className="grid gap-1.5 text-[11px] font-bold tracking-[0.08em] uppercase" htmlFor={id}>
+      {label}
+      <Select id={id} value={value} options={options} onValueChange={onValueChange} />
+    </label>
+  );
+}
 
 export function WalletPage() {
   const accounts = useAccounts();
-  const activity = useActivity();
+  const [account, setAccount] = useState('all');
+  const [kind, setKind] = useState('all');
+  const [status, setStatus] = useState('all');
+  const [pageSize, setPageSize] = useState(10);
+  const [activityPage, setActivityPage] = useState(0);
+  const [isFetchingLastPage, setIsFetchingLastPage] = useState(false);
+  const activityOptions = useMemo(
+    () => ({
+      limit: pageSize,
+      ...(account === 'all' ? {} : { account: Number(account) }),
+      ...(kind === 'all' ? {} : { kind: kind as 'send' | 'faucet' | 'transaction' }),
+      ...(status === 'all' ? {} : { status }),
+    }),
+    [account, kind, pageSize, status],
+  );
+  const activity = useActivityPages(activityOptions);
+  const activityPages = activity.data?.pages ?? [];
+  const currentActivityPage = Math.min(activityPage, Math.max(0, activityPages.length - 1));
+  const visibleActivity = activityPages[currentActivityPage]?.entries;
+  const hasNextActivityPage =
+    currentActivityPage + 1 < activityPages.length || activity.hasNextPage === true;
+
+  const showNextActivityPage = async () => {
+    if (currentActivityPage + 1 < activityPages.length) {
+      setActivityPage(currentActivityPage + 1);
+      return;
+    }
+    const result = await activity.fetchNextPage();
+    if (result.data && currentActivityPage + 1 < result.data.pages.length) {
+      setActivityPage(currentActivityPage + 1);
+    }
+  };
+
+  const showLastActivityPage = async () => {
+    setIsFetchingLastPage(true);
+    try {
+      let pages = activity.data?.pages ?? [];
+      let hasMore = activity.hasNextPage === true;
+      while (hasMore) {
+        const previousLength = pages.length;
+        const result = await activity.fetchNextPage();
+        if (!result.data || result.isError) return;
+        pages = result.data.pages;
+        hasMore = result.hasNextPage === true;
+        if (pages.length <= previousLength) return;
+      }
+      setActivityPage(Math.max(0, pages.length - 1));
+    } finally {
+      setIsFetchingLastPage(false);
+    }
+  };
   const { openRequest, openSend } = useWalletActions();
 
   const total = (accounts.data ?? []).reduce(
@@ -82,7 +175,62 @@ export function WalletPage() {
           </section>
         ))}
 
-      <ActivityList activity={activity} />
+      <ActivityList
+        activity={{
+          data: visibleActivity,
+          isPending: activity.isPending,
+          isError: activity.isError,
+          error: activity.error,
+        }}
+        filters={
+          <>
+            <ActivityFilter
+              id="activity-account"
+              label="Account"
+              value={account}
+              options={ACCOUNT_FILTERS}
+              onValueChange={(value) => {
+                setActivityPage(0);
+                setAccount(value);
+              }}
+            />
+            <ActivityFilter
+              id="activity-kind"
+              label="Kind"
+              value={kind}
+              options={KIND_FILTERS}
+              onValueChange={(value) => {
+                setActivityPage(0);
+                setKind(value);
+              }}
+            />
+            <ActivityFilter
+              id="activity-status"
+              label="Status"
+              value={status}
+              options={STATUS_FILTERS}
+              onValueChange={(value) => {
+                setActivityPage(0);
+                setStatus(value);
+              }}
+            />
+          </>
+        }
+        page={currentActivityPage + 1}
+        hasPreviousPage={currentActivityPage > 0}
+        hasNextPage={hasNextActivityPage}
+        isFetchingNextPage={activity.isFetchingNextPage}
+        isFetchingLastPage={isFetchingLastPage}
+        onFirstPage={() => setActivityPage(0)}
+        onPreviousPage={() => setActivityPage(Math.max(0, currentActivityPage - 1))}
+        onNextPage={() => void showNextActivityPage()}
+        onLastPage={() => void showLastActivityPage()}
+        pageSize={pageSize}
+        onPageSizeChange={(value) => {
+          setActivityPage(0);
+          setPageSize(value);
+        }}
+      />
     </div>
   );
 }

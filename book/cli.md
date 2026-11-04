@@ -525,7 +525,7 @@ ths wallet balances
 ths wallet balances --json
 ```
 
-### `ths wallet activity [--limit <N>]`
+### `ths wallet activity [--limit <N>] [--watch]`
 
 Prints recent canonical activity for the five development accounts, newest
 first, together with pending or failed payment-journal entries. The output
@@ -545,6 +545,7 @@ short empty-state message.
 ```console
 ths wallet activity
 ths wallet activity --limit 20
+ths wallet activity --watch
 ths wallet activity --json
 ths wallet activity --limit 20 --json
 ```
@@ -559,6 +560,18 @@ included in the displayed amount, recipients, or account lists. Detecting a
 transparent source for an external incoming transaction is best effort and
 uses one short, shared lookup budget, so an unavailable Zakura node does not
 hold up the activity response.
+
+`--watch` keeps the recent-activity view updated. The watch reads
+`GET /api/v1/activity` every two seconds and never submits, retries, or
+resumes payments. On a terminal it redraws in place under a header with the
+last update time; on a pipe it prints only snapshots that changed. With
+`--json`, each changed snapshot prints as one newline-delimited JSON array
+and status messages go to stderr. `Ctrl+C` stops only the watcher and leaves
+the environment running. When a read fails the watch re-checks the
+environment: a restarting environment keeps polling with the last snapshot
+marked unreachable, a stopped environment is reported while polling
+continues so a restart resumes the view, and a deleted environment exits
+with an error.
 
 ### `ths wallet tx <TXID> [--account <N>]`
 

@@ -20,6 +20,8 @@ mod logs;
 mod resources;
 #[path = "tests/startup.rs"]
 mod startup;
+#[path = "tests/watch.rs"]
+mod watch;
 
 struct RecordedResource {
     name: String,

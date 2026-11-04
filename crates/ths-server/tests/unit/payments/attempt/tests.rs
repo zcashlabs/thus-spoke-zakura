@@ -277,3 +277,55 @@ async fn automatic_mining_stages_share_the_remaining_attempt_budget() {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+#[tokio::test]
+async fn treasury_maturity_mining_runs_in_auto_and_mempool_modes() {
+    for (mode, expected) in [
+        (MiningMode::Auto, 1),
+        (MiningMode::Mempool, 1),
+        (MiningMode::Interval, 0),
+        (MiningMode::Manual, 0),
+    ] {
+        let (mut state, _dir) = state_with_mode(mode);
+        let generated = Arc::new(AtomicUsize::new(0));
+        let generated_rpc = generated.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<Value>| {
+                let generated = generated_rpc.clone();
+                async move {
+                    match request["method"].as_str() {
+                        Some("getblockchaininfo") => {
+                            Json(json!({"result":{"chain":"regtest","blocks":107},"error":null}))
+                        }
+                        Some("generate") => {
+                            generated.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"result":["mined-block"],"error":null}))
+                        }
+                        _ => Json(json!({"result":null,"error":{"code":-1,"message":"unused"}})),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Arc::get_mut(&mut state.0).unwrap().rpc =
+            NodeRpc::new(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        state.mark_started();
+        let attempt = PaymentAttempt {
+            state: &state,
+            dispatch_deadline: None,
+        };
+        // An empty mempool never wakes the mempool miner, so treasury coinbase
+        // maturity has to be mined by the payment itself in that mode.
+        let reached = FaucetRuntime::mine_to_height(&attempt, 108).await;
+        // The fake node has no block lookup or wallet backend, so a mining
+        // mode fails after `generate`; interval and manual modes fail before it
+        // because no block was produced.
+        let skipped = format!("{reached:?}").contains("did not reach height");
+        assert_eq!(skipped, expected == 0, "{mode:?}: {reached:?}");
+        assert_eq!(generated.load(Ordering::SeqCst), expected, "{mode:?}");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+}

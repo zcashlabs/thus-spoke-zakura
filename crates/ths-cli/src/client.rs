@@ -509,7 +509,18 @@ fn quote_max_amount(
 }
 
 impl Runtime {
-    fn instance_client(&self, name: &InstanceName) -> Result<(String, reqwest::blocking::Client)> {
+    pub(crate) fn instance_client(
+        &self,
+        name: &InstanceName,
+    ) -> Result<(String, reqwest::blocking::Client)> {
+        self.instance_client_with_timeout(name, Duration::from_secs(300))
+    }
+
+    pub(crate) fn instance_client_with_timeout(
+        &self,
+        name: &InstanceName,
+        timeout: Duration,
+    ) -> Result<(String, reqwest::blocking::Client)> {
         let app_container = format!("{}-app", prefix(name));
         if !container_running(&app_container)? {
             bail!("environment {name} is not running; start it with `ths --name {name}`");
@@ -517,7 +528,7 @@ impl Runtime {
         let dashboard = self.read_instance(name)?.endpoints.dashboard;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(300))
+            .timeout(timeout)
             .build()?;
         Ok((dashboard, client))
     }

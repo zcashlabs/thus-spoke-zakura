@@ -65,6 +65,7 @@ mod runner;
 use runner::*;
 mod startup;
 use startup::*;
+mod watch;
 
 pub struct Runtime {
     root: PathBuf,

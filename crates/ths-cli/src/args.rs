@@ -198,6 +198,9 @@ pub(crate) enum WalletCommand {
         /// Maximum number of entries to print (1-100).
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: Option<u32>,
+        /// Keep the recent-activity view updated until interrupted.
+        #[arg(long)]
+        watch: bool,
     },
     /// Show what the local wallet recorded about one transaction for accounts
     /// 1-5: outputs, change, memos, spent notes, and fee.

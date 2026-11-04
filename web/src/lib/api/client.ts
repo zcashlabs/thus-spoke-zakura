@@ -15,11 +15,11 @@ async function readError(response: Response): Promise<never> {
   throw new ApiError(response.status, message);
 }
 
-export async function request<T>(
+export async function requestWithResponse<T>(
   path: string,
   schema: z.ZodType<T>,
   init?: RequestInit,
-): Promise<T> {
+): Promise<{ data: T; response: Response }> {
   const response = await fetch(`${BASE}${path}`, {
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers },
@@ -34,7 +34,15 @@ export async function request<T>(
       `Unexpected response shape for ${path}: ${parsed.error.issues[0]?.message ?? 'unknown'}`,
     );
   }
-  return parsed.data;
+  return { data: parsed.data, response };
+}
+
+export async function request<T>(
+  path: string,
+  schema: z.ZodType<T>,
+  init?: RequestInit,
+): Promise<T> {
+  return (await requestWithResponse(path, schema, init)).data;
 }
 
 export function post<T>(path: string, schema: z.ZodType<T>, body: unknown): Promise<T> {

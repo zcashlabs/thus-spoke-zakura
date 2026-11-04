@@ -347,7 +347,10 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
     assert!(matches!(
         cli.command,
         Some(Command::Wallet {
-            action: WalletCommand::Activity { limit: None }
+            action: WalletCommand::Activity {
+                limit: None,
+                watch: false,
+            }
         })
     ));
 
@@ -357,7 +360,22 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
     assert!(matches!(
         cli.command,
         Some(Command::Wallet {
-            action: WalletCommand::Activity { limit: Some(20) }
+            action: WalletCommand::Activity {
+                limit: Some(20),
+                watch: false,
+            }
+        })
+    ));
+
+    let cli =
+        Cli::try_parse_from(["ths", "wallet", "activity", "--watch", "--limit", "10"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Wallet {
+            action: WalletCommand::Activity {
+                limit: Some(10),
+                watch: true,
+            }
         })
     ));
 

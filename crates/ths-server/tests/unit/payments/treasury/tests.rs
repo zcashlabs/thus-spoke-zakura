@@ -61,6 +61,8 @@ struct RecordingFaucetRuntime {
     anchor_pending_until: AtomicUsize,
     anchor_stays_pending: AtomicBool,
     mining_progress: AtomicBool,
+    // Models mempool mode: plain mining is skipped, height-only mining runs.
+    empty_only_mining: AtomicBool,
     cursor: Mutex<Option<crate::db::TreasuryCursor>>,
 }
 
@@ -74,6 +76,7 @@ impl Default for RecordingFaucetRuntime {
             anchor_pending_until: AtomicUsize::new(0),
             anchor_stays_pending: AtomicBool::new(false),
             mining_progress: AtomicBool::new(true),
+            empty_only_mining: AtomicBool::new(false),
             cursor: Mutex::new(None),
         }
     }
@@ -175,6 +178,15 @@ impl FaucetRuntime for RecordingFaucetRuntime {
         Ok(())
     }
     async fn mine_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
+        self.events.lock().unwrap().push(format!("mine:{blocks}"));
+        if self.mining_progress.load(Ordering::SeqCst)
+            && !self.empty_only_mining.load(Ordering::SeqCst)
+        {
+            self.height.fetch_add(blocks as usize, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+    async fn mine_empty_and_sync(&self, blocks: u32) -> anyhow::Result<()> {
         self.events.lock().unwrap().push(format!("mine:{blocks}"));
         if self.mining_progress.load(Ordering::SeqCst) {
             self.height.fetch_add(blocks as usize, Ordering::SeqCst);
@@ -329,4 +341,25 @@ async fn treasury_anchor_without_mining_progress_remains_pending_without_repleni
     );
     assert!(!runtime.reward_discovered.load(Ordering::SeqCst));
     assert!(runtime.cursor.into_inner().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn treasury_anchor_block_is_mined_when_only_height_mining_runs() {
+    let runtime = anchor_pending_runtime();
+    runtime.empty_only_mining.store(true, Ordering::SeqCst);
+    runtime.funds_available.store(true, Ordering::SeqCst);
+    let prepared = prepare_with_replenishment(
+        &runtime,
+        None,
+        None,
+        "seed",
+        &treasury_account(),
+        "uregtest-recipient",
+        100_000_000,
+        Ok,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.txid, "recovered-txid");
+    assert_eq!(runtime.height.load(Ordering::SeqCst), 3);
 }
