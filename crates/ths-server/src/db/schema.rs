@@ -19,6 +19,12 @@ impl Store {
                 activity_id TEXT PRIMARY KEY, raw_transaction BLOB NOT NULL,
                 expiry_height INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS activity_outputs (
+                activity_id TEXT NOT NULL, position INTEGER NOT NULL, to_account INTEGER,
+                to_address TEXT, destination_pool TEXT NOT NULL,
+                amount_zatoshi INTEGER NOT NULL, memo TEXT,
+                PRIMARY KEY (activity_id, position)
+            );
             CREATE TABLE IF NOT EXISTS address_faucets (
                 key TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, address TEXT NOT NULL,
                 amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL DEFAULT '',

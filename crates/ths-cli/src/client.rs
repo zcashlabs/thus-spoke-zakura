@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -137,12 +138,25 @@ pub(crate) struct Activity {
     to_account: Option<u8>,
     to_address: Option<String>,
     source_pool: String,
-    destination_pool: String,
+    /// Null for a batch whose outputs pay into more than one pool.
+    destination_pool: Option<String>,
     amount_zatoshi: u64,
     txid: String,
     block_hash: Option<String>,
     status: String,
     last_error: Option<String>,
+    /// Every recipient of a multi-recipient send; empty for a single recipient.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    outputs: Vec<ActivityOutput>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ActivityOutput {
+    to_account: Option<u8>,
+    to_address: Option<String>,
+    destination_pool: String,
+    amount_zatoshi: u64,
+    memo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,7 +378,28 @@ pub(crate) fn unresolved_json<T: Serialize>(
 
 impl Activity {
     fn recipient(&self) -> String {
-        recipient(self.to_account, self.to_address.as_deref())
+        if self.outputs.is_empty() {
+            recipient(self.to_account, self.to_address.as_deref())
+        } else {
+            format!("{} recipients", self.outputs.len())
+        }
+    }
+
+    /// The pool a single-recipient payment lands in, or every pool of a batch.
+    fn destination_pools(&self) -> String {
+        match &self.destination_pool {
+            Some(pool) => pool.clone(),
+            None => {
+                let mut pools: Vec<_> = self
+                    .outputs
+                    .iter()
+                    .map(|output| output.destination_pool.as_str())
+                    .collect();
+                pools.sort_unstable();
+                pools.dedup();
+                pools.join(", ")
+            }
+        }
     }
 }
 
@@ -374,6 +409,36 @@ fn recipient(to_account: Option<u8>, to_address: Option<&str>) -> String {
         (None, Some(address)) => address.to_owned(),
         (None, None) => "an unknown recipient".to_owned(),
     }
+}
+
+/// Whether a ZIP-321 URI holds more than one payment. Every payment has
+/// exactly one address: the path or `address` for index 0, `address.N` for
+/// index N. An index alone does not make a batch, since `zcash:?address.1=…`
+/// is a single payment.
+pub(crate) fn is_multi_payment_uri(uri: &str) -> bool {
+    let (path, query) = uri.split_once('?').unwrap_or((uri, ""));
+    let mut indexes = BTreeSet::new();
+    if path
+        .split_once(':')
+        .is_some_and(|(_, address)| !address.is_empty())
+    {
+        indexes.insert("");
+    }
+    for parameter in query.split('&') {
+        let name = parameter
+            .split_once('=')
+            .map_or(parameter, |(name, _)| name);
+        match name.split_once('.') {
+            None if name == "address" => {
+                indexes.insert("");
+            }
+            Some(("address", index)) => {
+                indexes.insert(index);
+            }
+            _ => {}
+        }
+    }
+    indexes.len() > 1
 }
 
 /// A single-payment ZIP-321 URI as resolved by the server.
@@ -848,7 +913,7 @@ impl Runtime {
                     "Funded {} with {} ZEC ({} pool) on {name}.",
                     activity.recipient(),
                     format_zec(activity.amount_zatoshi),
-                    activity.destination_pool
+                    activity.destination_pools()
                 )?;
                 writeln!(out, "  Transaction: {}", activity.txid)?;
             }
@@ -1058,6 +1123,30 @@ impl Runtime {
         amount: Option<TransferAmount>,
         json: bool,
     ) -> Result<()> {
+        if is_multi_payment_uri(uri) {
+            if amount.is_some() {
+                bail!(
+                    "--amount and --max apply only to a single-payment URI; each payment in this URI sets its own amount"
+                );
+            }
+            // The server parses and validates every payment, so the whole URI is
+            // the request, and an unchanged command resumes the same payment.
+            return self.submit_send(
+                name,
+                dashboard,
+                client,
+                std::io::stdout().lock(),
+                Instant::now() + PAYMENT_WAIT,
+                from,
+                serde_json::json!({
+                    "from_account": from,
+                    "source_pool": source_pool,
+                    "uri": uri,
+                }),
+                None,
+                json,
+            );
+        }
         let response = client
             .post(format!("{dashboard}/api/v1/zip321/parse"))
             .json(&serde_json::json!({ "uri": uri }))
@@ -1323,7 +1412,29 @@ impl Runtime {
                     .unwrap_or("no reason recorded")
             );
         }
-        if !json {
+        if !json && !activity.outputs.is_empty() {
+            writeln!(
+                out,
+                "Sent {} ZEC from account {} ({} pool) to {} on {name}.",
+                format_zec(activity.amount_zatoshi),
+                from,
+                activity.source_pool,
+                activity.recipient(),
+            )?;
+            for output in &activity.outputs {
+                write!(
+                    out,
+                    "  {} ZEC to {} ({} pool)",
+                    format_zec(output.amount_zatoshi),
+                    recipient(output.to_account, output.to_address.as_deref()),
+                    output.destination_pool
+                )?;
+                match &output.memo {
+                    Some(memo) => writeln!(out, ". Memo: {memo}")?,
+                    None => writeln!(out)?,
+                }
+            }
+        } else if !json {
             writeln!(
                 out,
                 "Sent {} ZEC from account {} ({} pool) to {} ({} pool) on {name}.",
@@ -1331,11 +1442,13 @@ impl Runtime {
                 from,
                 activity.source_pool,
                 activity.recipient(),
-                activity.destination_pool
+                activity.destination_pools()
             )?;
             if let Some(memo) = memo {
                 writeln!(out, "Memo: {memo}")?;
             }
+        }
+        if !json {
             writeln!(out, "Transaction: {}", activity.txid)?;
             if let Some(block_hash) = &activity.block_hash {
                 writeln!(out, "Confirmed in: {block_hash}")?;
