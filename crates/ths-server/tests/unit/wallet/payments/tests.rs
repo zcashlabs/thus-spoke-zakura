@@ -267,6 +267,30 @@ fn ironwood_send_rejects_sapling_funds_when_ironwood_is_empty_or_insufficient() 
 }
 
 #[test]
+fn transparent_send_reports_the_spendable_utxo_total_when_over_budget() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 100_000_000);
+    let recipient = recipient(&st, "ironwood");
+    let account_id = st.test_account().unwrap().id();
+    let params = *st.network();
+    let error = RealWallet::propose_send(
+        st.wallet_mut(),
+        &params,
+        account_id,
+        "transparent",
+        &recipient,
+        Zatoshis::const_from_u64(200_000_000),
+        None,
+    )
+    .expect_err("an over-budget transparent send must be refused");
+    assert!(
+        matches!(error.downcast_ref(),
+            Some(PaymentError::InsufficientFunds { available, .. }) if *available == 100_000_000),
+        "transparent over-budget send misreports spendable funds: {error:#}"
+    );
+}
+
+#[test]
 fn ironwood_send_uses_only_ironwood_inputs_with_both_pools_funded() {
     let mut st = test_state();
     fund_ironwood(&mut st, 10_000_000);
