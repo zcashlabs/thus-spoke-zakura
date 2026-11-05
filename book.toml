@@ -16,7 +16,7 @@ default-theme = "light"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/zcashlabs/thus-spoke-zakura"
 edit-url-template = "https://github.com/zcashlabs/thus-spoke-zakura/edit/main/{path}"
-site-url = "/thus-spoke-zakura-book/"
+site-url = "/book/"
 
 [output.html.fold]
 enable = true

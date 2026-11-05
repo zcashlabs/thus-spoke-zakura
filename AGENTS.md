@@ -6,8 +6,8 @@ Thus Spoke Zakura runs a local Zcash Regtest environment. The `ths` launcher (`c
 
 `book/` holds the documentation: how the environment is used, what each component owns, and what an API response does and does not prove. Read it before changing behaviour that it describes, and update it in the same change. `mdbook build && python3 tools/build_site.py` renders it; `python3 tests/book_links.py` checks every link.
 
-Published at <https://amiabix.github.io/thus-spoke-zakura-book/>. For reading rather than browsing, every page is also served as markdown, and
-<https://amiabix.github.io/thus-spoke-zakura-book/book.md> is the whole book in one file (about 21k tokens). <https://amiabix.github.io/thus-spoke-zakura-book/llms.txt> indexes both.
+Published at <https://ths.zypherpunk.xyz/book/>. For reading rather than browsing, every page is also served as markdown, and
+<https://ths.zypherpunk.xyz/book/book.md> is the whole book in one file (about 21k tokens). <https://ths.zypherpunk.xyz/book/llms.txt> indexes both.
 
 ## Commands
 
