@@ -159,6 +159,35 @@ describe('useTheme', () => {
     expect(result.current[0]).toBe('light');
   });
 
+  it('updates theme-color when the OS preference changes while following system', async () => {
+    const mediaListeners: Array<() => void> = [];
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: (_: string, fn: () => void) => mediaListeners.push(fn),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+
+    const meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    meta.content = '#f2f0f1';
+    document.head.appendChild(meta);
+
+    await mountTheme();
+
+    // Simulate the OS switching to dark while the preference is system.
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: true,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+    act(() => mediaListeners.forEach((fn) => fn()));
+
+    expect(meta.content).toBe('#0e0f11');
+    document.head.removeChild(meta);
+  });
+
   it('keeps the selection when storage reads but refuses the write', async () => {
     refuseStorage('setItem');
     const { result } = await mountTheme();
