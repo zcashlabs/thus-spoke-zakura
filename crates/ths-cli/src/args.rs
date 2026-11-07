@@ -31,6 +31,10 @@ pub(crate) enum Command {
     Start {
         #[arg(long)]
         no_open: bool,
+        /// Return once the environment is ready and leave it running; `ths stop` deletes it.
+        /// Implies --no-open.
+        #[arg(short, long)]
+        detach: bool,
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
         port_offset: u16,

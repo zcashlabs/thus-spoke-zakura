@@ -412,7 +412,7 @@ fn initial_cleanup_failure_does_not_retry_on_drop() {
     let (_sender, shutdown) = Shutdown::channel();
 
     let error = runtime_for_tests()
-        .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+        .start_with(&name("alpha"), false, false, false, 0, &host, &shutdown)
         .unwrap_err();
 
     assert!(error.to_string().contains("resource collision"));
@@ -425,7 +425,7 @@ fn readiness_failure_deletes_the_started_instance() {
     host.wait_ready_result = Err("dashboard did not become healthy".into());
     let (_sender, shutdown) = Shutdown::channel();
     let err = runtime_for_tests()
-        .start_with(&name("alpha"), false, false, 0, &host, &shutdown)
+        .start_with(&name("alpha"), false, false, false, 0, &host, &shutdown)
         .unwrap_err();
     assert!(err.to_string().contains("dashboard did not become healthy"));
     let events = events.lock().unwrap().clone();

@@ -648,6 +648,29 @@ impl Runtime {
         })
     }
 
+    /// Records that `start --detach` left this session's environment running. It lives in
+    /// the instance directory, so deleting the environment removes it.
+    pub(super) fn mark_detached(&self, name: &InstanceName, session: &StartSession) -> Result<()> {
+        let path = self.detached_path(name);
+        let pending = path.with_extension("pending");
+        fs::write(&pending, &session._session.id)?;
+        fs::rename(&pending, &path)?;
+        Ok(())
+    }
+
+    /// True when `start --detach` left this instance running, so no launcher owns it.
+    pub(super) fn detached(&self, name: &InstanceName, instance: &Instance) -> Result<bool> {
+        match fs::read_to_string(self.detached_path(name)) {
+            Ok(id) => Ok(instance.session.as_deref() == Some(id.trim())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("reading the detached marker"),
+        }
+    }
+
+    fn detached_path(&self, name: &InstanceName) -> PathBuf {
+        self.instance_dir(name).join("detached")
+    }
+
     fn clear_ready(&self, name: &InstanceName, session: &StartSession) {
         let ready = session
             .ready

@@ -51,6 +51,10 @@ impl Runtime {
             if self.being_stopped(name)? {
                 bail!("environment {name} is being stopped");
             }
+            // A detached start already reported ready and exited, so no launcher holds it.
+            if self.detached(name, instance)? {
+                return Ok(());
+            }
             if !self.owner_active(name)? {
                 if Instant::now() < grace {
                     bail!("environment {name} has no running launcher yet");
