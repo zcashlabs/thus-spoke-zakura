@@ -98,6 +98,10 @@ such release, explicit native installation fails; the installer's default
 default remains Docker for script compatibility; use `start --native` or
 `run --native` to select the new backend.
 
+Tell users upgrading from older launchers to rerun the public installer for
+native support. Those launchers embed their previous installer and cannot
+fetch a native bundle through their existing `ths update` implementation.
+
 ## Image contract
 
 The launcher always selects these exact tags using its compiled Cargo version:

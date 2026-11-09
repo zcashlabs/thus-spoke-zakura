@@ -39,6 +39,10 @@ version verifies its files and refuses to overwrite a modified bundle. Uninstall
 removes only the launcher; remove unused bundles manually after their instances
 have stopped.
 
+When moving from a launcher released before native support, rerun the public
+installer above. Older launchers embed their original installer, so their
+`ths update` command does not install native bundles.
+
 The rest of this chapter walks through Docker startup. Its fixed ports,
 containers, images, and volumes apply to Docker; the wallet and API behavior
 is shared by both backends. Native shutdown asks its owning launcher to stop
