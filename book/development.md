@@ -60,6 +60,77 @@ and settlement, not the child runtime. Use non-interactive commands. The
 recovery metadata. To wait for an instance already started in another terminal,
 use `cargo run -p thus-spoke-zakura -- --name alice wait --timeout 180`.
 
+## Local native prototype (no Docker)
+
+`tools/native_run.py` runs the existing services as local processes. It is a
+prototype for a future native launcher: the installed `ths` commands still use
+Docker. Use Python 3.11+, Rust 1.98, Node 24, Go 1.25 or newer (with automatic
+toolchain downloads enabled), `lsof` (included with macOS; install it on Linux),
+and the native compiler tools needed by Zakura.
+The commands below build the same versions as the current Docker images.
+
+Zakura's [1.7.0 release](https://github.com/zakura-core/zakura/releases/tag/v1.7.0)
+publishes Linux archives, but no macOS archive. The pinned lightwalletd revision
+also needs a local build. This prototype accepts already-built executables;
+it does not download or verify release artifacts.
+
+From a fresh checkout, build once:
+
+```console
+mkdir -p .local-native/bin
+git clone --depth 1 --branch v1.7.0 https://github.com/zakura-core/zakura.git .local-native/zakura
+cargo +1.98.0 build --manifest-path .local-native/zakura/Cargo.toml --locked --release -p zakura --bin zakurad --features internal-miner
+git clone https://github.com/zcash/lightwalletd.git .local-native/lightwalletd
+git -C .local-native/lightwalletd checkout --detach d79cd1100575ff909d70e00d5514a4092df94934
+(cd .local-native/lightwalletd && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ../bin/lightwalletd ./)
+cargo build --locked --profile dev-runtime -p ths-server
+ln -s ../zakura/target/release/zakurad .local-native/bin/zakurad
+ln -s ../../target/dev-runtime/ths-server .local-native/bin/ths-server
+npm ci --prefix web
+npm run build --prefix web
+```
+
+Run the dashboard in the foreground, or run an application test:
+
+```console
+python3 tools/native_run.py --bin-dir .local-native/bin --state-dir .local-native/dashboard
+python3 tools/native_run.py --bin-dir .local-native/bin --state-dir .local-native/smoke -- python3 tests/native_smoke.py
+python3 tests/native_runtime.py
+```
+
+The `native-runtime` CI job runs these lifecycle tests on Linux using disposable
+stand-in executables; it needs no Docker daemon or real node binaries. The live
+smoke test remains opt-in and uses the native services built above.
+
+Each state path must be new; its parent must already exist. The runner creates
+it with private permissions, initializes the existing development wallet, and
+prints endpoints only after the node, indexer, and wallet settle. All listeners
+bind to `127.0.0.1`, including lightwalletd's metrics listener. The node uses the
+legacy TCP peer stack explicitly, disabling Zakura's additional QUIC listener.
+Mining is manual; use the existing HTTP APIs to mine, send, reorganize, or roll
+back. Startup defaults to 180 seconds; change it with `--timeout SECONDS`.
+
+The application after `--` receives `THS_INSTANCE`, `THS_NETWORK`, `THS_API_URL`,
+`THS_ZAKURA_RPC_URL`, `THS_LIGHTWALLETD_URL`, `THS_LIGHTWALLETD_TLS`, and
+`THS_P2P_ADDR`, matching `ths run`. Its exit code is preserved. Ctrl+C, SIGTERM,
+startup failure, or a service exiting stops the owned processes and application
+process group. A normal application exit also stops its remaining descendants.
+State and logs remain under the requested path for inspection; nothing from
+another instance is deleted. `endpoints.json` is a record of that run, not proof
+that its services are still alive. Wallet settlement and payment-journal
+confirmation are separate conditions; the smoke test waits for both.
+
+Limits: macOS/Linux only, with live verification currently on Apple Silicon.
+No native `ths start/stop/endpoints` registration, installer, signed binary
+bundle, or recovery after SIGKILL is provided. A process that daemonizes into
+a different session escapes this prototype's process-group cleanup. Ports are
+reserved during initialization, then released for each binary to bind; another
+process can race that handoff, causing startup failure. The runner verifies
+the expected process owns each listener with `lsof` before probing it or
+starting dependent services, so it cannot adopt a foreign Regtest node merely
+because that node returns the expected genesis hash. Production distribution
+still needs platform qualification and durable process recovery.
+
 ## Find the part you need to change
 
 | Need | Start reading |

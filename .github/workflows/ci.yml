@@ -7,6 +7,16 @@ permissions:
   contents: read
 
 jobs:
+  native-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install process inspection tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y lsof procps
+      - name: Test native process lifecycle without Docker or node binaries
+        run: python3 tests/native_runtime.py
+
   rust:
     runs-on: ubuntu-latest
     steps:
