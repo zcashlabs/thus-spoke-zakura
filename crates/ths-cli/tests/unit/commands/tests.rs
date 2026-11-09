@@ -23,7 +23,7 @@ fn parses_wait_and_run_without_reusing_the_default_name() {
     assert!(run.name.is_none());
     assert!(matches!(
         run.command,
-        Some(Command::Run { timeout: 120, command })
+        Some(Command::Run { timeout: 120, command, .. })
             if command == [OsString::from("npm"), OsString::from("test")]
     ));
 

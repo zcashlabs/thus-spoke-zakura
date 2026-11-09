@@ -80,3 +80,19 @@ fn prints_mnemonic_and_exactly_five_user_account_keys() {
     }
     assert!(!output.contains("Account 6:"));
 }
+
+#[test]
+fn native_config_keeps_all_network_listeners_local() {
+    let native = crate::args::NativeInit {
+        native_chain_dir: Some(std::path::PathBuf::from("/tmp/chain \"x\"")),
+        native_rpc_port: Some(12345),
+        native_p2p_port: Some(12346),
+    };
+    let config = configured_zakura("tm-miner", &native).unwrap();
+    assert!(config.contains("p2p_stack = \"legacy\""));
+    assert!(config.contains("listen_addr = \"127.0.0.1:12345\""));
+    assert!(config.contains("listen_addr = \"127.0.0.1:12346\""));
+    assert!(!config.contains("0.0.0.0"));
+    assert!(config.contains("cache_dir = \"/tmp/chain \\\"x\\\"\""));
+    assert!(config.contains("network = \"Regtest\""));
+}

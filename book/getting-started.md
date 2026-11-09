@@ -4,11 +4,48 @@ In this chapter you will start one private chain, identify its endpoints, and
 watch a second one be thrown away. The next chapter will explain what the
 three services behind those endpoints do.
 
-An **instance** is one named set of Docker containers, a private Docker
-network, volumes, and host ports. The default name is `default`. Starting it
+An **instance** is one named set of services, data, and loopback ports. It can
+use native processes or Docker containers. The default name is `default`. Starting it
 again creates a **fresh** chain and wallet after cleanup succeeds; stopping
 it requests deletion of its data. Check the command result before assuming
 cleanup completed.
+
+## Start without Docker
+
+For a release with native bundles, the installer verifies and installs the
+launcher, Zakura, lightwalletd, `ths-server`, and dashboard together:
+
+```console
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=native sh
+ths doctor --native
+ths start --native --no-open
+```
+
+This path needs neither Docker nor Python. Keep the launcher terminal open.
+Native startup chooses free loopback ports; read them with `ths endpoints
+--json`. Ordinary commands such as `ths wallet`, `ths mine`, `ths reorg`,
+`ths wait`, and `ths stop` use the recorded backend automatically. A second
+native instance only needs a different name: `ths --name alice start --native`.
+
+The runtime lives beside the installed executable under `.ths-runtime/<version>`.
+`--runtime-dir DIR` or `THS_RUNTIME_DIR` selects a locally built bundle. The
+launcher checks its version, platform, and component pins before startup. See
+[development](development.md) to build from source before native assets have
+been published.
+
+Updates install the new immutable runtime before replacing the launcher.
+Previous bundles remain available to running instances. Reinstalling the same
+version verifies its files and refuses to overwrite a modified bundle. Uninstall
+removes only the launcher; remove unused bundles manually after their instances
+have stopped.
+
+The rest of this chapter walks through Docker startup. Its fixed ports,
+containers, images, and volumes apply to Docker; the wallet and API behavior
+is shared by both backends. Native shutdown asks its owning launcher to stop
+the services and delete that instance's data. If the owner has died, THS retains
+the data and reports uncertain cleanup instead of trusting stored process IDs.
+
+## Docker startup
 
 An **image** is the built template from which Docker starts a container;
 changing source files does not alter an image that already exists.
@@ -47,7 +84,7 @@ release archive's SHA-256 digest, installs `ths` in `~/.local/bin` by default,
 and pulls matching runtime images:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
 ths --version
 ths doctor
 ```
@@ -57,13 +94,15 @@ request an exact release version, such as **0.3.0**, set `THS_VERSION` on
 the installer process:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_VERSION=0.3.0 sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_VERSION=0.3.0 THS_INSTALL_RUNTIME=docker sh
 ```
 
-The installer reads three environment variables: `THS_INSTALL_DIR` chooses the
+The installer reads these environment variables: `THS_INSTALL_DIR` chooses the
 destination directory (default `~/.local/bin`), `THS_VERSION` installs an exact
-release instead of the latest, and `THS_SKIP_IMAGE_PULL=1` skips the image
-download. The image pull happens **before** the binary is moved into place, so
+release instead of the latest. `THS_INSTALL_RUNTIME` accepts `auto` (the default:
+native when the release includes bundles, otherwise Docker), `native`, `docker`,
+or `none` (launcher only). `THS_SKIP_IMAGE_PULL=1` skips the Docker image
+download. In Docker mode the image pull happens **before** the binary is moved into place, so
 if Docker is not running the installer aborts with nothing installed. Start
 Docker first, or install with `THS_SKIP_IMAGE_PULL=1` and run `ths pull` later.
 

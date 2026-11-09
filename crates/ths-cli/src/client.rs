@@ -456,14 +456,21 @@ impl Runtime {
         name: &InstanceName,
         timeout: Duration,
     ) -> Result<(String, reqwest::blocking::Client)> {
+        let instance = self.read_instance(name)?;
+        if instance.backend == crate::runtime::Backend::Native {
+            self.native_validate(name, &instance)?;
+        }
         let app_container = format!("{}-app", prefix(name));
-        if !container_running(&app_container)? {
+        if instance.backend == crate::runtime::Backend::Docker
+            && !container_running(&app_container)?
+        {
             bail!("environment {name} is not running; start it with `ths --name {name}`");
         }
-        let dashboard = self.read_instance(name)?.endpoints.dashboard;
+        let dashboard = instance.endpoints.dashboard;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok((dashboard, client))
     }

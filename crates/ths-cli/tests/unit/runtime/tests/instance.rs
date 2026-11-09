@@ -244,6 +244,7 @@ fn environment(name: &str, states: [&str; 4]) -> EnvironmentStatus {
         .collect::<Vec<_>>();
     EnvironmentStatus {
         instance: Instance {
+            backend: Backend::Docker,
             name: name.into(),
             version: 1,
             endpoints: endpoints_for(&HostPorts {

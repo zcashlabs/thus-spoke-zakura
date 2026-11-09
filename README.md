@@ -1,7 +1,7 @@
 # Thus Spoke Zakura 🌸
 
 Run a disposable Zcash Regtest network on your machine. `ths` starts Zakura,
-lightwalletd, and a wallet-backed dashboard in Docker.
+lightwalletd, and a wallet-backed dashboard as native processes or in Docker.
 
 ![Wallet dashboard with five development accounts](book/images/wallet.png)
 
@@ -11,14 +11,20 @@ lightwalletd, and a wallet-backed dashboard in Docker.
 
 ## Install and start
 
-On macOS or Linux (Intel or ARM), start Docker Desktop or Docker Engine. Run
-`docker version` and check that the **Server** section responds without `sudo`.
-Then install the launcher and start an instance:
+On macOS or Linux (Intel or ARM), install the launcher and its matching native
+runtime. This mode needs no Docker or Python:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
-ths
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=native sh
+ths start --native
 ```
+
+Native installation requires a release containing native runtime archives.
+For a source checkout, see [native builds](book/development.md). To use Docker,
+install with `THS_INSTALL_RUNTIME=docker`, start Docker, and run `ths`.
+The default installer selects native bundles when available and uses Docker
+for older releases. Existing commands keep Docker as their default; `--native`
+selects native startup, and later commands find the instance automatically.
 
 Startup may take a few minutes while the chain and wallet are prepared.
 When `ths` prints `default is ready`, it opens the dashboard. Keep that terminal
@@ -54,7 +60,7 @@ blocks or `ths rollback --depth 3` to remove them. See the
 ## Stop and clean up
 
 Press Ctrl+C in the terminal running `ths`. It attempts to delete that
-instance's containers, chain, keys, and wallet data. Check the command result:
+instance's processes or containers, chain, keys, and wallet data. Check the command result:
 if cleanup fails, keep any recovery files that exist and follow the
 [troubleshooting guide](book/troubleshooting.md).
 

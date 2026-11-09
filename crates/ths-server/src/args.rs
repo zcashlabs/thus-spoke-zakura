@@ -16,9 +16,21 @@ pub(crate) enum Command {
         data_dir: PathBuf,
         #[arg(long, default_value = "/config")]
         config_dir: PathBuf,
+        #[command(flatten)]
+        native: NativeInit,
     },
     Serve {
         #[arg(long, default_value = "/data")]
         data_dir: PathBuf,
     },
+}
+
+#[derive(clap::Args, Default)]
+pub(crate) struct NativeInit {
+    #[arg(long, requires_all = ["native_rpc_port", "native_p2p_port"])]
+    pub(crate) native_chain_dir: Option<PathBuf>,
+    #[arg(long, requires = "native_chain_dir", value_parser = clap::value_parser!(u16).range(1..))]
+    pub(crate) native_rpc_port: Option<u16>,
+    #[arg(long, requires = "native_chain_dir", value_parser = clap::value_parser!(u16).range(1..))]
+    pub(crate) native_p2p_port: Option<u16>,
 }

@@ -122,6 +122,7 @@ fn separates_building_from_starting() {
             block_time: None,
             mine_on_mempool: false,
             no_auto_mine: false,
+            ..
         })
     ));
 
@@ -633,6 +634,41 @@ fn wallet_tx_takes_a_transaction_id_and_an_optional_account() {
         vec!["ths", "wallet", "tx", &"zz".repeat(32)],
         vec!["ths", "wallet", "tx", &txid, "--account", "6"],
         vec!["ths", "wallet", "tx", &txid, "--account", "0"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn native_runtime_flags_and_positive_timeout() {
+    for args in [
+        vec![
+            "ths",
+            "start",
+            "--native",
+            "--runtime-dir",
+            "/bundle",
+            "--timeout",
+            "180",
+        ],
+        vec![
+            "ths",
+            "run",
+            "--native",
+            "--runtime-dir",
+            "/bundle",
+            "--",
+            "true",
+        ],
+        vec!["ths", "doctor", "--native", "--runtime-dir", "/bundle"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+    }
+    for args in [
+        vec!["ths", "start", "--runtime-dir", "/bundle"],
+        vec!["ths", "start", "--timeout", "1"],
+        vec!["ths", "start", "--native", "--timeout", "0"],
+        vec!["ths", "run", "--native", "--timeout", "0", "--", "true"],
     ] {
         assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
     }

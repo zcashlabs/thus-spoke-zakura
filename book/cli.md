@@ -1,6 +1,6 @@
 # Appendix A: `ths` CLI reference
 
-`ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
+`ths` is the Thus Spoke Zakura launcher. It manages native or Docker-based Regtest
 environment and, once an environment is running, talks to its dashboard API or
 Zakura JSON-RPC on your behalf. This page documents every command in detail,
 with examples.
@@ -62,6 +62,21 @@ each host port (default: `0`), and must be a multiple of 10. It is not multiplie
 by 10; the result must fit a valid nonzero host port. Startup fails and names an occupied port
 instead of selecting a random port.
 
+Use `--native` to start installed local binaries without Docker. With native
+startup, a zero `--port-offset` allocates free loopback ports; a nonzero offset
+uses the same fixed port calculation described above. `--runtime-dir <DIR>`
+requires `--native` and selects a compatible local bundle; otherwise
+`THS_RUNTIME_DIR` or the installed `.ths-runtime/<version>` bundle is used.
+Native-only `--timeout <SECONDS>` is a positive integer and defaults to 180.
+It bounds initialization, readiness, and settlement together. Native
+`--json start` writes exactly one endpoint object after settlement, keeps
+running in the foreground, and writes diagnostics to stderr.
+
+```console
+ths --name native --json start --native --no-open --no-auto-mine
+ths start --native --runtime-dir /path/to/ths-runtime --timeout 240
+```
+
 `start` also selects the instance's **mining mode**. Exactly one mode is active
 for the whole server lifetime, so the flags below are mutually exclusive:
 
@@ -118,6 +133,12 @@ failures are reported.
 ```console
 ths run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
 ```
+
+`run --native [--runtime-dir <DIR>]` uses local binaries and free loopback
+ports with the same runner environment, automatic mining, timeout, and exit-code
+contract. It also stops remaining application descendants on normal exit.
+Native failures retain logs; if the owner was killed before verifying cleanup,
+`stop` retains state and refuses to signal stale PIDs.
 
 The child inherits standard streams and the calling directory, but `run`
 supports non-interactive commands: it creates a separate process group without
@@ -301,6 +322,9 @@ ths list
 
 ### `ths doctor [--json]`
 
+`doctor --native [--runtime-dir <DIR>]` validates the native bundle and local
+listener-inspection prerequisite without starting services or contacting Docker.
+
 Checks that Docker is reachable and prints the launcher's configuration
 directory. If Docker is unreachable, the command exits nonzero in both output
 modes. With `--json`, stdout still contains one diagnostic JSON object with
@@ -326,8 +350,15 @@ ths uninstall
 the installer downloads a published release, not a build of recorded main.
 An explicit VERSION conflicts with `--check`.
 
-`uninstall` removes only the installed executable. Images and launcher
-configuration remain. Capture the real directory **before** uninstalling.
+`update` uses the verified installer: native releases install a matching immutable
+versioned runtime before replacing the launcher. Older runtime bundles remain
+available to already-running instances. Historical releases without a native
+archive retain the Docker installation path; `THS_INSTALL_RUNTIME=native`
+requires a native archive.
+
+`uninstall` removes only the installed executable. Native runtime bundles,
+images, and launcher configuration remain. Stop running instances before
+manually removing unused bundles under `.ths-runtime/`. Capture the real directory **before** uninstalling.
 The image tags below match this book's source baseline; inspect your selected
 launcher's tags before removing shared images used by other instances.
 

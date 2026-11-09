@@ -8,14 +8,19 @@ permissions:
 
 jobs:
   native-runtime:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install process inspection tools
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y lsof procps
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Test native process lifecycle without Docker or node binaries
-        run: python3 tests/native_runtime.py
+        run: cargo test -p thus-spoke-zakura --test native_runtime
 
   rust:
     runs-on: ubuntu-latest
@@ -105,6 +110,8 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run build
+      - run: node --test tests/native_package.mjs
+        working-directory: .
 
   activity-recovery:
     runs-on: ubuntu-latest

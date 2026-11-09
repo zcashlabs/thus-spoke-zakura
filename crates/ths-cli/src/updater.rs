@@ -93,7 +93,7 @@ pub fn uninstall() -> Result<ExitCode> {
     let launcher = installed_launcher()?;
     remove_installed_executable(&launcher)?;
     println!("Uninstalled ths from {}.", launcher.display());
-    println!("Cached Docker images and configuration were left in place.");
+    println!("Native runtime bundles, cached Docker images, and configuration were left in place.");
     Ok(ExitCode::SUCCESS)
 }
 
