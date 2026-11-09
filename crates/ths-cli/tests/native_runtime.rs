@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::OnceLock,
@@ -202,6 +202,98 @@ fn native_start_stop_status_and_concurrent_instances_without_docker() {
     );
     assert!(wait(&mut b).success());
 }
+#[test]
+fn native_browser_failure_keeps_environment_running_until_stop() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in ["missing", "failed"] {
+        let fixture = Fixture::new("normal");
+        let name = "browser-failure";
+        let opener_dir = fixture.temp.path().join("opener");
+        fs::create_dir(&opener_dir).unwrap();
+        if mode == "failed" {
+            let opener = opener_dir.join(if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            });
+            fs::write(&opener, "#!/bin/sh\necho opener-output\nexit 7\n").unwrap();
+            fs::set_permissions(opener, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let stderr_path = fixture.temp.path().join("launcher-stderr");
+        let mut child = fixture
+            .command(name)
+            .env("PATH", &opener_dir)
+            .args([
+                "--json",
+                "start",
+                "--native",
+                "--timeout",
+                "8",
+                "--runtime-dir",
+            ])
+            .arg(fixture.temp.path())
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut output = String::new();
+        stdout.read_line(&mut output).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let warning = loop {
+            let stderr = fs::read_to_string(&stderr_path).unwrap();
+            if stderr.contains("could not open the dashboard automatically") {
+                break true;
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let running = child.try_wait().unwrap().is_none();
+        let status = fixture
+            .command(name)
+            .args(["--json", "status"])
+            .output()
+            .unwrap();
+        let stopped = fixture.command(name).arg("stop").output().unwrap();
+        let exit = wait(&mut child);
+        stdout.read_to_string(&mut output).unwrap();
+        let stderr = fs::read_to_string(&stderr_path).unwrap();
+
+        assert!(
+            running,
+            "{mode} browser opener stopped the environment: {stderr}"
+        );
+        assert!(
+            warning,
+            "{mode} browser opener failure was not reported: {stderr}"
+        );
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        assert!(exit.success(), "{mode}: {exit}: {stderr}");
+        let endpoints: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(endpoints["network"], "regtest");
+        assert!(
+            !fixture
+                .command(name)
+                .arg("endpoints")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+}
+
 #[test]
 fn native_initialization_and_slow_http_have_absolute_deadlines() {
     for mode in ["init-hang", "drip"] {

@@ -72,6 +72,10 @@ It bounds initialization, readiness, and settlement together. Native
 `--json start` writes exactly one endpoint object after settlement, keeps
 running in the foreground, and writes diagnostics to stderr.
 
+If opening the browser fails, startup prints a warning and keeps the environment
+running. Open the printed dashboard URL yourself, or use `--no-open` to skip
+opening a browser.
+
 ```console
 ths --name native --json start --native --no-open --no-auto-mine
 ths start --native --runtime-dir /path/to/ths-runtime --timeout 240

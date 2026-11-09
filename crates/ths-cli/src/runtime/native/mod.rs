@@ -251,8 +251,15 @@ impl Runtime {
                 } else {
                     eprintln!("{name} ready\n{}", endpoint_lines(&endpoints));
                 }
-                if !no_open {
-                    open_url(&endpoints.dashboard)?;
+                if !no_open
+                    && let Err(error) = open_url_with(&endpoints.dashboard, &shutdown, &context)
+                    && !shutdown.try_interrupted()
+                {
+                    eprintln!("Warning: could not open the dashboard automatically: {error:#}");
+                    eprintln!(
+                        "The {name} environment is still running at {}. Run `ths --name {name} open` to open it later.",
+                        endpoints.dashboard,
+                    );
                 }
             }
             let child = if let Some(command) = application {
