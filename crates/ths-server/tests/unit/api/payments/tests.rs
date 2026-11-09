@@ -497,6 +497,55 @@ async fn faucet_rejects_a_unified_address_with_sapling_but_no_orchard_receiver()
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
 }
 
+#[tokio::test]
+async fn address_faucet_for_a_sapling_only_address_survives_reopen_and_retry() {
+    // Saved under the faucet's older, looser destination-pool rule, before a
+    // Sapling receiver without Orchard was rejected for new submissions.
+    // Checking or retrying it must keep working. Regression for
+    // https://github.com/zcashlabs/thus-spoke-zakura/pull/444#issuecomment-6737021641.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+    let address = sapling_only_unified_address(&regtest_network());
+    let claimed = store
+        .claim_address_faucet(&address, 100_000, "sapling-only-retry")
+        .unwrap();
+    store
+        .record_address_prepared(&claimed.id, "original-txid", b"signed bytes", 140)
+        .unwrap();
+    store
+        .mark_address_broadcast(&claimed.id, "original-txid")
+        .unwrap();
+    store
+        .confirm_address(&claimed.id, "original-txid", "original-block")
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+    let wallet = RealWallet::open(dir.path(), &store.seed().unwrap()).unwrap();
+    let state = AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into());
+    state.mark_started();
+
+    let (status, response) = api_get(
+        &state,
+        "/api/v1/faucet/address?idempotency_key=sapling-only-retry",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], "confirmed");
+    assert_eq!(response["txid"], "original-txid");
+    assert_eq!(response["block_hash"], "original-block");
+
+    let body = json!({"address": address, "amount_zatoshi": 100_000,
+        "idempotency_key": "sapling-only-retry"});
+    let (status, response) = api_request(&state, "POST", "/api/v1/faucet/address", body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], "confirmed");
+    assert_eq!(response["txid"], "original-txid");
+}
+
 /// A state with a real store and offline wallet whose node RPC refuses
 /// connections, so any synchronization or network access surfaces as a
 /// 500 rather than the 400 or replay these tests expect.

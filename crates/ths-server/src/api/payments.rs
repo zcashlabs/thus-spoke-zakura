@@ -364,8 +364,10 @@ fn faucet_address_response(
 fn external_faucet_response(payment: AddressFaucet) -> anyhow::Result<FaucetAddressResponse> {
     let address = Address::decode(&regtest_network(), &payment.address)
         .context("stored address faucet payment has an unparsable address")?;
-    let destination_pool = faucet_destination_pool(&address)
-        .context("stored address faucet payment has an unsupported destination pool")?;
+    // A stored payment may predate the rule rejecting a Sapling receiver
+    // without Orchard; report it the same way the server did when it was
+    // accepted, rather than erroring on an already-settled payment.
+    let destination_pool = faucet_destination_pool(&address).unwrap_or("ironwood");
     Ok(FaucetAddressResponse {
         destination_pool,
         address: payment.address,
@@ -461,16 +463,19 @@ pub(crate) async fn faucet_address(
             "amount must be greater than zero and no more than 5 ZEC",
         ));
     }
-    let pool = require_faucet_destination_pool(&address)?;
-    require_non_dust_amount(req.amount_zatoshi, pool == "transparent")?;
     // An existing external claim keeps its store even if the address later
-    // becomes a development-account address.
-    let destination = if state
+    // becomes a development-account address, and retries one already
+    // accepted under the faucet's older, looser destination-pool rule.
+    let existing_external_claim = state
         .0
         .store
         .address_faucet_for_key(&req.idempotency_key)?
-        .is_some()
-    {
+        .is_some();
+    if !existing_external_claim {
+        let pool = require_faucet_destination_pool(&address)?;
+        require_non_dust_amount(req.amount_zatoshi, pool == "transparent")?;
+    }
+    let destination = if existing_external_claim {
         None
     } else {
         internal_faucet_destination(&state.0.store, &req.address)?
