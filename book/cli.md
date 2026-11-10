@@ -72,6 +72,11 @@ It bounds initialization, readiness, and settlement together. Native
 `--json start` writes exactly one endpoint object after settlement, keeps
 running in the foreground, and writes diagnostics to stderr.
 
+Ctrl+C, SIGTERM, and terminal closure (SIGHUP) stop native services and delete
+the instance after cleanup is verified, including during startup. The same name
+can then be started again. Other startup failures retain logs for inspection;
+failed or uncertain cleanup retains state.
+
 If opening the browser fails, startup prints a warning and keeps the environment
 running. Open the printed dashboard URL yourself, or use `--no-open` to skip
 opening a browser.
@@ -141,7 +146,8 @@ ths run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
 `run --native [--runtime-dir <DIR>]` uses local binaries and free loopback
 ports with the same runner environment, automatic mining, timeout, and exit-code
 contract. It also stops remaining application descendants on normal exit.
-Native failures retain logs; if the owner was killed before verifying cleanup,
+Native failures retain logs, except requested interruption after verified cleanup.
+If the owner was killed before verifying cleanup,
 `stop` retains state and refuses to signal stale PIDs.
 
 The child inherits standard streams and the calling directory, but `run`
@@ -354,11 +360,12 @@ ths uninstall
 the installer downloads a published release, not a build of recorded main.
 An explicit VERSION conflicts with `--check`.
 
-`update` uses the verified installer: native releases install a matching immutable
-versioned runtime before replacing the launcher. Older runtime bundles remain
-available to already-running instances. Historical releases without a native
-archive retain the Docker installation path; `THS_INSTALL_RUNTIME=native`
-requires a native archive.
+`update` uses the verified installer. Its default `auto` mode pulls the matching
+Docker images, consistent with the CLI default, even when the release includes
+native archives. For native installations, use `THS_INSTALL_RUNTIME=native ths
+update`: it installs a matching immutable runtime before replacing the launcher.
+Older bundles remain available to already-running instances. Explicit native
+installation requires a release containing a native archive.
 
 `uninstall` removes only the installed executable. Native runtime bundles,
 images, and launcher configuration remain. Stop running instances before

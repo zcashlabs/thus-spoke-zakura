@@ -293,10 +293,7 @@ impl Runtime {
         })();
         let cleanup = processes.stop_all();
         if cleanup.is_ok() {
-            if primary
-                .as_ref()
-                .is_ok_and(|code| *code == 0 || shutdown.try_interrupted())
-            {
+            if shutdown.try_interrupted() || primary.as_ref().is_ok_and(|code| *code == 0) {
                 fs::remove_dir_all(&state)?;
             } else {
                 fs::write(

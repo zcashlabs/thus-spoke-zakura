@@ -57,6 +57,8 @@ fn main() {
             std::process::exit(7);
         }
         if mode == "init-hang" {
+            fs::write("init.pid.pending", std::process::id().to_string()).unwrap();
+            fs::rename("init.pid.pending", "init.pid").unwrap();
             loop {
                 thread::sleep(Duration::from_secs(1));
             }

@@ -42,12 +42,8 @@ case "$tag" in *[!a-zA-Z0-9.+-]*) echo 'Invalid release version' >&2; exit 1 ;; 
 release_url="https://github.com/$repo/releases/download/$tag"
 curl --proto '=https' --tlsv1.2 -fsSL "$release_url/SHA256SUMS" -o "$stage/SHA256SUMS"
 if [ "$install_runtime" = auto ]; then
-  if awk -v asset="ths-runtime-$target.tar.gz" '{ name=$2; sub(/^\*/, "", name); if (name == asset) found=1 } END { exit !found }' "$stage/SHA256SUMS"; then
-    install_runtime=native
-  else
-    echo "Release $tag predates native bundles; selecting Docker." >&2
-    install_runtime=docker
-  fi
+  # Match the CLI default, including updates from existing Docker installations.
+  install_runtime=docker
 fi
 
 fetch_verified() {

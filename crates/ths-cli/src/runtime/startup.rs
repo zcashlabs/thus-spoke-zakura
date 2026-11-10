@@ -132,6 +132,7 @@ impl Shutdown {
         let mut signals = signal_hook::iterator::Signals::new([
             signal_hook::consts::SIGINT,
             signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
         ])
         .context("installing shutdown signal handlers")?;
         let handle = signals.handle();

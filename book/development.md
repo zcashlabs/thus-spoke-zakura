@@ -105,8 +105,11 @@ with native instances. Native state explicitly records its backend; old state
 without a backend remains Docker state. Services exiting unexpectedly stop the
 application, and cancellation, partial startup, and normal application exit
 clean up owned process groups, including initializer/application descendants.
-Failures retain state and logs for inspection; `stop` deletes that state after
-cleanup has been verified.
+SIGINT, SIGTERM, and SIGHUP delete instance state once cleanup is verified,
+including interruption during initialization, so the same name can be reused.
+Other failures retain state and logs for inspection; `stop` deletes that state
+after cleanup has been verified. The lifecycle regressions check signal cleanup,
+closed listeners, name reuse, and preservation of another running instance.
 
 A launcher killed with SIGKILL cannot verify cleanup. `stop` then retains its
 state and reports uncertainty rather than signaling possibly reused persisted

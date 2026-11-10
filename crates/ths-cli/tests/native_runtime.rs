@@ -89,6 +89,17 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    fn state(&self, name: &str) -> PathBuf {
+        let output = self
+            .command(name)
+            .args(["--json", "doctor", "--native", "--runtime-dir"])
+            .arg(self.temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let doctor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        Path::new(doctor["config_dir"].as_str().unwrap()).join(name)
+    }
     fn start(&self, name: &str) -> (Child, serde_json::Value) {
         let mut child = self
             .command(name)
@@ -356,36 +367,135 @@ fn native_cleans_initializer_and_application_descendants() {
     assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err());
 }
 #[test]
-fn native_service_exit_stops_application_and_signal_stops_startup() {
+fn native_service_exit_stops_application() {
     let fixture = Fixture::new("service-fail");
     let start = Instant::now();
     let output = fixture.run("service-failure", &["/bin/sleep", "30"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("app exited"));
     assert!(start.elapsed() < Duration::from_secs(10));
-    let fixture = Fixture::new("init-hang");
-    let mut child = fixture
-        .command("cancel-start")
-        .args([
-            "start",
-            "--native",
-            "--no-open",
-            "--timeout",
-            "30",
-            "--runtime-dir",
-        ])
-        .arg(fixture.temp.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+}
+
+#[test]
+fn native_interrupted_startup_removes_state_and_allows_the_same_name() {
+    use nix::{
+        sys::signal::{Signal, kill},
+        unistd::Pid,
+    };
+    for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+        let fixture = Fixture::new("init-hang");
+        let state = fixture.state("cancel-start");
+        let mut child = fixture
+            .command("cancel-start")
+            .args([
+                "start",
+                "--native",
+                "--no-open",
+                "--timeout",
+                "30",
+                "--runtime-dir",
+            ])
+            .arg(fixture.temp.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.join("init.pid").exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "startup exited before initialization"
+            );
+            assert!(Instant::now() < deadline, "initializer did not start");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pid = fs::read_to_string(state.join("init.pid"))
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        kill(Pid::from_raw(child.id() as i32), signal).unwrap();
+        let exit = wait(&mut child);
+        let stopped = kill(Pid::from_raw(pid), None) == Err(nix::errno::Errno::ESRCH);
+        if !stopped {
+            // Stop this fixture's group even when testing the old unhandled-HUP bug.
+            nix::sys::signal::killpg(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+        }
+        assert!(!exit.success());
+        assert!(stopped, "{signal}: initializer survived launcher exit");
+        assert!(
+            !state.exists(),
+            "{signal}: interrupted startup retained its instance"
+        );
+
+        let server = fixture.temp.path().join("bin/ths-server");
+        let script = fs::read_to_string(&server)
+            .unwrap()
+            .replace("'init-hang'", "'normal'");
+        fs::write(server, script).unwrap();
+        let output = fixture.run("cancel-start", &["/usr/bin/true"]);
+        assert!(
+            output.status.success(),
+            "{signal}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!state.exists());
+    }
+}
+
+#[test]
+fn native_hangup_stops_services_removes_state_and_preserves_another_instance() {
+    use nix::{
+        sys::signal::{Signal, kill, killpg},
+        unistd::Pid,
+    };
+    let fixture = Fixture::new("normal");
+    let (mut child, endpoints) = fixture.start("hangup");
+    let (mut other, _) = fixture.start("survivor");
+    let state = fixture.state("hangup");
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(state.join("native.json")).unwrap()).unwrap();
+    let pids: Vec<Pid> = record["pids"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|pid| Pid::from_raw(pid.as_i64().unwrap() as i32))
+        .collect();
+    kill(Pid::from_raw(child.id() as i32), Signal::SIGHUP).unwrap();
+    let exit = wait(&mut child);
+    let remaining: Vec<_> = pids
+        .into_iter()
+        .filter(|pid| kill(*pid, None) != Err(nix::errno::Errno::ESRCH))
+        .collect();
+    let listeners_closed = ["dashboard", "rpc", "lightwalletd"].into_iter().all(|key| {
+        let url = reqwest::Url::parse(endpoints[key].as_str().unwrap()).unwrap();
+        std::net::TcpStream::connect(("127.0.0.1", url.port().unwrap())).is_err()
+    });
+    // The regression must also clean up if the launcher still exits without a handler.
+    for pid in &remaining {
+        killpg(*pid, Signal::SIGTERM).unwrap();
+    }
+    let other_running = fixture
+        .command("survivor")
+        .args(["--json", "status"])
+        .output()
         .unwrap();
-    thread::sleep(Duration::from_millis(300));
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.id() as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    )
-    .unwrap();
-    assert!(!wait(&mut child).success());
+    let other_stop = fixture.command("survivor").arg("stop").output().unwrap();
+    let other_exit = wait(&mut other);
+
+    assert_eq!(exit.code(), Some(129));
+    assert!(
+        remaining.is_empty(),
+        "native services survived SIGHUP: {remaining:?}"
+    );
+    assert!(
+        listeners_closed,
+        "native listeners remained open after SIGHUP"
+    );
+    assert!(!state.exists());
+    assert!(other_running.status.success());
+    assert!(other_stop.status.success());
+    assert!(other_exit.success());
+    assert!(fixture.run("hangup", &["/usr/bin/true"]).status.success());
 }
 
 #[test]

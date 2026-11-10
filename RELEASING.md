@@ -93,10 +93,11 @@ beside `ths`, and replaces the launcher last. A modified same-version runtime
 is never overwritten; publish a new patch version for corrections.
 
 Native assets must be attached to the draft before publishing. Until the first
-such release, explicit native installation fails; the installer's default
-`auto` mode retains Docker installation for historical releases. The CLI's
-default remains Docker for script compatibility; use `start --native` or
-`run --native` to select the new backend.
+such release, explicit native installation fails. The installer's default
+`auto` mode selects Docker even when native archives are available, matching
+the CLI default and preserving existing users' update behavior. Use
+`THS_INSTALL_RUNTIME=native` to install native bundles, then `start --native`
+or `run --native` to select the new backend.
 
 Tell users upgrading from older launchers to rerun the public installer for
 native support. Those launchers embed their previous installer and cannot
