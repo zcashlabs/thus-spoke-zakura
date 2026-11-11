@@ -183,6 +183,11 @@ impl RealWallet {
                 required,
             }) => {
                 let (available, required) = (u64::from(available), u64::from(required));
+                let available = if source_pool == "transparent" {
+                    Self::transparent_spendable(db, account_id)?
+                } else {
+                    available
+                };
                 if source_pool == "ironwood"
                     && let Some(height) =
                         Self::pending_anchor_height(db, account_id, available, required, None)?
@@ -397,6 +402,34 @@ impl RealWallet {
             .await
     }
 
+    fn transparent_spendable<DbT>(
+        db: &mut DbT,
+        account_id: <DbT as InputSource>::AccountId,
+    ) -> Result<u64>
+    where
+        DbT: ProposalDb,
+    {
+        let (target_height, _) = db
+            .get_target_and_anchor_heights(ConfirmationsPolicy::MIN.trusted())?
+            .ok_or_else(|| anyhow::Error::new(PaymentError::ScanRequired))?;
+        db.select_spendable_transparent_outputs(
+            account_id,
+            target_height,
+            ConfirmationsPolicy::MIN,
+            CoinbaseFilter::NonCoinbaseOnly,
+            None,
+            TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+            MAX_TRANSPARENT_INPUTS,
+            &StandardFeeRule::Zip317,
+            LockFilter::Policy(&LockedInputPolicy::Exclude),
+        )?
+        .into_iter()
+        .try_fold(0u64, |total, utxo| {
+            total.checked_add(u64::from(utxo.value()))
+        })
+        .context("transparent balance exceeds the maximum money supply")
+    }
+
     fn quote<DbT>(
         db: &mut DbT,
         params: &LocalNetwork,
@@ -460,26 +493,7 @@ impl RealWallet {
                 Err(error) => Err(anyhow::anyhow!("proposing max spend: {error}")),
             }
         } else if source_pool == "transparent" {
-            let (target_height, _) = db
-                .get_target_and_anchor_heights(ConfirmationsPolicy::MIN.trusted())?
-                .ok_or_else(|| anyhow::Error::new(PaymentError::ScanRequired))?;
-            let spendable = db
-                .select_spendable_transparent_outputs(
-                    account_id,
-                    target_height,
-                    ConfirmationsPolicy::MIN,
-                    CoinbaseFilter::NonCoinbaseOnly,
-                    None,
-                    TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-                    MAX_TRANSPARENT_INPUTS,
-                    &StandardFeeRule::Zip317,
-                    LockFilter::Policy(&LockedInputPolicy::Exclude),
-                )?
-                .into_iter()
-                .try_fold(0u64, |total, utxo| {
-                    total.checked_add(u64::from(utxo.value()))
-                })
-                .context("transparent balance exceeds the maximum money supply")?;
+            let spendable = Self::transparent_spendable(db, account_id)?;
             // There is no send-max proposal for transparent inputs, but the
             // failed proposal still reports the fee for spending them all.
             let probe_amount = spendable.max(1);
