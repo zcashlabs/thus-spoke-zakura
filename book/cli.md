@@ -360,12 +360,14 @@ ths uninstall
 the installer downloads a published release, not a build of recorded main.
 An explicit VERSION conflicts with `--check`.
 
-`update` uses the verified installer. Its default `auto` mode pulls the matching
-Docker images, consistent with the CLI default, even when the release includes
-native archives. For native installations, use `THS_INSTALL_RUNTIME=native ths
-update`: it installs a matching immutable runtime before replacing the launcher.
-Older bundles remain available to already-running instances. Explicit native
-installation requires a release containing a native archive.
+`update` uses the verified installer. Its default `auto` mode detects a native
+installation from the `.ths-runtime` directory beside the launcher and installs
+the matching immutable runtime before replacing the launcher. Without that
+directory it pulls the matching Docker images. `THS_INSTALL_RUNTIME=native`,
+`docker`, or `none` overrides detection. Older bundles remain available to
+already-running instances, so `auto` continues to select native while that
+directory exists. A missing or invalid native archive aborts the update and
+leaves the current launcher unchanged; it never silently switches to Docker.
 
 `uninstall` removes only the installed executable. Native runtime bundles,
 images, and launcher configuration remain. Stop running instances before

@@ -33,7 +33,7 @@ launcher checks its version, platform, and component pins before startup. See
 [development](development.md) to build from source before native assets have
 been published.
 
-Use `THS_INSTALL_RUNTIME=native ths update` to update a native installation.
+Use `ths update` to update a native installation.
 It installs the new immutable runtime before replacing the launcher.
 Previous bundles remain available to running instances. Reinstalling the same
 version verifies its files and refuses to overwrite a modified bundle. Uninstall
@@ -104,9 +104,12 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlab
 
 The installer reads these environment variables: `THS_INSTALL_DIR` chooses the
 destination directory (default `~/.local/bin`), `THS_VERSION` installs an exact
-release instead of the latest. `THS_INSTALL_RUNTIME` accepts `auto` (the default:
-Docker, matching the CLI default), `native`, `docker`,
-or `none` (launcher only). `THS_SKIP_IMAGE_PULL=1` skips the Docker image
+release instead of the latest. `THS_INSTALL_RUNTIME` accepts `auto` (the default),
+`native`, `docker`, or `none` (launcher only). `auto` selects native when the
+destination contains a `.ths-runtime` directory; otherwise it selects Docker.
+Explicit choices override that detection without removing older bundles. Native
+updates fail without replacing the launcher if the matching bundle is missing
+or invalid. `THS_SKIP_IMAGE_PULL=1` skips the Docker image
 download. In Docker mode the image pull happens **before** the binary is moved into place, so
 if Docker is not running the installer aborts with nothing installed. Start
 Docker first, or install with `THS_SKIP_IMAGE_PULL=1` and run `ths pull` later.

@@ -102,11 +102,48 @@ test "$(grep -c '/releases/latest$' "$NATIVE_INSTALL_REQUESTS")" -eq 1
 if grep -q '/latest/download/' "$NATIVE_INSTALL_REQUESTS"; then exit 1; fi
 # An identical version can be installed twice without mutating its runtime.
 THS_VERSION=v9.8.7 "$root/install.sh"
-fixture 9.8.8
-THS_VERSION=v9.8.8 "$root/install.sh"
-test "$("$destination/ths" --version)" = 'ths 9.8.8'
-test -f "$destination/.ths-runtime/9.8.7/manifest.json"
-test -f "$destination/.ths-runtime/9.8.8/manifest.json"
+# A native installation must keep receiving matching bundles on default
+# updates, whether Docker is available or not.
+for selection in default auto; do
+  if [ "$selection" = default ]; then version=9.8.8; allow_pull=0
+  else version=9.8.9; allow_pull=1; fi
+  fixture "$version"
+  : > "$NATIVE_INSTALL_REQUESTS"
+  : > "$NATIVE_INSTALL_PULLS"
+  (
+    if [ "$selection" = default ]; then unset THS_INSTALL_RUNTIME
+    else export THS_INSTALL_RUNTIME=auto; fi
+    THS_VERSION="$version" THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL="$allow_pull" "$root/install.sh"
+  )
+  test "$("$destination/ths" --version)" = "ths $version"
+  test "$(cat "$destination/.ths-runtime/$version/manifest.json")" = "$version"
+  test "$(cat "$destination/.ths-runtime/9.8.7/manifest.json")" = 9.8.7
+  test ! -s "$NATIVE_INSTALL_PULLS"
+done
+
+# A missing or damaged native upgrade must not silently switch to Docker
+# or replace the working launcher and its previous runtime.
+fixture 9.8.10
+cp "$destination/ths" "$tmp/previous-launcher"
+for failure in missing damaged; do
+  if [ "$failure" = missing ]; then
+    sed '/ths-runtime-/d' "$fixtures/SHA256SUMS" > "$fixtures/checksums-old"
+    mv "$fixtures/checksums-old" "$fixtures/SHA256SUMS"
+    expected='Missing or ambiguous checksum for ths-runtime-'
+  else
+    checksums
+    printf 'bad runtime\n' > "$fixtures/ths-runtime-$target.tar.gz"
+    expected='Checksum verification failed for ths-runtime-'
+  fi
+  if (unset THS_INSTALL_RUNTIME; THS_VERSION=9.8.10 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh") > "$tmp/failure.log" 2>&1; then
+    echo "default native upgrade unexpectedly succeeded: $failure bundle" >&2; exit 1
+  fi
+  grep -q "$expected" "$tmp/failure.log"
+  cmp "$destination/ths" "$tmp/previous-launcher"
+  test "$(cat "$destination/.ths-runtime/9.8.9/manifest.json")" = 9.8.9
+  test ! -e "$destination/.ths-runtime/9.8.10"
+  test ! -s "$NATIVE_INSTALL_PULLS"
+done
 
 fixture 9.8.7
 printf '%s\n' old > "$destination/ths"
@@ -175,25 +212,39 @@ rm "$bin/mv"
 THS_VERSION=v9.8.7 "$root/install.sh"
 test "$("$destination/ths" --version)" = 'ths 9.8.7'
 
-# Default installs and updates must prepare the CLI's default Docker backend,
+# Without a native installation, default installs and updates prepare Docker,
 # even when the release also offers native bundles.
 for selection in auto default; do
-  : > "$NATIVE_INSTALL_REQUESTS"
-  : > "$NATIVE_INSTALL_PULLS"
-  (
-    if [ "$selection" = default ]; then unset THS_INSTALL_RUNTIME
-    else export THS_INSTALL_RUNTIME=auto; fi
-    THS_VERSION=v9.8.7 THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
-  )
-  test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
-  if grep -q '/ths-runtime-' "$NATIVE_INSTALL_REQUESTS"; then
-    echo 'default installation unexpectedly downloaded a native runtime' >&2; exit 1
-  fi
+  for version in 9.8.7 9.8.8; do
+    fixture "$version"
+    : > "$NATIVE_INSTALL_REQUESTS"
+    : > "$NATIVE_INSTALL_PULLS"
+    (
+      if [ "$selection" = default ]; then unset THS_INSTALL_RUNTIME
+      else export THS_INSTALL_RUNTIME=auto; fi
+      THS_INSTALL_DIR="$tmp/docker-$selection" THS_VERSION="$version" THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
+    )
+    test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
+    test "$("$tmp/docker-$selection/ths" --version)" = "ths $version"
+    if grep -q '/ths-runtime-' "$NATIVE_INSTALL_REQUESTS"; then
+      echo 'default Docker installation unexpectedly downloaded a native runtime' >&2; exit 1
+    fi
+    test ! -e "$tmp/docker-$selection/.ths-runtime"
+  done
 done
+# Explicit choices still override native detection, without removing bundles.
+fixture 9.8.7
+: > "$NATIVE_INSTALL_REQUESTS"
+: > "$NATIVE_INSTALL_PULLS"
+THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=docker THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
+test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
+THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=none NATIVE_INSTALL_ALLOW_PULL=0 "$root/install.sh"
+if grep -q '/ths-runtime-' "$NATIVE_INSTALL_REQUESTS"; then exit 1; fi
+test -f "$destination/.ths-runtime/9.8.7/manifest.json"
 # Historical releases still support Docker or launcher-only installation.
 sed '/ths-runtime-/d' "$fixtures/SHA256SUMS" > "$fixtures/checksums-old"
 mv "$fixtures/checksums-old" "$fixtures/SHA256SUMS"
-THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=auto THS_SKIP_IMAGE_PULL=1 "$root/install.sh"
+THS_INSTALL_DIR="$tmp/historical" THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=auto THS_SKIP_IMAGE_PULL=1 "$root/install.sh"
 printf '%s\n' old > "$destination/ths"
 must_fail 'explicit native request on a historical release'
 echo 'native installer tests passed'

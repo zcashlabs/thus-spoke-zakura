@@ -42,8 +42,9 @@ case "$tag" in *[!a-zA-Z0-9.+-]*) echo 'Invalid release version' >&2; exit 1 ;; 
 release_url="https://github.com/$repo/releases/download/$tag"
 curl --proto '=https' --tlsv1.2 -fsSL "$release_url/SHA256SUMS" -o "$stage/SHA256SUMS"
 if [ "$install_runtime" = auto ]; then
-  # Match the CLI default, including updates from existing Docker installations.
-  install_runtime=docker
+  # Preserve native installations across updates; other installs follow the CLI default.
+  if [ -d "$destination/.ths-runtime" ]; then install_runtime=native
+  else install_runtime=docker; fi
 fi
 
 fetch_verified() {

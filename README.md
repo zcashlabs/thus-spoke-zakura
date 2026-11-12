@@ -22,9 +22,10 @@ ths start --native
 Native installation requires a release containing native runtime archives.
 For a source checkout, see [native builds](book/development.md). To use Docker,
 install with `THS_INSTALL_RUNTIME=docker`, start Docker, and run `ths`.
-The installer and existing commands keep Docker as their default. Select native
-installation with `THS_INSTALL_RUNTIME=native` and startup with `--native`;
-later commands find the instance automatically.
+Fresh installations default to Docker unless native mode is selected. Once
+native bundles are installed, ordinary `ths update` installs the matching new
+bundle too. Select native startup with `--native`; later commands find the
+instance automatically. Startup without `--native` still uses Docker.
 
 Startup may take a few minutes while the chain and wallet are prepared.
 When `ths` prints `default is ready`, it opens the dashboard. Keep that terminal
