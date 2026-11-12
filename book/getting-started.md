@@ -12,6 +12,7 @@ cleanup completed.
 
 ## Start without Docker
 
+Use macOS 12 or newer, or Linux with glibc 2.35 or newer, on Intel or ARM.
 For a release with native bundles, the installer verifies and installs the
 launcher, Zakura, lightwalletd, `ths-server`, and dashboard together:
 

@@ -11,8 +11,8 @@ lightwalletd, and a wallet-backed dashboard as native processes or in Docker.
 
 ## Install and start
 
-On macOS or Linux (Intel or ARM), install the launcher and its matching native
-runtime. This mode needs no Docker or Python:
+On macOS 12+ or Linux with glibc 2.35+ (Intel or ARM), install the launcher and
+its matching native runtime. This mode needs no Docker or Python:
 
 ```console
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=native sh

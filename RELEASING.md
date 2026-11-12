@@ -77,6 +77,11 @@ non-mutating update checks but cannot overwrite themselves.
 
 ## Native runtime contract
 
+Native bundles require macOS 12 or newer, or Linux with glibc 2.35 or newer.
+macOS artifacts are not Developer ID signed or notarized. Checksums and GitHub
+build attestations do not establish Gatekeeper acceptance; distribution signing
+and clean-Mac download testing remain separate release work.
+
 `native/runtime.json` pins the Zakura and lightwalletd source commits.
 `tools/build_native.sh NEW_OUTPUT_DIR` builds them, `ths-server`, and the web
 dashboard, then packages a native runtime for the host architecture. Builds

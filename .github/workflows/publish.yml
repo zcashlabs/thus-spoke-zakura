@@ -61,7 +61,14 @@ jobs:
             | THS_VERSION=latest THS_SKIP_IMAGE_PULL=1 sh
           "$THS_INSTALL_DIR/ths" --version
           "$THS_INSTALL_DIR/ths" update --check
-          if [[ -d "$THS_INSTALL_DIR/.ths-runtime" ]]; then
-            "$THS_INSTALL_DIR/ths" doctor --native
-            "$THS_INSTALL_DIR/ths" --name public-smoke run --native --timeout 300 -- true
-          fi
+      - name: Install native runtime anonymously and verify startup
+        env:
+          THS_VERSION: ${{ github.event.release.tag_name }}
+          THS_INSTALL_DIR: ${{ runner.temp }}/native-bin
+          THS_INSTALL_RUNTIME: native
+        shell: bash
+        run: |
+          installer="https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/$THS_VERSION/install.sh"
+          curl --proto '=https' --tlsv1.2 -fsSL "$installer" | sh
+          "$THS_INSTALL_DIR/ths" doctor --native
+          "$THS_INSTALL_DIR/ths" --name public-smoke run --native --timeout 300 -- true
