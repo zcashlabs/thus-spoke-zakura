@@ -28,9 +28,14 @@ Successful builds on `main` deploy both to Vercel:
 - Website: <https://ths.zypherpunk.xyz/>
 - Book, including Markdown pages and `llms.txt`: <https://ths.zypherpunk.xyz/book/>
 
-Runs share a deployment concurrency group so production deployments do not
-overlap. The workflow can also be run manually from `main`; other branches
-only build. No deployment credentials are available to the pull-request job.
+Runs on `main` queue in one concurrency group, so production deployments do not
+overlap or get cancelled; a new push to a pull request cancels its superseded
+build. The workflow can also be run manually from `main`; other branches only
+build. No deployment credentials are available to the pull-request job.
+
+Each run uploads the assembled site as the `public-website` artifact, kept for
+seven days. To review a pull request without a preview URL, download it from
+the run's summary page and serve its `public/` directory on loopback.
 
 Configure the existing Vercel project and GitHub repository once:
 
@@ -90,10 +95,11 @@ including the workflow. The token stays out of its reach only while these hold:
   workflow, and never check out or run pull-request code in a job that can
   read the token.
 - **The deploy job runs nothing resolved at run time.** Actions are pinned to
-  full commit SHAs, mdBook to its release asset's SHA-256, and the Vercel CLI
-  and every package it depends on to `tools/vercel/package-lock.json`. The
-  deploy job installs them with `npm ci --ignore-scripts`, so no install script
-  runs, and `npm audit signatures` checks the registry signatures.
+  full commit SHAs and mdBook to its release asset's SHA-256. The deploy job
+  checks out no code; it installs only the Vercel CLI's self-contained Linux
+  binary, `@vercel/vc-native-linux-x64`, verified against its pinned npm
+  integrity value. That is the binary the `vercel` npm package runs on Linux
+  x64, without the 285 fallback packages an npm install would resolve.
 - **Untrusted values stay out of `run:` scripts.** Pass event data through
   `env:` rather than `${{ }}` interpolation in a script.
 - **No caches.** The workflow neither saves nor restores a cache, so a pull
@@ -111,19 +117,17 @@ These repository settings complete it:
 - Optionally, add required reviewers with **Prevent self-review** to
   `website-production`, so each production deployment waits for approval.
 
-To update the Vercel CLI, choose a release at least two weeks old. Resolve its
-dependency tree only from packages published before a date shortly after that
-release, so a recently published, possibly compromised package cannot enter
-the lockfile, then review the lockfile diff:
+To update the Vercel CLI, choose a release at least two weeks old, so a
+compromised release is likely to have been noticed and withdrawn, and change
+`version` and `integrity` together in the deploy job. Take the integrity value
+from the registry:
 
 ```sh
-cd tools/vercel
-npm install --save-exact --package-lock-only --ignore-scripts \
-  --before=<a day or two after the release> vercel@<version>
+npm view @vercel/vc-native-linux-x64@<version> dist.integrity
 ```
 
-To update mdBook, change its version and SHA-256 together in the workflow,
-taking the digest from the release asset on GitHub.
+To update mdBook, change its version and SHA-256 together in both
+`website.yml` and `ci.yml`, taking the digest from the release asset on GitHub.
 
 ## Browser checks
 

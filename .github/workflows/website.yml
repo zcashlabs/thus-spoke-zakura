@@ -8,38 +8,26 @@ name: Deploy website and book
 # - VERCEL_TOKEN is a secret of the `website-production` environment, whose
 #   deployment branch policy admits only `main`. A pull request that edits
 #   this file to reference the environment is refused by that policy.
-# - The deploy job runs no code resolved at run time: actions are pinned to
-#   commits, mdBook to a checksum, and the Vercel CLI to the lockfile in
-#   tools/vercel, installed without lifecycle scripts.
+# - The deploy job runs nothing resolved at run time: actions are pinned to
+#   commits, and the Vercel CLI to a checksum. It checks out no code.
 #
 # website/README.md lists the repository and Vercel settings this relies on.
 
 on:
   push:
     branches: [main]
-    paths:
+    paths: &site-paths
       - "website/**"
       - "book/**"
       - "theme/**"
       - "book.toml"
       - "tools/build_site.py"
       - "tools/build_website.py"
-      - "tools/vercel/**"
       - "tests/book_links.py"
       - "vercel.json"
       - ".github/workflows/website.yml"
   pull_request:
-    paths:
-      - "website/**"
-      - "book/**"
-      - "theme/**"
-      - "book.toml"
-      - "tools/build_site.py"
-      - "tools/build_website.py"
-      - "tools/vercel/**"
-      - "tests/book_links.py"
-      - "vercel.json"
-      - ".github/workflows/website.yml"
+    paths: *site-paths
   workflow_dispatch:
 
 permissions:
@@ -47,12 +35,14 @@ permissions:
 
 concurrency:
   group: website-${{ github.ref }}
-  cancel-in-progress: false
+  # A newer push supersedes a pull request's build. Deployments from main
+  # queue instead, so none is interrupted partway through.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,6 +50,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      - run: node --test website/tests/*.test.mjs
+      - run: python3 tests/book_links.py
       - name: Install mdBook
         run: |
           set -euo pipefail
@@ -67,6 +59,7 @@ jobs:
           archive="mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz"
           # The deployed site is mdBook's output, so the binary is verified
           # against the release asset's published digest before it runs.
+          # Keep in step with .github/workflows/ci.yml.
           sha256=084e4342ba564db270108763e404a7d1f309d932651a22484e93c0dc1a071f6d
           curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/$archive" \
             "https://github.com/rust-lang/mdBook/releases/download/v${version}/${archive}"
@@ -74,8 +67,6 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.local/bin" mdbook
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: node --test website/tests/*.test.mjs
-      - run: python3 tests/book_links.py
       - run: mdbook build
       - run: python3 tools/build_site.py
       - run: python3 tools/build_website.py
@@ -93,7 +84,7 @@ jobs:
       github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     environment:
       name: website-production
       url: https://ths.zypherpunk.xyz
@@ -102,26 +93,6 @@ jobs:
       VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
       VERCEL_TELEMETRY_DISABLED: "1"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          sparse-checkout: tools/vercel
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: public-website
-          path: site/deploy
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-      - name: Install pinned Vercel CLI
-        working-directory: tools/vercel
-        run: |
-          set -euo pipefail
-          # Exact versions and integrity hashes come from package-lock.json;
-          # no package's install script runs.
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm audit signatures
-          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Validate deployment configuration
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -129,6 +100,28 @@ jobs:
           test -n "$VERCEL_ORG_ID" || { echo "Set the VERCEL_ORG_ID variable" >&2; exit 1; }
           test -n "$VERCEL_PROJECT_ID" || { echo "Set the VERCEL_PROJECT_ID variable" >&2; exit 1; }
           test -n "$VERCEL_TOKEN" || { echo "Set the VERCEL_TOKEN secret" >&2; exit 1; }
+      - name: Install Vercel CLI
+        run: |
+          set -euo pipefail
+          version=65.4.0
+          # On Linux x64 the `vercel` npm package only launches this
+          # self-contained binary; its other 285 dependencies are a fallback
+          # for platforms without one. Installing the binary alone, checked
+          # against the registry's integrity value, avoids resolving any of them.
+          integrity=sha512-o6ZFKKBPTWIYyPvVsDe4pbJdS9ZoFpP8seAsO6UaYwL1H3JWR2yYQMWVogzfkB1zX9LnEN4JrclGufHi+9Sf/A==
+          archive="$RUNNER_TEMP/vc-native-linux-x64-${version}.tgz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$archive" \
+            "https://registry.npmjs.org/@vercel/vc-native-linux-x64/-/vc-native-linux-x64-${version}.tgz"
+          actual="sha512-$(openssl dgst -sha512 -binary "$archive" | base64 -w0)"
+          test "$actual" = "$integrity" || { echo "Vercel CLI checksum mismatch: $actual" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/vercel"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/vercel" --strip-components=2 package/bin/vercel
+          "$RUNNER_TEMP/vercel/vercel" --version
+          echo "$RUNNER_TEMP/vercel" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: public-website
+          path: site/deploy
       - name: Pull production project settings
         working-directory: site/deploy
         env:

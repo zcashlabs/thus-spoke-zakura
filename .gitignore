@@ -1,6 +1,5 @@
 /target
 /web/node_modules
-/tools/vercel/node_modules
 /web/dist
 *.tsbuildinfo
 *.db

@@ -1,9 +1,0 @@
-{
-  "name": "ths-vercel-deploy",
-  "private": true,
-  "description": "Pins the Vercel CLI and its whole dependency tree for .github/workflows/website.yml.",
-  "license": "MIT",
-  "dependencies": {
-    "vercel": "65.4.0"
-  }
-}
