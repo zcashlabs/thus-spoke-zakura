@@ -163,6 +163,44 @@ fn native_run_reports_a_signaled_child_as_failure() {
 }
 
 #[test]
+fn native_fixture_waits_for_the_complete_http_request_line() {
+    use std::io::Write;
+    let fixture = Fixture::new("normal");
+    let (mut owner, endpoints) = fixture.start("split-request");
+    let url = reqwest::Url::parse(endpoints["dashboard"].as_str().unwrap()).unwrap();
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", url.port().unwrap())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    stream.write_all(b"GET /api/v1/act").unwrap();
+    let premature = stream.peek(&mut [0]);
+    let mut response = String::new();
+    if premature.is_err() {
+        stream
+            .write_all(b"ivity HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream.read_to_string(&mut response).unwrap();
+    }
+    drop(stream);
+    let stopped = fixture
+        .command("split-request")
+        .arg("stop")
+        .output()
+        .unwrap();
+    let exit = wait(&mut owner);
+    assert!(stopped.status.success());
+    assert!(exit.success());
+    assert!(
+        matches!(premature, Err(ref error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+        "fixture responded before receiving the request path: {premature:?}"
+    );
+    assert!(response.ends_with("\r\n\r\n[]"), "{response}");
+}
+
+#[test]
 fn native_stop_does_not_report_an_unfinished_run_as_success() {
     let fixture = Fixture::new("normal");
     let marker = fixture.temp.path().join("child-started");
@@ -272,6 +310,9 @@ fn native_activity_watch_avoids_docker_and_ends_when_its_instance_is_replaced() 
         };
         let deadline = Instant::now() + Duration::from_secs(8);
         while fs::metadata(response).unwrap().len() == 0 && Instant::now() < deadline {
+            if watcher.try_wait().unwrap().is_some() {
+                break;
+            }
             thread::sleep(Duration::from_millis(20));
         }
         let observed = fs::read_to_string(response).unwrap();
@@ -308,10 +349,16 @@ fn native_activity_watch_avoids_docker_and_ends_when_its_instance_is_replaced() 
         assert!(replacement_exit.success());
         assert!(
             !observed.is_empty(),
-            "watch did not produce a snapshot or error"
+            "{name}: watch did not produce a snapshot or error; stderr: {}",
+            fs::read_to_string(&stderr).unwrap()
         );
         if name == "activity-ok" {
             assert_eq!(observed, "[]\n");
+        } else {
+            assert!(
+                observed.contains("Watching activity-error") && observed.contains("unreachable"),
+                "{observed}"
+            );
         }
         assert!(
             !invoked.exists(),

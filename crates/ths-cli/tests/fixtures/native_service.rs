@@ -15,9 +15,35 @@ fn serve(mut stream: TcpStream, body: &str, drip: bool) {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     let mut buffer = [0; 8192];
-    let Ok(read) = stream.read(&mut buffer) else {
-        return;
-    };
+    let mut read = 0;
+    loop {
+        let Ok(count) = stream.read(&mut buffer[read..]) else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        read += count;
+        let Some(end) = buffer[..read]
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+        else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&buffer[..end]);
+        let length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+            .unwrap_or(0);
+        if length > buffer.len() - end - 4 {
+            return;
+        }
+        if read >= end + 4 + length {
+            break;
+        }
+    }
     let body = if buffer[..read].starts_with(b"GET /api/v1/activity")
         && !body.contains("activity-error")
     {
