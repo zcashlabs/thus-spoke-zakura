@@ -618,7 +618,8 @@ continues so a restart resumes the view, and a deleted environment exits
 with an error.
 
 Native watches use the recorded launcher owner and instance state for these
-checks; they do not call Docker.
+checks; they do not call Docker. Recreating the same name starts a new instance
+and ends the original watch, even if it reuses the old ports.
 
 ### `ths wallet tx <TXID> [--account <N>]`
 

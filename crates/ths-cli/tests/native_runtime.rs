@@ -235,7 +235,7 @@ fn native_run_forwards_each_shutdown_signal_to_the_application() {
 }
 
 #[test]
-fn native_activity_watch_never_calls_docker_even_after_a_failed_read() {
+fn native_activity_watch_avoids_docker_and_ends_when_its_instance_is_replaced() {
     use std::os::unix::fs::PermissionsExt;
     for name in ["activity-ok", "activity-error"] {
         let fixture = Fixture::new("normal");
@@ -277,10 +277,35 @@ fn native_activity_watch_never_calls_docker_even_after_a_failed_read() {
         let observed = fs::read_to_string(response).unwrap();
         let stop = fixture.command(name).arg("stop").output().unwrap();
         let owner_exit = wait(&mut owner);
+        let (mut replacement, _) = fixture.start(name);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while watcher.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if watcher.try_wait().unwrap().is_none() {
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(watcher.id() as i32),
+                nix::sys::signal::Signal::SIGINT,
+            )
+            .unwrap();
+        }
         let watch_exit = wait(&mut watcher);
+        let replacement_status = fixture
+            .command(name)
+            .args(["--json", "status"])
+            .output()
+            .unwrap();
+        let replacement_stop = fixture.command(name).arg("stop").output().unwrap();
+        let replacement_exit = wait(&mut replacement);
         assert!(stop.status.success());
         assert!(owner_exit.success());
-        assert!(!watch_exit.success(), "watch must detect instance deletion");
+        assert!(
+            !watch_exit.success(),
+            "watch must detect replacement of the original instance"
+        );
+        assert!(replacement_status.status.success());
+        assert!(replacement_stop.status.success());
+        assert!(replacement_exit.success());
         assert!(
             !observed.is_empty(),
             "watch did not produce a snapshot or error"

@@ -34,7 +34,8 @@ impl Runtime {
         json: bool,
     ) -> Result<()> {
         let shutdown = Shutdown::install()?;
-        let backend = self.read_instance(name)?.backend;
+        let instance = self.read_instance(name)?;
+        let backend = instance.backend;
         let (dashboard, client) = self.instance_client_with_timeout(name, WATCH_REQUEST_TIMEOUT)?;
         let app_container = format!("{}-app", prefix(name));
         // Watching the app container ends the loop promptly on `stop`/`reset`
@@ -61,7 +62,18 @@ impl Runtime {
             limit,
             json,
             &|| self.environment_state(name, &app_container, backend),
-            &|duration| poll_tick(&shutdown, duration),
+            &|duration| {
+                Ok(match poll_tick(&shutdown, duration)? {
+                    // A replacement can reuse the same ports and still return valid activity.
+                    Tick::Poll
+                        if backend == Backend::Native
+                            && self.read_session(name)? != instance.session =>
+                    {
+                        Tick::Ended(Ended::DeletedElsewhere)
+                    }
+                    tick => tick,
+                })
+            },
         )
     }
 
