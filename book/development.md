@@ -172,7 +172,7 @@ cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
 ```
 
 Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart
-recovery, and queued-response cases on every push and PR. The other cases in
+recovery, and queued-response cases on every pull request and push to `main`. The other cases in
 `tests/activity_recovery.rs` cover startup funding, pool transfers, and
 external faucets. The fixture owns and cleans up only its own Docker resources;
 it fails on a timeout or incomplete cleanup.
