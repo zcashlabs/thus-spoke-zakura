@@ -1,5 +1,19 @@
 name: Deploy website and book
 
+# Pull requests can change any file here, including this workflow, so the
+# deployment credential is kept out of their reach:
+#
+# - Pull requests use `pull_request`, never `pull_request_target`, and only
+#   run the build job. Fork pull requests get a read-only token and no secrets.
+# - VERCEL_TOKEN is a secret of the `website-production` environment, whose
+#   deployment branch policy admits only `main`. A pull request that edits
+#   this file to reference the environment is refused by that policy.
+# - The deploy job runs no code resolved at run time: actions are pinned to
+#   commits, mdBook to a checksum, and the Vercel CLI to the lockfile in
+#   tools/vercel, installed without lifecycle scripts.
+#
+# website/README.md lists the repository and Vercel settings this relies on.
+
 on:
   push:
     branches: [main]
@@ -10,6 +24,7 @@ on:
       - "book.toml"
       - "tools/build_site.py"
       - "tools/build_website.py"
+      - "tools/vercel/**"
       - "tests/book_links.py"
       - "vercel.json"
       - ".github/workflows/website.yml"
@@ -21,6 +36,7 @@ on:
       - "book.toml"
       - "tools/build_site.py"
       - "tools/build_website.py"
+      - "tools/vercel/**"
       - "tests/book_links.py"
       - "vercel.json"
       - ".github/workflows/website.yml"
@@ -36,6 +52,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -47,11 +64,15 @@ jobs:
         run: |
           set -euo pipefail
           version=0.5.2
-          url="https://github.com/rust-lang/mdBook/releases/download/v${version}"
+          archive="mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+          # The deployed site is mdBook's output, so the binary is verified
+          # against the release asset's published digest before it runs.
+          sha256=084e4342ba564db270108763e404a7d1f309d932651a22484e93c0dc1a071f6d
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rust-lang/mdBook/releases/download/v${version}/${archive}"
+          echo "${sha256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
           mkdir -p "$HOME/.local/bin"
-          curl --proto '=https' --tlsv1.2 -fsSL \
-            "${url}/mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C "$HOME/.local/bin" mdbook
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$HOME/.local/bin" mdbook
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: node --test website/tests/*.test.mjs
       - run: python3 tests/book_links.py
@@ -66,16 +87,25 @@ jobs:
           retention-days: 7
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: >-
+      github.repository == 'zcashlabs/thus-spoke-zakura' &&
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: website-production
       url: https://ths.zypherpunk.xyz
     env:
       VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TELEMETRY_DISABLED: "1"
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/vercel
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: public-website
@@ -83,8 +113,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-      - name: Install Vercel CLI
-        run: npm install --global vercel@65.4.0
+      - name: Install pinned Vercel CLI
+        working-directory: tools/vercel
+        run: |
+          set -euo pipefail
+          # Exact versions and integrity hashes come from package-lock.json;
+          # no package's install script runs.
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm audit signatures
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Validate deployment configuration
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

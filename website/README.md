@@ -43,15 +43,19 @@ Configure the existing Vercel project and GitHub repository once:
 3. Keep automatic Git deployments disabled. The repository-root and website
    `vercel.json` files set `git.deploymentEnabled` to `false`, covering both
    the new root setting and an existing project still rooted at `website/`.
-   GitHub Actions owns deployments; CLI deployments continue to work.
-4. In GitHub, create the `website-production` environment and restrict its
-   deployment branches to `main`. To deploy automatically, leave required
-   reviewers unset.
+   GitHub Actions owns deployments; CLI deployments continue to work. Prefer
+   not connecting the repository to the project at all, so Vercel never builds
+   pull-request code itself.
+4. In GitHub, create the `website-production` environment. Under
+   **Deployment branches and tags**, choose **Selected branches and tags** and
+   add only `main`. To deploy automatically, leave required reviewers unset.
 5. Add `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` as GitHub Actions variables in
    that environment (or at repository level), using the IDs from the project's
-   local `.vercel/project.json`. Add `VERCEL_TOKEN` as an environment secret,
-   using a token with access to that Vercel project. Enter credentials directly
-   in GitHub; do not commit them.
+   local `.vercel/project.json`. Add `VERCEL_TOKEN` as a secret of that
+   environment only, never as a repository or organization secret: see
+   [Deployment security](#deployment-security). Create the token for this
+   deployment alone, scoped to the team that owns the project and with an
+   expiration date. Enter credentials directly in GitHub; do not commit them.
 
 To inspect the same public files locally, install mdBook 0.5.2 and run from the
 repository root:
@@ -69,6 +73,57 @@ project metadata are excluded. Vercel's CLI builds this directory in CI, then
 uploads the prebuilt output in one production deployment. See the official
 [GitHub Actions deployment guide](https://vercel.com/kb/guide/how-can-i-use-github-actions-with-vercel)
 and [Git deployment configuration](https://vercel.com/docs/project-configuration/git-configuration#turning-off-all-automatic-deployments).
+
+### Deployment security
+
+Anyone can open a pull request, and a pull request can change any file,
+including the workflow. The token stays out of its reach only while these hold:
+
+- **The token is an environment secret.** Workflows triggered by a pull
+  request from a branch of this repository can read repository secrets, so a
+  token stored there could be printed by an edited workflow. An environment
+  secret reaches only a job that names the environment, and the `main`-only
+  branch policy refuses such a job for any other ref. Fork pull requests get no
+  secrets at all.
+- **Pull requests have no privileged trigger.** Do not add
+  `pull_request_target`, `workflow_run` or `issue_comment` triggers to this
+  workflow, and never check out or run pull-request code in a job that can
+  read the token.
+- **The deploy job runs nothing resolved at run time.** Actions are pinned to
+  full commit SHAs, mdBook to its release asset's SHA-256, and the Vercel CLI
+  and every package it depends on to `tools/vercel/package-lock.json`. The
+  deploy job installs them with `npm ci --ignore-scripts`, so no install script
+  runs, and `npm audit signatures` checks the registry signatures.
+- **Untrusted values stay out of `run:` scripts.** Pass event data through
+  `env:` rather than `${{ }}` interpolation in a script.
+- **No caches.** The workflow neither saves nor restores a cache, so a pull
+  request cannot plant files that a `main` run later trusts.
+
+These repository settings complete it:
+
+- **Settings → Actions → General:** require approval for workflows from fork
+  pull requests by outside collaborators; give `GITHUB_TOKEN` read-only
+  permissions by default; do not allow GitHub Actions to create or approve pull
+  requests; and require actions to be pinned to a full-length commit SHA.
+- **Settings → Rules → Rulesets** for `main`: require a pull request with an
+  approving review, and block force pushes and deletion. A push to `main`
+  deploys, so these rules guard the production site.
+- Optionally, add required reviewers with **Prevent self-review** to
+  `website-production`, so each production deployment waits for approval.
+
+To update the Vercel CLI, choose a release at least two weeks old. Resolve its
+dependency tree only from packages published before a date shortly after that
+release, so a recently published, possibly compromised package cannot enter
+the lockfile, then review the lockfile diff:
+
+```sh
+cd tools/vercel
+npm install --save-exact --package-lock-only --ignore-scripts \
+  --before=<a day or two after the release> vercel@<version>
+```
+
+To update mdBook, change its version and SHA-256 together in the workflow,
+taking the digest from the release asset on GitHub.
 
 ## Browser checks
 
