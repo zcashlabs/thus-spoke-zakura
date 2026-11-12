@@ -154,6 +154,147 @@ fn native_run_preserves_exit_codes_and_environment() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn native_run_reports_a_signaled_child_as_failure() {
+    let fixture = Fixture::new("normal");
+    let output = fixture.run("signaled-child", &["/bin/sh", "-c", "kill -TERM $$"]);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn native_stop_does_not_report_an_unfinished_run_as_success() {
+    let fixture = Fixture::new("normal");
+    let marker = fixture.temp.path().join("child-started");
+    let mut child = fixture
+        .command("stopped-run")
+        .args(["run", "--native", "--runtime-dir"])
+        .arg(fixture.temp.path())
+        .args([
+            "--timeout",
+            "8",
+            "--",
+            "/bin/sh",
+            "-c",
+            "touch \"$1\"; exec sleep 300",
+            "sh",
+        ])
+        .arg(&marker)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let stopped = fixture.command("stopped-run").arg("stop").output().unwrap();
+    let exit = wait(&mut child);
+    assert!(marker.exists(), "application never started");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "stopping an unfinished run must fail the test"
+    );
+    assert!(!fixture.state("stopped-run").exists());
+}
+
+#[test]
+fn native_run_forwards_each_shutdown_signal_to_the_application() {
+    use nix::{
+        sys::signal::{Signal, kill},
+        unistd::Pid,
+    };
+    for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+        let fixture = Fixture::new("normal");
+        let marker = fixture.temp.path().join("signal");
+        let mut child = fixture.command("signal-run")
+            .args(["run", "--native", "--runtime-dir"])
+            .arg(fixture.temp.path())
+            .args(["--timeout", "8", "--", "/bin/sh", "-c",
+                "trap 'echo INT > \"$1\"; exit 0' INT; trap 'echo TERM > \"$1\"; exit 0' TERM; trap 'echo HUP > \"$1\"; exit 0' HUP; echo ready > \"$1\"; while :; do sleep 0.1; done", "sh"])
+            .arg(&marker).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        kill(Pid::from_raw(child.id() as i32), signal).unwrap();
+        let exit = wait(&mut child);
+        assert_eq!(exit.code(), Some(1));
+        let expected = match signal {
+            Signal::SIGINT => "INT\n",
+            Signal::SIGTERM => "TERM\n",
+            _ => "HUP\n",
+        };
+        assert_eq!(fs::read_to_string(marker).unwrap(), expected);
+        assert!(!fixture.state("signal-run").exists());
+    }
+}
+
+#[test]
+fn native_activity_watch_never_calls_docker_even_after_a_failed_read() {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["activity-ok", "activity-error"] {
+        let fixture = Fixture::new("normal");
+        let (mut owner, _) = fixture.start(name);
+        let docker = fixture.temp.path().join("bin/docker");
+        let invoked = fixture.temp.path().join("docker-invoked");
+        fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DOCKER_MARKER\"\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+        let stdout = fixture.temp.path().join("watch.stdout");
+        let stderr = fixture.temp.path().join("watch.stderr");
+        let mut watcher = fixture
+            .command(name)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/usr/bin:/bin",
+                    fixture.temp.path().join("bin").display()
+                ),
+            )
+            .env("DOCKER_MARKER", &invoked)
+            .args(["--json", "wallet", "activity", "--watch"])
+            .stdout(fs::File::create(&stdout).unwrap())
+            .stderr(fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let response = if name == "activity-ok" {
+            &stdout
+        } else {
+            &stderr
+        };
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while fs::metadata(response).unwrap().len() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let observed = fs::read_to_string(response).unwrap();
+        let stop = fixture.command(name).arg("stop").output().unwrap();
+        let owner_exit = wait(&mut owner);
+        let watch_exit = wait(&mut watcher);
+        assert!(stop.status.success());
+        assert!(owner_exit.success());
+        assert!(!watch_exit.success(), "watch must detect instance deletion");
+        assert!(
+            !observed.is_empty(),
+            "watch did not produce a snapshot or error"
+        );
+        if name == "activity-ok" {
+            assert_eq!(observed, "[]\n");
+        }
+        assert!(
+            !invoked.exists(),
+            "native watch called Docker: {}",
+            fs::read_to_string(&invoked).unwrap_or_default()
+        );
+    }
+}
 #[test]
 fn native_rejects_bad_identity_genesis_and_initializer_failure() {
     for (mode, expected) in [

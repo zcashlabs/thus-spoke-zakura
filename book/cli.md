@@ -617,6 +617,9 @@ marked unreachable, a stopped environment is reported while polling
 continues so a restart resumes the view, and a deleted environment exits
 with an error.
 
+Native watches use the recorded launcher owner and instance state for these
+checks; they do not call Docker.
+
 ### `ths wallet tx <TXID> [--account <N>]`
 
 Shows what the local wallet recorded about one transaction for accounts 1–5:

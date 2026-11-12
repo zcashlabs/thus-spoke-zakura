@@ -272,21 +272,25 @@ impl Runtime {
             };
             loop {
                 if shutdown.try_interrupted() {
+                    if let Some(child) = child {
+                        processes.stop_one_with_signal(
+                            child,
+                            shutdown.received_signal().unwrap_or(libc::SIGINT),
+                        )?;
+                        return Ok(1);
+                    }
                     return Ok(if ownership.session().requested() {
                         0
                     } else {
                         128 + shutdown.received_signal().unwrap_or(libc::SIGINT) as u8
                     });
                 }
-                check(&mut processes, &shutdown, None)?;
+                // Handle interruption at the loop head so it always reaches the application.
+                processes.check()?;
                 if let Some(child) = child
                     && let Some(status) = processes.status(child)?
                 {
-                    use std::os::unix::process::ExitStatusExt;
-                    return Ok(status
-                        .code()
-                        .map(|code| code as u8)
-                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1) as u8));
+                    return Ok(status.code().map(|code| code as u8).unwrap_or(1));
                 }
                 thread::sleep(Duration::from_millis(50));
             }
@@ -313,6 +317,10 @@ impl Runtime {
         match (primary, cleanup) {
             (Ok(code), Ok(())) => Ok(code),
             (Err(error), Ok(())) => Err(ownership.session().explain(name, error)),
+            (Ok(code), Err(error)) if application.is_some() && code != 0 => {
+                eprintln!("Native cleanup failed: {error:#}");
+                Ok(code)
+            }
             (Ok(_), Err(error)) => Err(error),
             (Err(error), Err(cleanup)) => Err(anyhow!("{error:#}; cleanup: {cleanup:#}")),
         }

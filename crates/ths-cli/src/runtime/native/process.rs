@@ -63,9 +63,13 @@ impl Processes {
         Ok(())
     }
     pub(super) fn stop_one(&mut self, id: usize) -> Result<()> {
+        self.stop_one_with_signal(id, libc::SIGTERM)
+    }
+    pub(super) fn stop_one_with_signal(&mut self, id: usize, signal: i32) -> Result<()> {
         stop(
             &mut self.entries[id],
             Instant::now() + Duration::from_secs(3),
+            Signal::try_from(signal)?,
         )
     }
     pub(super) fn stop_all(&mut self) -> Result<()> {
@@ -83,7 +87,7 @@ impl Processes {
             }
         }
         for entry in self.entries.iter_mut().rev() {
-            if let Err(error) = stop(entry, deadline) {
+            if let Err(error) = stop(entry, deadline, Signal::SIGTERM) {
                 errors.push(format!("{}: {error:#}", entry.label));
             }
         }
@@ -110,12 +114,12 @@ fn signal(entry: &Process, signal: Signal) -> Result<()> {
         Err(error) => Err(error.into()),
     }
 }
-fn stop(entry: &mut Process, deadline: Instant) -> Result<()> {
+fn stop(entry: &mut Process, deadline: Instant, initial_signal: Signal) -> Result<()> {
     if entry.stopped {
         return Ok(());
     }
     entry.child.try_wait()?; // Reap the leader first: macOS rejects signaling a zombie leader.
-    signal(entry, Signal::SIGTERM)?;
+    signal(entry, initial_signal)?;
     loop {
         entry.child.try_wait()?;
         match killpg(Pid::from_raw(entry.child.id() as i32), None) {

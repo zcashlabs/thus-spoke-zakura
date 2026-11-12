@@ -34,19 +34,23 @@ impl Runtime {
         json: bool,
     ) -> Result<()> {
         let shutdown = Shutdown::install()?;
+        let backend = self.read_instance(name)?.backend;
         let (dashboard, client) = self.instance_client_with_timeout(name, WATCH_REQUEST_TIMEOUT)?;
         let app_container = format!("{}-app", prefix(name));
         // Watching the app container ends the loop promptly on `stop`/`reset`
         // from another shell. When it cannot be resolved, the record check
         // still detects deletion on the next failed read.
-        let _monitor = watched_app_container(&app_container).ok().map(|app| {
-            DeletionMonitor::spawn(
-                Arc::new(DockerEvents::default()),
-                &app,
-                DELETION_WATCH_RETRY,
-                &shutdown,
-            )
-        });
+        let _monitor = (backend == Backend::Docker)
+            .then(|| watched_app_container(&app_container).ok())
+            .flatten()
+            .map(|app| {
+                DeletionMonitor::spawn(
+                    Arc::new(DockerEvents::default()),
+                    &app,
+                    DELETION_WATCH_RETRY,
+                    &shutdown,
+                )
+            });
         self.wallet_activity_watch_with(
             name,
             &dashboard,
@@ -56,20 +60,29 @@ impl Runtime {
             std::io::stdout().is_terminal(),
             limit,
             json,
-            &|| self.environment_state(name, &app_container),
+            &|| self.environment_state(name, &app_container, backend),
             &|duration| poll_tick(&shutdown, duration),
         )
     }
 
     /// Distinguishes a stopped environment from one that is restarting or
     /// deleted, after a failed activity read.
-    fn environment_state(&self, name: &InstanceName, app_container: &str) -> EnvironmentState {
+    fn environment_state(
+        &self,
+        name: &InstanceName,
+        app_container: &str,
+        backend: Backend,
+    ) -> EnvironmentState {
         if self.read_instance(name).is_err()
             && !self.instance_dir(name).join("instance.json").exists()
         {
             return EnvironmentState::Deleted;
         }
-        match container_running(app_container) {
+        let running = match backend {
+            Backend::Native => self.owner_active(name),
+            Backend::Docker => container_running(app_container),
+        };
+        match running {
             Ok(false) => EnvironmentState::Stopped,
             _ => EnvironmentState::Running,
         }

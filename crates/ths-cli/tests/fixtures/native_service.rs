@@ -15,9 +15,16 @@ fn serve(mut stream: TcpStream, body: &str, drip: bool) {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     let mut buffer = [0; 8192];
-    if stream.read(&mut buffer).is_err() {
+    let Ok(read) = stream.read(&mut buffer) else {
         return;
-    }
+    };
+    let body = if buffer[..read].starts_with(b"GET /api/v1/activity")
+        && !body.contains("activity-error")
+    {
+        "[]"
+    } else {
+        body
+    };
     if drip {
         if stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n")

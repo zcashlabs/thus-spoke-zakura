@@ -115,8 +115,10 @@ A launcher killed with SIGKILL cannot verify cleanup. `stop` then retains its
 state and reports uncertainty rather than signaling possibly reused persisted
 PIDs. Inspect and stop the abandoned processes manually before removing that
 instance directory. A child that deliberately leaves its process group escapes
-group cleanup; native services must remain foreground processes. No other
-instance's directory or process is removed.
+group cleanup; native services must remain foreground processes. Native `run`
+forwards interruption to the application group and returns a failure, including
+when another shell requests `stop`. No other instance's directory or process
+is removed.
 
 ## Find the part you need to change
 
