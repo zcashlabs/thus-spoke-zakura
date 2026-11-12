@@ -28,10 +28,12 @@ Successful builds on `main` deploy both to Vercel:
 - Website: <https://ths.zypherpunk.xyz/>
 - Book, including Markdown pages and `llms.txt`: <https://ths.zypherpunk.xyz/book/>
 
-Runs on `main` queue in one concurrency group, so production deployments do not
-overlap or get cancelled; a new push to a pull request cancels its superseded
-build. The workflow can also be run manually from `main`; other branches only
-build. No deployment credentials are available to the pull-request job.
+Runs on `main` share one concurrency group, so production deployments never
+overlap and one in progress is never cancelled. If several merges land during a
+deployment, only the newest waits, so production ends at the latest `main`. A
+new push to a pull request cancels its superseded build. The workflow can also
+be run manually from `main`; other branches only build. No deployment
+credentials are available to the pull-request job.
 
 Each run uploads the assembled site as the `public-website` artifact, kept for
 seven days. To review a pull request without a preview URL, download it from
