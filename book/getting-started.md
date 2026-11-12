@@ -67,6 +67,9 @@ download. The image pull happens **before** the binary is moved into place, so
 if Docker is not running the installer aborts with nothing installed. Start
 Docker first, or install with `THS_SKIP_IMAGE_PULL=1` and run `ths pull` later.
 
+If `ths` in the destination is a directory or a symlink to a directory, the
+installer stops without changing its contents. An existing executable is replaced.
+
 If your shell says `ths: command not found`, either the install aborted or
 `~/.local/bin` is not on `PATH`. See [troubleshooting](troubleshooting.md) for
 the exact checks.

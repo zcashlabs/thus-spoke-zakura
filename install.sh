@@ -23,6 +23,13 @@ else
 fi
 
 destination="${THS_INSTALL_DIR:-$HOME/.local/bin}"
+check_launcher_destination() {
+  if [ -d "$destination/ths" ]; then
+    echo "Launcher destination is a directory: $destination/ths (including directory symlinks)" >&2
+    exit 1
+  fi
+}
+check_launcher_destination
 mkdir -p "$destination"
 stage="$(mktemp -d "$destination/.ths.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
@@ -67,6 +74,8 @@ if [ "${THS_SKIP_IMAGE_PULL:-0}" != "1" ]; then
   "$stage/ths" pull
 fi
 
+# Downloads and image pulls may take long enough for the destination to change.
+check_launcher_destination
 mv -f "$stage/ths" "$destination/ths"
 trap - EXIT HUP INT TERM
 rm -rf "$stage"

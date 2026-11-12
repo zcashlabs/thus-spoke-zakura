@@ -44,6 +44,14 @@ package_payload
 
 cat > "$bin/curl" <<'EOF'
 #!/bin/sh
+[ -z "${CURL_LOG:-}" ] || echo download >> "$CURL_LOG"
+if [ -n "${LATE_TARGET:-}" ]; then
+  mkdir -p "$LATE_TARGET"
+  printf '%s\n' sentinel > "$LATE_TARGET/ths"
+  if [ "$LATE_TARGET" != "$THS_INSTALL_DIR/ths" ] && [ ! -L "$THS_INSTALL_DIR/ths" ]; then
+    ln -s "$LATE_TARGET" "$THS_INSTALL_DIR/ths"
+  fi
+fi
 for arg do
   case "$arg" in
     */SHA256SUMS) source="$FIXTURES/SHA256SUMS" ;;
@@ -57,6 +65,37 @@ done
 exit 2
 EOF
 chmod +x "$bin/curl"
+
+# Check both preflight rejection and a target changed during download.
+for timing in before during; do
+  for kind in directory symlink; do
+    conflict="$tmp/$timing-$kind"
+    mkdir -p "$conflict"
+    target_dir="$conflict/ths"
+    if [ "$kind" = symlink ]; then target_dir="$tmp/$timing-external"; fi
+    late_target=""
+    if [ "$timing" = before ]; then
+      mkdir -p "$target_dir"
+      printf '%s\n' sentinel > "$target_dir/ths"
+      if [ "$kind" = symlink ]; then ln -s "$target_dir" "$conflict/ths"; fi
+    else
+      late_target="$target_dir"
+    fi
+    if PATH="$bin:$PATH" FIXTURES="$fixtures" CURL_LOG="$conflict/downloads" \
+      LATE_TARGET="$late_target" THS_INSTALL_DIR="$conflict" \
+      THS_VERSION=v9.8.7 THS_SKIP_IMAGE_PULL=1 "$root/install.sh" > "$conflict/output" 2>&1; then
+      echo "installer accepted $timing $kind target" >&2
+      exit 1
+    fi
+    grep -q 'Launcher destination is a directory' "$conflict/output"
+    if grep -q 'Installed ths' "$conflict/output"; then exit 1; fi
+    test "$(cat "$target_dir/ths")" = sentinel
+    test -d "$conflict/ths"
+    if [ "$kind" = symlink ]; then test "$(readlink "$conflict/ths")" = "$target_dir"; fi
+    if [ "$timing" = before ]; then test ! -e "$conflict/downloads"; fi
+    test -z "$(find "$conflict" -name '.ths.*' -print)"
+  done
+done
 
 printf '%s\n' old > "$install_dir/ths"
 PATH="$bin:$PATH" FIXTURES="$fixtures" THS_INSTALL_DIR="$install_dir" \
