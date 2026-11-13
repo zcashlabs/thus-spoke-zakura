@@ -9,6 +9,8 @@ mod assertions;
 mod faucet;
 #[path = "scenarios/activity_recovery/mining.rs"]
 mod mining;
+#[path = "scenarios/activity_recovery/nu7.rs"]
+mod nu7;
 #[path = "scenarios/activity_recovery/recovery.rs"]
 mod recovery;
 #[path = "scenarios/activity_recovery/send.rs"]
@@ -548,6 +550,21 @@ async fn mempool_mode_confirms_a_payment_without_ths_mine() -> Result<()> {
 #[ignore = "requires Docker and prepared regtest images"]
 async fn manual_mode_keeps_a_payment_pending_until_ths_mine() -> Result<()> {
     mining::manual_mode_keeps_a_payment_pending_until_ths_mine().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn delayed_nu7_activation_is_ready_below_activation_and_crosses_by_manual_mining()
+-> Result<()> {
+    nu7::delayed_nu7_activation_is_ready_below_activation_and_crosses_by_manual_mining().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker and prepared regtest images"]
+async fn delayed_nu7_activation_survives_restart_rollback_and_reorg_without_duplicate_funding()
+-> Result<()> {
+    nu7::delayed_nu7_activation_survives_restart_rollback_and_reorg_without_duplicate_funding()
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread")]

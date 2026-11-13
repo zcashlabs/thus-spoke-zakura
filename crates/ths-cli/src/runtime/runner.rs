@@ -225,6 +225,7 @@ impl Runtime {
                 shutdown,
                 None,
                 MiningConfig::default(),
+                DEFAULT_NU7_ACTIVATION_HEIGHT,
                 context,
                 &mut journal,
             )?;

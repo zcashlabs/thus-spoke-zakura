@@ -48,6 +48,14 @@ pub(crate) enum Command {
         /// Never mine automatically; confirmed work waits for `ths mine`.
         #[arg(long)]
         no_auto_mine: bool,
+        /// Activate NU7 at this block height. Fixed for the life of the instance.
+        #[arg(
+            long,
+            value_name = "HEIGHT",
+            default_value_t = crate::runtime::DEFAULT_NU7_ACTIVATION_HEIGHT,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        nu7_height: u32,
     },
     /// Wait until an existing environment is settled.
     Wait {
