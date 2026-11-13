@@ -14,6 +14,13 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 destination="${THS_INSTALL_DIR:-$HOME/.local/bin}"
+check_launcher_destination() {
+  if [ -d "$destination/ths" ]; then
+    echo "Launcher destination is a directory: $destination/ths (including directory symlinks)" >&2
+    exit 1
+  fi
+}
+check_launcher_destination
 mkdir -p "$destination"
 lock="$destination/.ths-install.lock"
 mkdir "$lock" 2>/dev/null || {
@@ -118,5 +125,7 @@ elif [ "$install_runtime" = docker ] && [ "${THS_SKIP_IMAGE_PULL:-0}" != 1 ]; th
   "$stage/ths" pull
 fi
 
+# Downloads and image pulls may take long enough for the destination to change.
+check_launcher_destination
 mv -f "$stage/ths" "$destination/ths"
 echo "Installed ths $installed_version to $destination ($install_runtime runtime)"
