@@ -95,6 +95,7 @@ for timing in before during; do
     if [ "$kind" = symlink ]; then test "$(readlink "$conflict/ths")" = "$target_dir"; fi
     if [ "$timing" = before ]; then test ! -e "$conflict/downloads"; fi
     test -z "$(find "$conflict" -name '.ths.*' -print)"
+    test ! -e "$conflict/.ths-install.lock"
   done
 done
 
