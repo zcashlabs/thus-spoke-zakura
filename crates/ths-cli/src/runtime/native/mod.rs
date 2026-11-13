@@ -41,6 +41,7 @@ impl Runtime {
         json: bool,
         offset: u16,
         mining: MiningConfig,
+        nu7_activation_height: u32,
         application: Option<&[OsString]>,
     ) -> Result<u8> {
         let bundle = bundle::resolve(directory)?;
@@ -126,6 +127,8 @@ impl Runtime {
                 .arg(state.join("wallet"))
                 .arg("--config-dir")
                 .arg(state.join("config"))
+                .arg("--nu7-height")
+                .arg(nu7_activation_height.to_string())
                 .arg("--native-chain-dir")
                 .arg(state.join("chain"))
                 .arg("--native-rpc-port")

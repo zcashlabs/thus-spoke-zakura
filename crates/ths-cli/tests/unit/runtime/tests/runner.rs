@@ -247,6 +247,10 @@ fn run_preserves_child_exit_code_and_cleans_after_settlement() {
     assert_eq!(code, 42);
     assert!(!runtime.root.join(".locks/alpha.lock").exists());
     assert_eq!(*host.allocated_offsets.lock().unwrap(), [None]);
+    assert_eq!(
+        *host.allocated_nu7_heights.lock().unwrap(),
+        [DEFAULT_NU7_ACTIVATION_HEIGHT]
+    );
     let events = events.lock().unwrap();
     assert!(events.contains(&"runtime_status".to_owned()));
     assert!(events.contains(&"child:alpha".to_owned()));

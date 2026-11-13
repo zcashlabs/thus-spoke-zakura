@@ -77,6 +77,7 @@ fn main() {
     let service = &args[1];
     let mode = &args[2];
     if service == "ths-server" && args[3] == "init" {
+        fs::write("nu7-height", argument(&args, "--nu7-height")).unwrap();
         fs::write(
             "ports",
             format!(

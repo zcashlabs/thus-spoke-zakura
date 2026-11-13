@@ -180,7 +180,9 @@ distinction is unclear.
 
 The local chain uses NU7 rules from height 1, including a 25-second target,
 shielded action limits, and fee recycling into the network sustainability
-mechanism (NSM). Regtest blocks are still generated on demand with `ths mine`.
+mechanism (NSM). An instance started with
+[`--nu7-height`](cli.md#ths-ths-start) uses NU6.3 rules below that height and
+NU7 rules from it. Regtest blocks are still generated on demand with `ths mine`.
 
 **Next:** [learn what to do when a payment or mining response is
 uncertain](architecture/operations.md).

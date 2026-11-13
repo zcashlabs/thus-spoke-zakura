@@ -8,6 +8,7 @@ impl Runtime {
         json: bool,
         port_offset: u16,
         mining: MiningConfig,
+        nu7_activation_height: u32,
     ) -> Result<()> {
         host_ports(port_offset)?;
         let shutdown = Shutdown::install()?;
@@ -50,6 +51,7 @@ impl Runtime {
             json,
             port_offset,
             mining,
+            nu7_activation_height,
             &DockerHost,
             &shutdown,
             &context,
@@ -330,6 +332,7 @@ pub(super) trait StartHost {
         shutdown: &Shutdown,
         port_offset: Option<u16>,
         mining: MiningConfig,
+        nu7_activation_height: u32,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance>;
@@ -451,6 +454,7 @@ impl StartHost for DockerHost {
         shutdown: &Shutdown,
         port_offset: Option<u16>,
         mining: MiningConfig,
+        nu7_activation_height: u32,
         context: &LifecycleContext,
         journal: &mut recovery::RecoveryJournal,
     ) -> Result<AllocatedInstance> {
@@ -496,7 +500,8 @@ impl StartHost for DockerHost {
         let init_budget = context.startup_deadline(context.policy.startup_docker);
         let init_docker = docker.scoped(init_budget, context.policy.startup_docker);
         if owned_resource(&init_docker, "container", &init_name, name)?.is_none() {
-            let app = app_image();
+            let init_args = init_container_args(&prefix, name, nu7_activation_height);
+            let init_args: Vec<&str> = init_args.iter().map(String::as_str).collect();
             let init_id = create_container(
                 &init_name,
                 name,
@@ -504,23 +509,7 @@ impl StartHost for DockerHost {
                 journal,
                 init_budget,
                 volumes.clone(),
-                &[
-                    "create",
-                    "--name",
-                    &init_name,
-                    "--label",
-                    &label(name),
-                    "-v",
-                    &format!("{prefix}-wallet:/data"),
-                    "-v",
-                    &format!("{prefix}-config:/config"),
-                    &app,
-                    "init",
-                    "--data-dir",
-                    "/data",
-                    "--config-dir",
-                    "/config",
-                ],
+                &init_args,
             )?;
             shutdown.check()?;
             let start_budget = context.startup_deadline(context.policy.initialization);
@@ -731,7 +720,16 @@ impl Runtime {
         shutdown: &Shutdown,
     ) -> Result<()> {
         let context = LifecycleContext::new(LifecyclePolicy::default());
-        self.start_with_policy(name, no_open, json, port_offset, host, shutdown, &context)
+        self.start_with_policy(
+            name,
+            no_open,
+            json,
+            port_offset,
+            DEFAULT_NU7_ACTIVATION_HEIGHT,
+            host,
+            shutdown,
+            &context,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -742,6 +740,7 @@ impl Runtime {
         no_open: bool,
         json: bool,
         port_offset: u16,
+        nu7_activation_height: u32,
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
@@ -754,6 +753,7 @@ impl Runtime {
             json,
             port_offset,
             MiningConfig::default(),
+            nu7_activation_height,
             host,
             shutdown,
             context,
@@ -785,6 +785,7 @@ impl Runtime {
         json: bool,
         port_offset: u16,
         mining: MiningConfig,
+        nu7_activation_height: u32,
         host: &dyn StartHost,
         shutdown: &Shutdown,
         context: &LifecycleContext,
@@ -814,6 +815,7 @@ impl Runtime {
                 shutdown,
                 Some(port_offset),
                 mining,
+                nu7_activation_height,
                 context,
                 &mut journal,
             )?;

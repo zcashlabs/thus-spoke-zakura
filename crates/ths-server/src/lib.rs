@@ -23,7 +23,8 @@ where
             data_dir,
             config_dir,
             native,
-        } => bootstrap::init(data_dir, config_dir, native),
+            nu7_height,
+        } => bootstrap::init(data_dir, config_dir, native, nu7_height),
         args::Command::Serve { data_dir } => bootstrap::serve(data_dir).await,
     }
 }

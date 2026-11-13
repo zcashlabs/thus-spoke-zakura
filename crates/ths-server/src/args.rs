@@ -18,6 +18,13 @@ pub(crate) enum Command {
         config_dir: PathBuf,
         #[command(flatten)]
         native: NativeInit,
+        /// Height at which NU7 activates. Fixed for the life of the instance.
+        #[arg(
+            long,
+            default_value_t = crate::network::DEFAULT_NU7_ACTIVATION_HEIGHT,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        nu7_height: u32,
     },
     Serve {
         #[arg(long, default_value = "/data")]

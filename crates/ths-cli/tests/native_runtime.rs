@@ -101,6 +101,9 @@ impl Fixture {
         Path::new(doctor["config_dir"].as_str().unwrap()).join(name)
     }
     fn start(&self, name: &str) -> (Child, serde_json::Value) {
+        self.start_with_args(name, &[])
+    }
+    fn start_with_args(&self, name: &str, args: &[&str]) -> (Child, serde_json::Value) {
         let mut child = self
             .command(name)
             .args([
@@ -113,6 +116,7 @@ impl Fixture {
                 "--runtime-dir",
             ])
             .arg(self.temp.path())
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -150,6 +154,34 @@ fn native_run_preserves_exit_codes_and_environment() {
     assert_eq!(
         output.status.code(),
         Some(23),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn native_start_forwards_nu7_height_and_run_uses_height_one() {
+    let fixture = Fixture::new("normal");
+    let (mut owner, _) = fixture.start_with_args("late-nu7", &["--nu7-height", "150"]);
+    let height = fs::read_to_string(fixture.state("late-nu7").join("nu7-height")).unwrap();
+    let stopped = fixture.command("late-nu7").arg("stop").output().unwrap();
+    assert!(wait(&mut owner).success());
+    assert!(stopped.status.success());
+    assert_eq!(height, "150");
+
+    let state = fixture.state("default-nu7");
+    let output = fixture.run(
+        "default-nu7",
+        &[
+            "/bin/sh",
+            "-c",
+            "test \"$(cat \"$1/nu7-height\")\" = 1",
+            "sh",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
