@@ -365,9 +365,9 @@ fn external_faucet_response(payment: AddressFaucet) -> anyhow::Result<FaucetAddr
     let address = Address::decode(&regtest_network(), &payment.address)
         .context("stored address faucet payment has an unparsable address")?;
     // A stored payment may predate the rule rejecting a Sapling receiver
-    // without Orchard; report it the same way the server did when it was
-    // accepted, rather than erroring on an already-settled payment.
-    let destination_pool = faucet_destination_pool(&address).unwrap_or("ironwood");
+    // without Orchard. Report it as unknown rather than erroring on an
+    // already-settled payment, or mislabeling it as Ironwood.
+    let destination_pool = faucet_destination_pool(&address).unwrap_or("unknown");
     Ok(FaucetAddressResponse {
         destination_pool,
         address: payment.address,

@@ -33,7 +33,7 @@ function addressFaucetActivity(payment: AddressFaucet, key: string): Activity {
     to_account: null,
     to_address: payment.address,
     source_pool: 'ironwood',
-    destination_pool: payment.destination_pool,
+    destination_pool: payment.destination_pool === 'unknown' ? null : payment.destination_pool,
     amount_zatoshi: payment.amount_zatoshi,
     txid: payment.txid,
     block_hash: payment.block_hash,

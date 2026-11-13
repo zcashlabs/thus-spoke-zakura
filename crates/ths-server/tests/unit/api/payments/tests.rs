@@ -150,7 +150,7 @@ impl AddressFaucetRuntime for RecordingAddressFaucetRuntime {
         Ok(FaucetAddressResponse {
             destination_pool: Address::decode(&regtest_network(), &req.address)
                 .and_then(|address| faucet_destination_pool(&address))
-                .unwrap_or("ironwood"),
+                .unwrap_or("unknown"),
             address: req.address,
             amount_zatoshi: req.amount_zatoshi,
             txid: "external-txid".into(),
@@ -537,6 +537,7 @@ async fn address_faucet_for_a_sapling_only_address_survives_reopen_and_retry() {
     assert_eq!(response["status"], "confirmed");
     assert_eq!(response["txid"], "original-txid");
     assert_eq!(response["block_hash"], "original-block");
+    assert_eq!(response["destination_pool"], "unknown");
 
     let body = json!({"address": address, "amount_zatoshi": 100_000,
         "idempotency_key": "sapling-only-retry"});
@@ -544,6 +545,7 @@ async fn address_faucet_for_a_sapling_only_address_survives_reopen_and_retry() {
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["status"], "confirmed");
     assert_eq!(response["txid"], "original-txid");
+    assert_eq!(response["destination_pool"], "unknown");
 }
 
 /// A state with a real store and offline wallet whose node RPC refuses

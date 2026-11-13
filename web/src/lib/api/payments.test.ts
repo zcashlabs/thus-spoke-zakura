@@ -88,4 +88,26 @@ describe('exact payment status API', () => {
       destination_pool: 'transparent',
     });
   });
+
+  it('reports an unknown pool as null, like any other unclassifiable activity', async () => {
+    // A payment saved before a Sapling-only unified address was rejected.
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/pull/444.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          address: 'uregtest1saplingonly',
+          destination_pool: 'unknown',
+          amount_zatoshi: 100_000,
+          txid: 'original-txid',
+          block_hash: 'original-block',
+          status: 'confirmed',
+          last_error: null,
+        }),
+      ),
+    );
+    expect(await api.faucetAddressStatus('address/key')).toMatchObject({
+      destination_pool: null,
+      status: 'confirmed',
+    });
+  });
 });
