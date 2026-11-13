@@ -98,3 +98,35 @@ fn json_run_reaches_dispatch_before_runtime_discovery() {
     );
     assert!(error.downcast_ref::<clap::Error>().is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn binary_ends_quietly_when_the_reader_closes_stdout() {
+    use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let docker = directory.path().join("docker");
+    std::fs::write(&docker, include_str!("fixtures/docker.sh")).unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ths"))
+        .arg("list")
+        .env("HOME", directory.path())
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", directory.path().display()),
+        )
+        .env("THS_TEST_STATE", directory.path().join("state"))
+        .env("THS_TEST_COMMANDS", directory.path().join("commands"))
+        .env("THS_TEST_NAME", "closed-pipe")
+        .env("THS_TEST_PORT", "18232")
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.signal(), Some(libc::SIGPIPE), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
