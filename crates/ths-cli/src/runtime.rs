@@ -35,6 +35,8 @@ mod docker_lifecycle_tests;
 #[cfg(test)]
 #[path = "../tests/unit/runtime/lifecycle_tests.rs"]
 mod lifecycle_tests;
+mod native;
+pub(crate) use instance::Backend;
 mod readiness;
 mod recovery;
 

@@ -1,6 +1,6 @@
 # Appendix A: `ths` CLI reference
 
-`ths` is the Thus Spoke Zakura launcher. It manages the Docker-based Regtest
+`ths` is the Thus Spoke Zakura launcher. It manages native or Docker-based Regtest
 environment and, once an environment is running, talks to its dashboard API or
 Zakura JSON-RPC on your behalf. This page documents every command in detail,
 with examples.
@@ -62,6 +62,30 @@ each host port (default: `0`), and must be a multiple of 10. It is not multiplie
 by 10; the result must fit a valid nonzero host port. Startup fails and names an occupied port
 instead of selecting a random port.
 
+Use `--native` to start installed local binaries without Docker. With native
+startup, a zero `--port-offset` allocates free loopback ports; a nonzero offset
+uses the same fixed port calculation described above. `--runtime-dir <DIR>`
+requires `--native` and selects a compatible local bundle; otherwise
+`THS_RUNTIME_DIR` or the installed `.ths-runtime/<version>` bundle is used.
+Native-only `--timeout <SECONDS>` is a positive integer and defaults to 180.
+It bounds initialization, readiness, and settlement together. Native
+`--json start` writes exactly one endpoint object after settlement, keeps
+running in the foreground, and writes diagnostics to stderr.
+
+Ctrl+C, SIGTERM, and terminal closure (SIGHUP) stop native services and delete
+the instance after cleanup is verified, including during startup. The same name
+can then be started again. Other startup failures retain logs for inspection;
+failed or uncertain cleanup retains state.
+
+If opening the browser fails, startup prints a warning and keeps the environment
+running. Open the printed dashboard URL yourself, or use `--no-open` to skip
+opening a browser.
+
+```console
+ths --name native --json start --native --no-open --no-auto-mine
+ths start --native --runtime-dir /path/to/ths-runtime --timeout 240
+```
+
 `start` also selects the instance's **mining mode**. Exactly one mode is active
 for the whole server lifetime, so the flags below are mutually exclusive:
 
@@ -98,10 +122,12 @@ either direction.
 The height is fixed for the life of the instance: it is stored with the
 instance's wallet data, kept when the app restarts, and reported as
 `nu7_activation_height` in `GET /api/v1/status`. To use another height, start a
-new instance. `ths run` always activates NU7 at height 1.
+new instance. This also applies to `start --native`. `ths run`, including
+`run --native`, always activates NU7 at height 1.
 
 ```console
 ths start --nu7-height 150      # ready under NU6.3; mine to 150 to activate NU7
+ths start --native --nu7-height 150
 ```
 
 ### `ths wait [--timeout <SECONDS>]`
@@ -136,6 +162,13 @@ failures are reported.
 ```console
 ths run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
 ```
+
+`run --native [--runtime-dir <DIR>]` uses local binaries and free loopback
+ports with the same runner environment, automatic mining, timeout, and exit-code
+contract. It also stops remaining application descendants on normal exit.
+Native failures retain logs, except requested interruption after verified cleanup.
+If the owner was killed before verifying cleanup,
+`stop` retains state and refuses to signal stale PIDs.
 
 The child inherits standard streams and the calling directory, but `run`
 supports non-interactive commands: it creates a separate process group without
@@ -319,6 +352,9 @@ ths list
 
 ### `ths doctor [--json]`
 
+`doctor --native [--runtime-dir <DIR>]` validates the native bundle and local
+listener-inspection prerequisite without starting services or contacting Docker.
+
 Checks that Docker is reachable and prints the launcher's configuration
 directory. If Docker is unreachable, the command exits nonzero in both output
 modes. With `--json`, stdout still contains one diagnostic JSON object with
@@ -344,8 +380,18 @@ ths uninstall
 the installer downloads a published release, not a build of recorded main.
 An explicit VERSION conflicts with `--check`.
 
-`uninstall` removes only the installed executable. Images and launcher
-configuration remain. Capture the real directory **before** uninstalling.
+`update` uses the verified installer. Its default `auto` mode detects a native
+installation from the `.ths-runtime` directory beside the launcher and installs
+the matching immutable runtime before replacing the launcher. Without that
+directory it pulls the matching Docker images. `THS_INSTALL_RUNTIME=native`,
+`docker`, or `none` overrides detection. Older bundles remain available to
+already-running instances, so `auto` continues to select native while that
+directory exists. A missing or invalid native archive aborts the update and
+leaves the current launcher unchanged; it never silently switches to Docker.
+
+`uninstall` removes only the installed executable. Native runtime bundles,
+images, and launcher configuration remain. Stop running instances before
+manually removing unused bundles under `.ths-runtime/`. Capture the real directory **before** uninstalling.
 The image tags below match this book's source baseline; inspect your selected
 launcher's tags before removing shared images used by other instances.
 
@@ -590,6 +636,10 @@ environment: a restarting environment keeps polling with the last snapshot
 marked unreachable, a stopped environment is reported while polling
 continues so a restart resumes the view, and a deleted environment exits
 with an error.
+
+Native watches use the recorded launcher owner and instance state for these
+checks; they do not call Docker. Recreating the same name starts a new instance
+and ends the original watch, even if it reuses the old ports.
 
 ### `ths wallet tx <TXID> [--account <N>]`
 

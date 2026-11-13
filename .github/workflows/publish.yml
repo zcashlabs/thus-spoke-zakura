@@ -42,7 +42,7 @@ jobs:
     needs: promote-images
     runs-on: ubuntu-24.04
     steps:
-      - name: Install anonymously and pull exact images
+      - name: Install anonymously and verify runtime
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           THS_INSTALL_DIR: ${{ runner.temp }}/bin
@@ -61,3 +61,14 @@ jobs:
             | THS_VERSION=latest THS_SKIP_IMAGE_PULL=1 sh
           "$THS_INSTALL_DIR/ths" --version
           "$THS_INSTALL_DIR/ths" update --check
+      - name: Install native runtime anonymously and verify startup
+        env:
+          THS_VERSION: ${{ github.event.release.tag_name }}
+          THS_INSTALL_DIR: ${{ runner.temp }}/native-bin
+          THS_INSTALL_RUNTIME: native
+        shell: bash
+        run: |
+          installer="https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/$THS_VERSION/install.sh"
+          curl --proto '=https' --tlsv1.2 -fsSL "$installer" | sh
+          "$THS_INSTALL_DIR/ths" doctor --native
+          "$THS_INSTALL_DIR/ths" --name public-smoke run --native --timeout 300 -- true

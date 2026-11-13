@@ -67,6 +67,14 @@ impl Runtime {
         let observe = |instance: Instance, remaining: Duration| -> Result<RuntimeStatus> {
             let ownership = self.ownership_state(name)?;
             current(&instance)?;
+            let probe_started = Instant::now();
+            if instance.backend == Backend::Native {
+                self.native_validate_with_timeout(name, &instance, remaining)?;
+            }
+            let remaining = remaining.saturating_sub(probe_started.elapsed());
+            if remaining.is_zero() {
+                bail!("native status validation exceeded the settlement timeout");
+            }
             let status = read_status(&instance.endpoints, remaining)?;
             if self.ownership_state(name)? != ownership {
                 bail!("environment {name} changed owner while its status was read");

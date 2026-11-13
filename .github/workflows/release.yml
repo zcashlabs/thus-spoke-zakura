@@ -53,6 +53,7 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+      - run: node --test tests/native_package.mjs
 
   launcher:
     needs: [version, test]
@@ -74,6 +75,28 @@ jobs:
       - run: rustup toolchain install 1.98.0 --profile minimal --target "${{ matrix.target }}"
       - run: rustup default 1.98.0
       - run: cargo build --locked --release -p thus-spoke-zakura --features release-distribution --target "${{ matrix.target }}"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.25'
+          cache: false
+      - name: Install native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev cmake pkg-config protobuf-compiler
+      - name: Install native build dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Build pinned native runtime
+        run: tools/build_native.sh native-dist
+      - name: Verify native runtime and wallet workflow
+        shell: bash
+        run: |
+          launcher="$PWD/target/${{ matrix.target }}/release/ths"
+          "$launcher" doctor --native --runtime-dir "$PWD/native-dist/ths-runtime"
+          "$launcher" --name release-smoke run --native --runtime-dir "$PWD/native-dist/ths-runtime" \
+            --timeout 300 -- node tests/native_smoke.mjs
       - name: Verify Linux launcher on Ubuntu 22.04 and Debian 12
         if: contains(matrix.target, 'unknown-linux-gnu')
         shell: bash
@@ -92,6 +115,11 @@ jobs:
         with:
           name: launcher-${{ matrix.target }}
           path: ths-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-runtime-${{ matrix.target }}
+          path: native-dist/ths-runtime-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   image-platforms:
@@ -234,6 +262,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: launcher-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-runtime-*
           path: dist
           merge-multiple: true
       - name: Create checksums

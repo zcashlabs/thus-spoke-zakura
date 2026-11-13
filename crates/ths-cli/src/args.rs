@@ -30,6 +30,13 @@ pub(crate) enum Command {
     /// Start an environment in the foreground; interrupting deletes it.
     Start {
         #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
+        /// Native startup and settlement deadline in seconds (default 180).
+        #[arg(long, requires = "native", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
+        #[arg(long)]
         no_open: bool,
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
@@ -65,6 +72,10 @@ pub(crate) enum Command {
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
+        #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
         /// Maximum time for startup and settlement, in seconds.
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
@@ -187,8 +198,13 @@ pub(crate) enum Command {
     },
     /// List known environments.
     List,
-    /// Check local Docker and configuration prerequisites.
-    Doctor,
+    /// Check local runtime and configuration prerequisites.
+    Doctor {
+        #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
+    },
     /// Print a shell completion script.
     Completions {
         /// Shell that will load the script.

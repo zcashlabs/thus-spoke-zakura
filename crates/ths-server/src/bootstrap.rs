@@ -11,11 +11,16 @@ use crate::{
     state::AppState,
     sync, wallet,
 };
-use config::{development_credentials, zakura_config};
+use config::{configured_zakura, development_credentials};
 
 mod config;
 
-pub(super) fn init(data_dir: PathBuf, config_dir: PathBuf, nu7_height: u32) -> Result<()> {
+pub(super) fn init(
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    native: crate::args::NativeInit,
+    nu7_height: u32,
+) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&config_dir)?;
     let store = Store::open(data_dir.join("ths.db"))?;
@@ -25,7 +30,7 @@ pub(super) fn init(data_dir: PathBuf, config_dir: PathBuf, nu7_height: u32) -> R
     let miner = store.account(TREASURY_ACCOUNT_ID)?.transparent_address;
     fs::write(
         config_dir.join("zakurad.toml"),
-        zakura_config(&miner, nu7_height),
+        configured_zakura(&miner, &native, nu7_height)?,
     )?;
     println!("initialized five development accounts and a hidden treasury; miner address {miner}");
     println!("{}", development_credentials(&store)?);

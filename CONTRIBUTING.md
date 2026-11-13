@@ -14,7 +14,9 @@ For questions about setup or contributing, join the [Zypherpunks Discord](https:
 
 ## Development setup
 
-You need Rust 1.98, Node 24, and Docker.
+You need Rust 1.98 and Node 24. The instructions below use Docker. For native
+processes without Docker, follow [native development](book/development.md#native-runtime-no-docker)
+and the [bundle build instructions](RELEASING.md#native-runtime-contract).
 
 Install the web dependencies and build development runtime images:
 

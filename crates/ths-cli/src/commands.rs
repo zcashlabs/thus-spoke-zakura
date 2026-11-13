@@ -38,6 +38,9 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let name = resolve_name(cli.name, run);
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
+        native: false,
+        runtime_dir: None,
+        timeout: None,
         no_open: false,
         port_offset: 0,
         block_time: None,
@@ -46,6 +49,9 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         nu7_height: DEFAULT_NU7_ACTIVATION_HEIGHT,
     }) {
         Command::Start {
+            native,
+            runtime_dir,
+            timeout,
             no_open,
             port_offset,
             block_time,
@@ -54,10 +60,45 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             nu7_height,
         } => {
             let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
+            if native {
+                return runtime
+                    .native_start(
+                        &name,
+                        runtime_dir.as_deref(),
+                        Duration::from_secs(timeout.unwrap_or(180)),
+                        no_open,
+                        cli.json,
+                        port_offset,
+                        mining,
+                        nu7_height,
+                        None,
+                    )
+                    .map(ExitCode::from);
+            }
             runtime.start(&name, no_open, cli.json, port_offset, mining, nu7_height)
         }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
-        Command::Run { timeout, command } => {
+        Command::Run {
+            timeout,
+            command,
+            native,
+            runtime_dir,
+        } => {
+            if native {
+                return runtime
+                    .native_start(
+                        &name,
+                        runtime_dir.as_deref(),
+                        Duration::from_secs(timeout),
+                        true,
+                        false,
+                        0,
+                        MiningConfig::default(),
+                        DEFAULT_NU7_ACTIVATION_HEIGHT,
+                        Some(&command),
+                    )
+                    .map(ExitCode::from);
+            }
             return runtime
                 .run(&name, Duration::from_secs(timeout), &command)
                 .map(ExitCode::from);
@@ -173,7 +214,16 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Stop => runtime.stop(&name),
         Command::Reset { force } => runtime.reset(&name, force),
         Command::List => runtime.list(cli.json),
-        Command::Doctor => runtime.doctor(cli.json),
+        Command::Doctor {
+            native,
+            runtime_dir,
+        } => {
+            if native {
+                runtime.native_doctor(runtime_dir.as_deref(), cli.json)
+            } else {
+                runtime.doctor(cli.json)
+            }
+        }
         Command::Completions { .. } => {
             unreachable!("completions are printed before runtime discovery")
         }
@@ -202,7 +252,11 @@ fn write_completions(shell: CompletionShell, buf: &mut dyn Write) {
 }
 
 fn should_check_for_updates(cli: &Cli) -> bool {
-    !cli.json && matches!(cli.command, None | Some(Command::Start { .. }))
+    !cli.json
+        && matches!(
+            cli.command,
+            None | Some(Command::Start { native: false, .. })
+        )
 }
 
 #[cfg(test)]

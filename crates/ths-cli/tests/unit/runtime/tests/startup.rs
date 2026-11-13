@@ -1124,6 +1124,7 @@ fn a_stop_cleans_leftovers_older_than_the_launcher_it_stopped() {
     let alpha = name("alpha");
     fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
     let crashed = Instance {
+        backend: Backend::Docker,
         name: "alpha".into(),
         version: 1,
         endpoints: endpoints_for(&host_ports(0).unwrap()),
