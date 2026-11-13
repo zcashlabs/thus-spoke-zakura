@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn run_and_wait_require_positive_timeouts() {
+    for args in [
+        &["ths", "run", "--timeout", "0", "--", "true"][..],
+        &["ths", "wait", "--timeout", "0"],
+        &["ths", "run", "--native", "--timeout", "0", "--", "true"],
+        &["ths", "start", "--native", "--timeout", "0"],
+    ] {
+        let error = match Cli::try_parse_from(args) {
+            Ok(_) => panic!("accepted {args:?}"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(message.contains("not in 1.."), "{message}");
+        assert!(!message.contains("Docker"), "{message}");
+    }
+
+    let run = Cli::try_parse_from(["ths", "run", "--timeout", "1", "--", "true"]).unwrap();
+    assert!(matches!(run.command, Some(Command::Run { timeout: 1, .. })));
+    let wait = Cli::try_parse_from(["ths", "wait", "--timeout", "1"]).unwrap();
+    assert!(matches!(wait.command, Some(Command::Wait { timeout: 1 })));
+
+    let run = Cli::try_parse_from(["ths", "run", "--", "true"]).unwrap();
+    assert!(matches!(
+        run.command,
+        Some(Command::Run { timeout: 120, .. })
+    ));
+    let wait = Cli::try_parse_from(["ths", "wait"]).unwrap();
+    assert!(matches!(wait.command, Some(Command::Wait { timeout: 120 })));
+}
+
+#[test]
 fn parses_explorer_commands_with_global_options() {
     for args in [
         vec!["ths", "--name", "alice", "--json", "tx", "txid"],
@@ -122,6 +154,8 @@ fn separates_building_from_starting() {
             block_time: None,
             mine_on_mempool: false,
             no_auto_mine: false,
+            nu7_height: 1,
+            ..
         })
     ));
 
@@ -183,6 +217,30 @@ fn start_selects_one_mining_mode() {
     );
     assert!(Cli::try_parse_from(["ths", "start", "--block-time", "2", "--no-auto-mine"]).is_err());
     assert!(Cli::try_parse_from(["ths", "start", "--mine-on-mempool", "--no-auto-mine"]).is_err());
+}
+
+#[test]
+fn start_selects_the_nu7_activation_height_and_defaults_to_one() {
+    let cli = Cli::try_parse_from(["ths", "start"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start { nu7_height: 1, .. })
+    ));
+
+    let cli =
+        Cli::try_parse_from(["ths", "start", "--nu7-height", "150", "--no-auto-mine"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Start {
+            nu7_height: 150,
+            no_auto_mine: true,
+            ..
+        })
+    ));
+
+    // Genesis cannot carry an upgrade, so the earliest activation is block 1.
+    assert!(Cli::try_parse_from(["ths", "start", "--nu7-height", "0"]).is_err());
+    assert!(Cli::try_parse_from(["ths", "start", "--nu7-height", "later"]).is_err());
 }
 
 #[test]
@@ -633,6 +691,41 @@ fn wallet_tx_takes_a_transaction_id_and_an_optional_account() {
         vec!["ths", "wallet", "tx", &"zz".repeat(32)],
         vec!["ths", "wallet", "tx", &txid, "--account", "6"],
         vec!["ths", "wallet", "tx", &txid, "--account", "0"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn native_runtime_flags_and_positive_timeout() {
+    for args in [
+        vec![
+            "ths",
+            "start",
+            "--native",
+            "--runtime-dir",
+            "/bundle",
+            "--timeout",
+            "180",
+        ],
+        vec![
+            "ths",
+            "run",
+            "--native",
+            "--runtime-dir",
+            "/bundle",
+            "--",
+            "true",
+        ],
+        vec!["ths", "doctor", "--native", "--runtime-dir", "/bundle"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+    }
+    for args in [
+        vec!["ths", "start", "--runtime-dir", "/bundle"],
+        vec!["ths", "start", "--timeout", "1"],
+        vec!["ths", "start", "--native", "--timeout", "0"],
+        vec!["ths", "run", "--native", "--timeout", "0", "--", "true"],
     ] {
         assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
     }

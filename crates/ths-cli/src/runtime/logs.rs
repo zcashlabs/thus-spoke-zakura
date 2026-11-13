@@ -9,6 +9,13 @@ impl Runtime {
         tail: Option<u64>,
         head: Option<u64>,
     ) -> Result<()> {
+        if self.instance_dir(name).join("native.json").exists()
+            || self
+                .read_instance(name)
+                .is_ok_and(|instance| instance.backend == Backend::Native)
+        {
+            return self.native_logs(name, service, follow, tail, head);
+        }
         let service = service.unwrap_or("app");
         let container = format!("{}-{service}", prefix(name));
         if let Some(lines) = head {

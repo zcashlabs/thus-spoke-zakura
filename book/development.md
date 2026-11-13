@@ -60,6 +60,66 @@ and settlement, not the child runtime. Use non-interactive commands. The
 recovery metadata. To wait for an instance already started in another terminal,
 use `cargo run -p thus-spoke-zakura -- --name alice wait --timeout 180`.
 
+## Native runtime (no Docker)
+
+The Rust launcher runs Zakura, lightwalletd, and ths-server as local processes.
+The installed native bundle contains compatible pinned binaries and the built
+web dashboard; Python and Docker are not runtime dependencies. Native support
+covers macOS and Linux on x86_64 and aarch64. macOS uses its system
+`/usr/sbin/lsof` to prove listener ownership; Linux reads procfs directly.
+
+For source development, build a matching bundle using the release packaging
+instructions in [RELEASING.md](../RELEASING.md). Pass the bundle directory with
+`--runtime-dir` or `THS_RUNTIME_DIR`. The directory must contain `manifest.json`,
+`bin/zakurad`, `bin/lightwalletd`, `bin/ths-server`, and `web/index.html`.
+The launcher checks the manifest's platform, launcher version and component pins
+before creating an instance. Rebuild ths-server and the dashboard when changing
+those sources, then recreate the bundle.
+
+```console
+cargo run -p thus-spoke-zakura -- doctor --native --runtime-dir /path/to/ths-runtime
+cargo run -p thus-spoke-zakura -- --name native start --native --runtime-dir /path/to/ths-runtime --no-open
+cargo run -p thus-spoke-zakura -- run --native --runtime-dir /path/to/ths-runtime --timeout 180 -- node tests/native_smoke.mjs
+cargo test -p thus-spoke-zakura --test native_runtime
+```
+
+The Rust lifecycle regressions use compiled disposable service fixtures and run
+on Linux and macOS in CI without Docker or a real node. The Node smoke test uses
+real services and checks funding, mining, a shielded payment, idempotent replay,
+reorganization and rollback. It uses the runner's default automatic mining.
+
+Each start reserves a fresh name under the usual launcher ownership lock and
+creates private instance state. Ports are reserved on loopback during
+initialization. The node uses the legacy TCP peer stack, disabling its separate
+QUIC listener; lightwalletd metrics bind to `127.0.0.1:0`. Services receive a
+minimal environment, with no inherited proxies, backend addresses or config.
+The native initializer emits loopback addresses directly from typed port/path
+options. After each port handoff, the launcher verifies that the actual child
+owns the listener before contacting it, checks the exact Regtest genesis, and
+checks the server's instance identity and Regtest network before reporting ready.
+
+Native startup includes wallet settlement. Its timeout is one absolute budget,
+including HTTP bodies that arrive slowly. The normal `endpoints`, `status`,
+`list`, `wait`, `logs`, `stop`, `reset`, `mine`, `rpc`, and wallet commands work
+with native instances. Native state explicitly records its backend; old state
+without a backend remains Docker state. Services exiting unexpectedly stop the
+application, and cancellation, partial startup, and normal application exit
+clean up owned process groups, including initializer/application descendants.
+SIGINT, SIGTERM, and SIGHUP delete instance state once cleanup is verified,
+including interruption during initialization, so the same name can be reused.
+Other failures retain state and logs for inspection; `stop` deletes that state
+after cleanup has been verified. The lifecycle regressions check signal cleanup,
+closed listeners, name reuse, and preservation of another running instance.
+
+A launcher killed with SIGKILL cannot verify cleanup. `stop` then retains its
+state and reports uncertainty rather than signaling possibly reused persisted
+PIDs. Inspect and stop the abandoned processes manually before removing that
+instance directory. A child that deliberately leaves its process group escapes
+group cleanup; native services must remain foreground processes. Native `run`
+forwards interruption to the application group and returns a failure, including
+when another shell requests `stop`. No other instance's directory or process
+is removed.
+
 ## Find the part you need to change
 
 | Need | Start reading |

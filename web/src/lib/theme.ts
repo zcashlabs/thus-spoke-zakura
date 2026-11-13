@@ -2,6 +2,13 @@ export type ThemePreference = 'light' | 'dark' | 'system';
 
 export const THEME_STORAGE_KEY = 'ths-theme';
 
+// Canvas colors used for <meta name="theme-color">. Must stay in sync with
+// --color-canvas in globals.css for each theme.
+const THEME_CANVAS: Record<'light' | 'dark', string> = {
+  light: '#f2f0f1',
+  dark: '#0e0f11',
+};
+
 export function isThemePreference(value: unknown): value is ThemePreference {
   return value === 'light' || value === 'dark' || value === 'system';
 }
@@ -17,6 +24,24 @@ export function applyTheme(preference: ThemePreference): void {
   const root = document.documentElement;
   if (preference === 'system') root.removeAttribute('data-theme');
   else root.setAttribute('data-theme', preference);
+  updateThemeColor(preference);
+}
+
+/**
+ * Updates <meta name="theme-color"> to match the resolved canvas color.
+ *
+ * Called from applyTheme and from a matchMedia listener in useTheme so that
+ * the mobile browser toolbar stays in step with every kind of theme change:
+ * an explicit toggle, a cross-tab storage event, or an OS preference change
+ * while the page is following the system.
+ */
+export function updateThemeColor(preference: ThemePreference): void {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta) return;
+  const dark =
+    preference === 'dark' ||
+    (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  meta.content = dark ? THEME_CANVAS.dark : THEME_CANVAS.light;
 }
 
 /**

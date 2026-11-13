@@ -10,3 +10,4 @@
 /site
 __pycache__/
 .superpowers/
+/.local-native/

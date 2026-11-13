@@ -3,16 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#090b0a" />
+    <meta name="theme-color" content="#f2f0f1" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/favicon.ico" />
     <title>Thus Spoke Zakura</title>
   </head>
   <body>
     <script>
-      // Applied before first paint so a dark-theme reload never flashes white.
-      // Mirrors readStoredTheme()/applyTheme() in src/lib/theme.ts.
+      // Applied before first paint so a dark-theme reload never flashes white
+      // and the mobile toolbar color matches the canvas from the start.
+      // Mirrors readStoredTheme()/applyTheme()/updateThemeColor() in
+      // src/lib/theme.ts; keep in sync when those change.
       try {
         var t = localStorage.getItem('ths-theme');
         if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+        var dark = t === 'dark' || (t !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.content = dark ? '#0e0f11' : '#f2f0f1';
       } catch (e) {}
     </script>
     <div id="root"></div>

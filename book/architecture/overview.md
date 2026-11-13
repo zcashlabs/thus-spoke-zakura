@@ -1,8 +1,14 @@
 # 2. Components and state
 
 Chapter 1 started an instance and printed four endpoints. Now we will
-follow those endpoints inward. The important question is not merely which
-container handles a request, but **which component owns the answer**.
+follow those endpoints inward. Each component owns a different answer.
+
+`ths start --native` runs Zakura, lightwalletd, and `ths-server` directly from
+a versioned runtime bundle. The same server serves the dashboard and wallet
+API. Every native listener binds to `127.0.0.1`, and each instance has its own
+data directory. The foreground launcher owns the child processes and cleans up
+their process groups on exit. Docker startup, described in the diagram below,
+uses containers and volumes for those same components.
 
 A **block** is a unit of chain history. The **node tip** is Zakura's latest
 block height and hash. The **mempool** holds transactions the node knows

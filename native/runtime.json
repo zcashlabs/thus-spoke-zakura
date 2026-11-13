@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "zakura_repository": "https://github.com/zakura-core/zakura.git",
+  "zakura_commit": "c572f8faf88e58dcaefd80ec8e4ed05f2d8643b6",
+  "lightwalletd_repository": "https://github.com/zcash/lightwalletd.git",
+  "lightwalletd_commit": "d79cd1100575ff909d70e00d5514a4092df94934"
+}

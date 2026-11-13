@@ -6,22 +6,32 @@ use anyhow::{Context, Result};
 use crate::{
     api,
     db::{Store, TREASURY_ACCOUNT_ID},
+    network,
     payments::treasury,
     state::AppState,
     sync, wallet,
 };
-use config::{development_credentials, zakura_config};
+use config::{configured_zakura, development_credentials};
 
 mod config;
 
-pub(super) fn init(data_dir: PathBuf, config_dir: PathBuf) -> Result<()> {
+pub(super) fn init(
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    native: crate::args::NativeInit,
+    nu7_height: u32,
+) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&config_dir)?;
     let store = Store::open(data_dir.join("ths.db"))?;
-    store.initialize()?;
+    store.initialize_instance(nu7_height)?;
+    network::use_nu7_activation_height(nu7_height)?;
     wallet::RealWallet::open(&data_dir, &store.seed()?)?;
     let miner = store.account(TREASURY_ACCOUNT_ID)?.transparent_address;
-    fs::write(config_dir.join("zakurad.toml"), zakura_config(&miner))?;
+    fs::write(
+        config_dir.join("zakurad.toml"),
+        configured_zakura(&miner, &native, nu7_height)?,
+    )?;
     println!("initialized five development accounts and a hidden treasury; miner address {miner}");
     println!("{}", development_credentials(&store)?);
     Ok(())
@@ -31,6 +41,9 @@ pub(super) async fn serve(data_dir: PathBuf) -> Result<()> {
     fs::create_dir_all(&data_dir)?;
     let store = Store::open(data_dir.join("ths.db"))?;
     store.initialize()?;
+    // The stored height, not the environment, decides the schedule, so a restarted
+    // app keeps the one the node was configured with at `init`.
+    network::use_nu7_activation_height(store.nu7_activation_height()?)?;
     let wallet = wallet::RealWallet::open(&data_dir, &store.seed()?)?;
     let mining_config = crate::mining::MiningConfig::from_env()
         .context("invalid mining configuration in the environment")?;

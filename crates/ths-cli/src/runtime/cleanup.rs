@@ -23,7 +23,7 @@ impl Runtime {
             if !report.environment_found {
                 bail!("environment {name} does not exist");
             }
-            println!("Deleted {name}; its Docker volumes cannot be recovered.");
+            println!("Deleted {name}; its development data cannot be recovered.");
             Ok(())
         } else {
             report.into_result()
@@ -31,6 +31,13 @@ impl Runtime {
     }
 
     pub(super) fn verified_cleanup(&self, name: &InstanceName) -> Result<CleanupReport> {
+        if self.instance_dir(name).join("native.json").exists()
+            || self
+                .read_instance(name)
+                .is_ok_and(|instance| instance.backend == Backend::Native)
+        {
+            return self.native_cleanup(name);
+        }
         let policy = LifecyclePolicy::default();
         self.verified_cleanup_with(name, &policy, || {
             let context = LifecycleContext::new(policy);
@@ -82,6 +89,16 @@ impl Runtime {
         deadline: Deadline,
         context: &LifecycleContext,
     ) -> Result<CleanupReport> {
+        // Docker resource absence says nothing about native processes still using this data.
+        if self.instance_dir(name).join("native.json").exists()
+            || self
+                .read_instance(name)
+                .is_ok_and(|instance| instance.backend == Backend::Native)
+        {
+            bail!(
+                "environment {name} contains native state; refusing Docker cleanup. Use `ths --name {name} stop` to verify native cleanup first"
+            );
+        }
         let recovery_path = self.recovery_path(name);
         let recorded = self.instance_dir(name).exists();
         let loaded = match recovery::RecoveryJournal::load(recovery_path.clone(), name) {

@@ -41,8 +41,18 @@ pub struct Endpoints {
     pub tls: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Backend {
+    #[default]
+    Docker,
+    Native,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Instance {
+    #[serde(default)]
+    pub(crate) backend: Backend,
     pub(super) name: String,
     pub(super) version: u32,
     pub(crate) endpoints: Endpoints,
@@ -55,10 +65,18 @@ pub(crate) struct Instance {
 
 impl Runtime {
     pub fn status(&self, name: &InstanceName, json: bool) -> Result<bool> {
-        let instance = self
-            .read_instance(name)
-            .or_else(|_| inspect_unrecorded_instance(name, &DockerCli))?;
-        let environment = inspect_environment(instance, &DockerCli)?;
+        let instance = match self.read_instance(name) {
+            Ok(instance) => instance,
+            Err(error) if self.instance_dir(name).join("native.json").exists() => {
+                return Err(error);
+            }
+            Err(_) => inspect_unrecorded_instance(name, &DockerCli)?,
+        };
+        let environment = if instance.backend == Backend::Native {
+            self.native_environment(instance)?
+        } else {
+            inspect_environment(instance, &DockerCli)?
+        };
         let running = environment.state == "running";
         if json {
             println!(
@@ -102,6 +120,7 @@ impl Runtime {
     pub(super) fn write_instance(&self, name: &InstanceName, endpoints: &Endpoints) -> Result<()> {
         let instance = Instance {
             name: name.to_string(),
+            backend: Backend::Docker,
             version: 1,
             endpoints: endpoints.clone(),
             created_at: Some(now_unix()?),
@@ -143,6 +162,7 @@ fn inspect_unrecorded_instance(
     }
     Ok(Instance {
         name: name.to_string(),
+        backend: Backend::Docker,
         version: 1,
         endpoints: inspect_endpoints(&prefix(name))?,
         created_at: None,
@@ -694,7 +714,7 @@ impl Runtime {
             .is_some_and(|id| self.stop_request_path(name, &id).exists()))
     }
 
-    fn read_session(&self, name: &InstanceName) -> Result<Option<String>> {
+    pub(super) fn read_session(&self, name: &InstanceName) -> Result<Option<String>> {
         match fs::read_to_string(self.session_path(name)) {
             Ok(id) if !id.trim().is_empty() => Ok(Some(id.trim().to_owned())),
             Ok(_) => Ok(None),
@@ -770,7 +790,11 @@ impl Runtime {
                 let path = entry?.path().join("instance.json");
                 if path.exists() {
                     let instance = serde_json::from_slice::<Instance>(&fs::read(&path)?)?;
-                    environments.push(inspect_environment(instance, docker)?);
+                    environments.push(if instance.backend == Backend::Native {
+                        self.native_environment(instance)?
+                    } else {
+                        inspect_environment(instance, docker)?
+                    });
                 }
             }
         }

@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+export THS_INSTALL_RUNTIME=docker
 
 root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d -t ths-install-test.XXXXXX)"
@@ -102,3 +103,4 @@ fi
 test "$(cat "$install_dir/ths")" = old
 
 echo "installer tests passed"
+"$root/tests/native_install.sh"

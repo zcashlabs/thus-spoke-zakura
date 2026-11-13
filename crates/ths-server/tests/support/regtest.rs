@@ -302,6 +302,7 @@ pub struct RegtestStack {
     lightwalletd_port: Option<u16>,
     mining_mode: Option<&'static str>,
     block_time: Option<u64>,
+    nu7_activation_height: Option<u32>,
     start_attempted: bool,
     shutdown_complete: bool,
     cleanup_errors: Vec<String>,
@@ -356,6 +357,7 @@ impl RegtestStack {
             lightwalletd_port: None,
             mining_mode: None,
             block_time: None,
+            nu7_activation_height: None,
             start_attempted: false,
             shutdown_complete: false,
             cleanup_errors: Vec::new(),
@@ -373,6 +375,13 @@ impl RegtestStack {
     pub fn configure_mining(&mut self, mode: &'static str, block_time: Option<u64>) -> &mut Self {
         self.mining_mode = Some(mode);
         self.block_time = block_time;
+        self
+    }
+
+    /// Selects the NU7 activation height that `init` records with the fixture
+    /// instance, as `ths start --nu7-height` does for a launched one.
+    pub fn configure_nu7_activation_height(&mut self, height: u32) -> &mut Self {
+        self.nu7_activation_height = Some(height);
         self
     }
 
@@ -394,18 +403,18 @@ impl RegtestStack {
             "checking Docker",
         )
         .await?;
-        self.server_checked(
-            vec![
-                "init".into(),
-                "--data-dir".into(),
-                self.data_dir.display().to_string(),
-                "--config-dir".into(),
-                self.config_dir.display().to_string(),
-            ],
-            INIT_TIMEOUT,
-            "initializing the isolated server data",
-        )
-        .await?;
+        let mut init = vec![
+            "init".into(),
+            "--data-dir".into(),
+            self.data_dir.display().to_string(),
+            "--config-dir".into(),
+            self.config_dir.display().to_string(),
+        ];
+        if let Some(height) = self.nu7_activation_height {
+            init.extend(["--nu7-height".into(), height.to_string()]);
+        }
+        self.server_checked(init, INIT_TIMEOUT, "initializing the isolated server data")
+            .await?;
 
         let network = DockerResource::Network(self.names.network.clone());
         let chain_volume = DockerResource::Volume(self.names.chain_volume.clone());

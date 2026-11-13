@@ -36,7 +36,12 @@ impl Runtime {
         // Refuse before looking the instance up, so a missing confirmation
         // cannot reach the node.
         confirm_stop(method, yes)?;
-        let url = self.read_instance(name)?.endpoints.rpc;
+        let instance = self.read_instance(name)?;
+        if instance.backend == Backend::Native {
+            self.native_validate(name, &instance)?;
+            return call_rpc(&instance.endpoints.rpc, method, params, raw);
+        }
+        let url = instance.endpoints.rpc;
         let target = format!("{}-zakura", prefix(name));
         let journal = recovery::RecoveryJournal::load(self.recovery_path(name), name)?
             .with_context(|| {

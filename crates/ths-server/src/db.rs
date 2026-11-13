@@ -13,7 +13,7 @@ use zcash_keys::{
     keys::{Era, UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 
-use crate::network::regtest_network;
+use crate::network::{DEFAULT_NU7_ACTIVATION_HEIGHT, regtest_network};
 
 mod accounts;
 mod activity;
