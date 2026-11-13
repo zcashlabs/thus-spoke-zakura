@@ -336,3 +336,47 @@ fn migrates_activity_created_before_address_sends() {
     assert_eq!(claimed.to_address.as_deref(), Some("tmExternal"));
     assert_eq!(store.activities(10).unwrap().len(), 3);
 }
+
+#[test]
+fn a_new_instance_keeps_its_nu7_activation_height_after_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ths.db");
+    let store = Store::open(&path).unwrap();
+    store.initialize_instance(150).unwrap();
+    assert_eq!(store.nu7_activation_height().unwrap(), 150);
+    drop(store);
+
+    // `serve` reopens the store after an app restart and only reads the height.
+    let reopened = Store::open(&path).unwrap();
+    reopened.initialize().unwrap();
+    assert_eq!(reopened.nu7_activation_height().unwrap(), 150);
+    reopened.initialize_instance(150).unwrap();
+    assert_eq!(reopened.nu7_activation_height().unwrap(), 150);
+}
+
+#[test]
+fn an_existing_instance_refuses_a_different_nu7_activation_height() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize_instance(150).unwrap();
+    let error = store.initialize_instance(200).unwrap_err().to_string();
+    assert!(
+        error.contains("created with NU7 activation height 150")
+            && error.contains("cannot change to 200"),
+        "{error}"
+    );
+    assert_eq!(store.nu7_activation_height().unwrap(), 150);
+}
+
+#[test]
+fn stores_created_before_configurable_heights_keep_nu7_at_height_one() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    assert_eq!(store.nu7_activation_height().unwrap(), 1);
+    let error = store.initialize_instance(150).unwrap_err().to_string();
+    assert!(
+        error.contains("created with NU7 activation height 1 and cannot change to 150"),
+        "{error}"
+    );
+    store.initialize_instance(1).unwrap();
+    assert_eq!(store.nu7_activation_height().unwrap(), 1);
+}

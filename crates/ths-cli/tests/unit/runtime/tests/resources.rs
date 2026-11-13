@@ -632,6 +632,31 @@ fn app_container_receives_the_selected_mining_mode() {
 }
 
 #[test]
+fn init_container_receives_the_selected_nu7_activation_height() {
+    for height in [DEFAULT_NU7_ACTIVATION_HEIGHT, 150] {
+        let args = init_container_args("ths-alpha", &name("alpha"), height);
+        let init = args
+            .iter()
+            .position(|arg| arg == "init")
+            .expect("the init container runs the server's init command");
+        assert_eq!(
+            &args[init..],
+            [
+                "init",
+                "--data-dir",
+                "/data",
+                "--config-dir",
+                "/config",
+                "--nu7-height",
+                &height.to_string(),
+            ]
+        );
+        assert!(args.contains(&"ths-alpha-wallet:/data".to_owned()));
+        assert!(args.contains(&"ths-alpha-config:/config".to_owned()));
+    }
+}
+
+#[test]
 fn app_identity_capture_does_not_fall_back_to_a_replacement_on_docker_errors() {
     let docker = ReplacedApp {
         reuse: false,

@@ -18,12 +18,13 @@ workflows must not weaken repository policy.
 1. Update `[workspace.package].version` in `Cargo.toml` and commit it through a
    reviewed pull request.
 2. Run the `Release candidate` workflow manually. This is a dry run: it tests
-   and builds every launcher and image target but pushes nothing.
+   and builds every launcher, native runtime, and image target but pushes nothing.
 3. From the final commit on `main`, create and push the matching signed or
    annotated tag, for example `v0.1.0`. The workflow rejects a tag that does not
    exactly match the Cargo version.
-4. Inspect the generated draft release. Confirm all four launcher archives and
-   the installer are listed in `SHA256SUMS`, and inspect both versioned multi-architecture
+4. Inspect the generated draft release. Confirm all four launcher archives,
+   all four `ths-runtime-<target>.tar.gz` archives, and the installer are listed
+   in `SHA256SUMS`, and inspect both versioned multi-architecture
    image manifests.
 5. Verify an artifact attestation when desired:
 
@@ -73,6 +74,43 @@ this compatibility check in place when updating the Linux build runners.
 Official launcher artifacts are compiled with the `release-distribution`
 feature. That feature authorizes self-replacement; ordinary Cargo builds expose
 non-mutating update checks but cannot overwrite themselves.
+
+## Native runtime contract
+
+Native bundles require macOS 12 or newer, or Linux with glibc 2.35 or newer.
+macOS artifacts are not Developer ID signed or notarized. Checksums and GitHub
+build attestations do not establish Gatekeeper acceptance; distribution signing
+and clean-Mac download testing remain separate release work.
+
+`native/runtime.json` pins the Zakura and lightwalletd source commits.
+`tools/build_native.sh NEW_OUTPUT_DIR` builds them, `ths-server`, and the web
+dashboard, then packages a native runtime for the host architecture. Builds
+need Rust 1.98, Node 24, Go 1.25, a C/C++ toolchain, CMake, and protobuf tools.
+The release matrix builds and smoke-tests real wallet operations on Intel and
+ARM macOS and Linux. `tools/package_native.mjs` can also package existing local
+binaries; it requires a new output directory and includes upstream licenses.
+
+Each archive has one `ths-runtime/` directory containing `bin/zakurad`,
+`bin/lightwalletd`, `bin/ths-server`, `web/`, `licenses/`, and `manifest.json`.
+The launcher rejects a different THS version, target, or component pin. The
+installer verifies checksums and archive paths, installs the immutable runtime
+beside `ths`, and replaces the launcher last. A modified same-version runtime
+is never overwritten; publish a new patch version for corrections.
+
+Native assets must be attached to the draft before publishing. Until the first
+such release, explicit native installation fails. The installer's default
+`auto` mode selects native when `.ths-runtime` exists beside the installed
+launcher; otherwise it selects Docker. Native users therefore receive the
+matching bundle on ordinary updates, while Docker installations keep pulling
+images. A missing or invalid native bundle fails the update without replacing
+the launcher. Use `THS_INSTALL_RUNTIME=native` for a first native installation,
+then `start --native` or `run --native` to select the new backend. Explicit
+`docker` and `none` installation modes override detection without deleting
+older native bundles.
+
+Tell users upgrading from older launchers to rerun the public installer for
+native support. Those launchers embed their previous installer and cannot
+fetch a native bundle through their existing `ths update` implementation.
 
 ## Image contract
 

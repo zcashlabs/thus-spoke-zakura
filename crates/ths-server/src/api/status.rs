@@ -100,6 +100,8 @@ pub(crate) struct Status {
     block_time: Option<u64>,
     /// True when `mining_mode` is `mempool`.
     mine_on_mempool: bool,
+    /// The height at which NU7 activates, fixed when the instance was created.
+    nu7_activation_height: u32,
     network: &'static str,
     endpoints: PublicEndpoints,
     wallet_sync: WalletSyncStatus,
@@ -166,6 +168,7 @@ pub(crate) async fn status(
         auto_mine: mining.mode.auto_mine(),
         block_time: mining.block_time,
         mine_on_mempool: matches!(mining.mode, crate::mining::MiningMode::Mempool),
+        nu7_activation_height: crate::network::nu7_activation_height(),
         network: "Regtest",
         endpoints: PublicEndpoints {
             dashboard: public_dashboard_endpoint(

@@ -1124,6 +1124,7 @@ fn a_stop_cleans_leftovers_older_than_the_launcher_it_stopped() {
     let alpha = name("alpha");
     fs::create_dir_all(runtime.instance_dir(&alpha)).unwrap();
     let crashed = Instance {
+        backend: Backend::Docker,
         name: "alpha".into(),
         version: 1,
         endpoints: endpoints_for(&host_ports(0).unwrap()),
@@ -1304,4 +1305,19 @@ fn an_owner_marks_its_own_teardown_as_stopping() {
 
     assert!(seen.load(Ordering::SeqCst));
     assert!(!runtime.root.join(".locks/alpha.stopping").exists());
+}
+
+#[test]
+fn start_creates_the_instance_with_the_selected_nu7_activation_height() {
+    let runtime = runtime_for_tests();
+    let alpha = name("alpha");
+    let (mut host, _events) = RecordingHost::new();
+    host.wait_ready_result = Err("stop after allocation".into());
+    let (_sender, shutdown) = Shutdown::channel();
+    let context = LifecycleContext::new(LifecyclePolicy::default());
+
+    let failed = runtime.start_with_policy(&alpha, true, false, 0, 150, &host, &shutdown, &context);
+
+    assert!(failed.is_err());
+    assert_eq!(*host.allocated_nu7_heights.lock().unwrap(), [150]);
 }

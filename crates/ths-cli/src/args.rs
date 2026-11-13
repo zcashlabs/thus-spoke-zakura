@@ -30,6 +30,13 @@ pub(crate) enum Command {
     /// Start an environment in the foreground; interrupting deletes it.
     Start {
         #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
+        /// Native startup and settlement deadline in seconds (default 180).
+        #[arg(long, requires = "native", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
+        #[arg(long)]
         no_open: bool,
         /// Add this many to the default loopback ports. Must be a multiple of 10.
         #[arg(long, default_value_t = 0)]
@@ -48,17 +55,29 @@ pub(crate) enum Command {
         /// Never mine automatically; confirmed work waits for `ths mine`.
         #[arg(long)]
         no_auto_mine: bool,
+        /// Activate NU7 at this block height. Fixed for the life of the instance.
+        #[arg(
+            long,
+            value_name = "HEIGHT",
+            default_value_t = crate::runtime::DEFAULT_NU7_ACTIVATION_HEIGHT,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        nu7_height: u32,
     },
     /// Wait until an existing environment is settled.
     Wait {
         /// Maximum time for settlement, in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
+        #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
         /// Maximum time for startup and settlement, in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
         /// Command and arguments to execute.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -179,8 +198,13 @@ pub(crate) enum Command {
     },
     /// List known environments.
     List,
-    /// Check local Docker and configuration prerequisites.
-    Doctor,
+    /// Check local runtime and configuration prerequisites.
+    Doctor {
+        #[arg(long)]
+        native: bool,
+        #[arg(long, requires = "native")]
+        runtime_dir: Option<PathBuf>,
+    },
     /// Print a shell completion script.
     Completions {
         /// Shell that will load the script.
