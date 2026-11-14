@@ -205,13 +205,17 @@ pub(crate) async fn send_quote(
     } else {
         destination.unified_address
     };
-    Ok(Json(
-        state
-            .0
-            .wallet
-            .send_quote(req.from_account, &req.source_pool, &address)
-            .await?,
-    ))
+    let mut quote = state
+        .0
+        .wallet
+        .send_quote(req.from_account, &req.source_pool, &address)
+        .await?;
+    // A transparent output must be at least 54 zatoshi (the P2PKH/P2SH dust threshold).
+    // Cap max_zatoshi to zero so the Max button is disabled for sub-threshold remainders.
+    if req.destination_pool == "transparent" && quote.max_zatoshi < 54 {
+        quote.max_zatoshi = 0;
+    }
+    Ok(Json(quote))
 }
 
 #[derive(Deserialize)]
