@@ -169,9 +169,7 @@ export function NetworkPage() {
             )}
           </DataRow>
           <DataRow label="Development accounts">{status.data.account_count}</DataRow>
-          <DataRow label="NU7 activation">
-            {status.data.nu7_activation_height ?? '—'}
-          </DataRow>
+          <DataRow label="NU7 activation">{status.data.nu7_activation_height ?? '—'}</DataRow>
         </dl>
         <PanelNote>
           This chain is private to your machine and starts from block 0 on every run. It has no
