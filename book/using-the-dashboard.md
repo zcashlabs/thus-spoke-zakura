@@ -79,7 +79,9 @@ Ironwood receiver, choose an amount of at most 5 ZEC, and select **Add funds**.
 The dashboard checks the address with the server before submitting the
 payment. If the response is lost, open **Payments** to resume the saved
 request with the same idempotency key. Do not start a second request for the
-same intended payment.
+same intended payment. The payment also appears in **Recent activity**,
+addressed rather than attributed to an account, so it stays discoverable
+after **Payments** no longer retains it.
 
 ![The faucet dialog with External address selected, a transparent Regtest destination, an amount of 1 ZEC, and the Add funds button.](images/faucet-external.png)
 

@@ -380,3 +380,89 @@ fn stores_created_before_configurable_heights_keep_nu7_at_height_one() {
     store.initialize_instance(1).unwrap();
     assert_eq!(store.nu7_activation_height().unwrap(), 1);
 }
+
+/// Regression for a review comment on #456: an instance that already ran
+/// first-seen ordering (#425) before address faucets ever joined the
+/// activity feed already has `activity_order` rows for its journal activity
+/// by the time it upgrades. A naive backfill would hand a pre-existing
+/// external payment the next (newest) autoincremented sequence, putting it
+/// above activity the server had already shown. It must settle behind that
+/// activity instead.
+#[test]
+fn existing_address_faucets_settle_behind_already_sequenced_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.db");
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE activity (
+                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, from_account INTEGER,
+                 to_account INTEGER, to_address TEXT, source_pool TEXT NOT NULL,
+                 destination_pool TEXT NOT NULL, amount_zatoshi INTEGER NOT NULL,
+                 txid TEXT NOT NULL, block_hash TEXT, status TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT
+             );
+             CREATE TABLE activity_order (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 activity_id TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE address_faucets (
+                 key TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, address TEXT NOT NULL,
+                 amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL DEFAULT '',
+                 block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT
+             );
+             INSERT INTO activity(id,kind,from_account,to_account,source_pool,destination_pool,amount_zatoshi,txid,status)
+                 VALUES('already-sequenced','send',1,2,'ironwood','ironwood',1,'','preparing');
+             INSERT INTO activity_order(activity_id) VALUES('already-sequenced');
+             INSERT INTO address_faucets(key,id,address,amount_zatoshi)
+                 VALUES('legacy-key','legacy-faucet','tm-external',7);",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+    let sequences = store
+        .activity_sequences(&["already-sequenced".to_owned(), "legacy-faucet".to_owned()])
+        .unwrap();
+    assert!(
+        sequences["legacy-faucet"] < sequences["already-sequenced"],
+        "a pre-existing external payment must settle behind already-sequenced \
+         activity, not above it: {sequences:?}"
+    );
+
+    // Stable and idempotent across a later restart.
+    let reopened = Store::open(&path).unwrap();
+    reopened.initialize().unwrap();
+    let reopened_sequences = reopened
+        .activity_sequences(&["already-sequenced".to_owned(), "legacy-faucet".to_owned()])
+        .unwrap();
+    assert_eq!(reopened_sequences, sequences);
+}
+
+/// Regression for a review comment on #456: a payment whose real creation
+/// time predates the `created_at` column must not display the migration's
+/// sentinel default as if it were a real timestamp.
+#[test]
+fn address_faucets_predating_created_at_report_no_timestamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.db");
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE address_faucets (
+                 key TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, address TEXT NOT NULL,
+                 amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL DEFAULT '',
+                 block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT
+             );
+             INSERT INTO address_faucets(key,id,address,amount_zatoshi)
+                 VALUES('legacy-key','legacy-faucet','tm-external',7);",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+    let payment = store.address_faucet_for_key("legacy-key").unwrap().unwrap();
+    assert_eq!(payment.created_at, crate::db::UNKNOWN_CREATED_AT);
+}

@@ -392,8 +392,8 @@ def retry_decisions():
     d = D("retry-decisions", 1000, 420, "Retain the caller's payment identity",
           "After a lost payment response, direct API callers reuse their saved key, dashboard "
           "callers resume retained payments, and CLI callers rerun the same command and instance. "
-          "A new key requests a new payment. Activity omits keys and external faucet records; "
-          "inspect txids and wallet snapshots separately.")
+          "A new key requests a new payment. Activity omits keys; a stored row is not proof "
+          "nothing happened.")
     d.card(290, 76, 420, 54, "A payment response is uncertain", "which caller and result?", kind="accent")
     xs, w = d.row(3)
     for x, (t, sub) in zip(xs, [("API: saved key", "same request details"),
@@ -407,7 +407,7 @@ def retry_decisions():
                                 ["accent", "note", "note"]):
         d.card(x, 288, w, 64, t, sub, kind=kind)
         d.arrow([(x + w / 2, 248), (x + w / 2, 280)])
-    d.text(500, 380, "activity omits keys and external faucets; no row is not proof nothing happened", "s")
+    d.text(500, 380, "activity omits keys; no matching row is not proof nothing happened", "s")
     d.text(500, 400, "observe chain inclusion and wallet balances separately", "s")
     return d
 
