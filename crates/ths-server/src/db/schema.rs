@@ -62,7 +62,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS address_faucets (
                 key TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, address TEXT NOT NULL,
                 amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL DEFAULT '',
-                block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT
+                block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'
             );
         "#,
         )?;
@@ -70,10 +71,20 @@ impl Store {
         add_missing_column(&db, "idempotency", "memo")?;
         add_missing_column(&db, "activity", "last_error")?;
         add_missing_column(&db, "address_faucets", "last_error")?;
+        add_address_faucets_created_at(&db)?;
         migrate_activity_recipients(&db)?;
         db.execute_batch(ACTIVITY_ORDER_TABLE)?;
         // Existing journals already have an immutable insertion order. Preserve
         // it when first-seen ordering is introduced for an older database.
+        // Address faucets are backfilled first so pre-existing external
+        // payments settle behind pre-existing journal activity rather than
+        // appearing newer than everything else the first time this merged
+        // feed is read.
+        db.execute(
+            "INSERT OR IGNORE INTO activity_order(activity_id)
+             SELECT id FROM address_faucets ORDER BY rowid ASC",
+            [],
+        )?;
         db.execute(
             "INSERT OR IGNORE INTO activity_order(activity_id)
              SELECT id FROM activity ORDER BY rowid ASC",
@@ -152,6 +163,29 @@ fn add_missing_column(db: &Connection, table: &str, column: &str) -> Result<()> 
         .any(|existing| existing == column);
     if !exists {
         db.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
+    }
+    Ok(())
+}
+
+/// Rows created before this column existed predate per-row creation times.
+/// SQLite refuses a non-constant `ADD COLUMN` default (`CURRENT_TIMESTAMP`)
+/// once the table holds rows, so backfill a fixed epoch instead: the
+/// activity feed's pagination order comes from `activity_order`, not this
+/// value, so only its display is approximate for payments this old. Every
+/// insert going forward supplies a real `created_at` explicitly, so this
+/// default otherwise only matters for this one-time backfill.
+fn add_address_faucets_created_at(db: &Connection) -> Result<()> {
+    let exists = db
+        .prepare("PRAGMA table_info(address_faucets)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|existing| existing == "created_at");
+    if !exists {
+        db.execute(
+            "ALTER TABLE address_faucets ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+            [],
+        )?;
     }
     Ok(())
 }

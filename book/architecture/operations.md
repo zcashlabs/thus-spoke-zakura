@@ -149,6 +149,13 @@ array contains exactly one account. A transaction appears once even when it
 affects multiple development accounts. Outputs to the hidden treasury account
 are excluded from the user-facing amount, recipients, and account lists.
 
+A faucet payment to an address outside accounts 1–5 appears the same way: its
+own entry, `kind` `faucet`, `to_address` set, and both account arrays empty.
+It carries no idempotency key, so it is not reachable through the keyed
+lookup above; read `GET /api/v1/faucet/address?idempotency_key=<key>` for
+that. `destination_pool` is `null` for the rare address shape the faucet
+accepts but cannot resolve to a pool.
+
 The unkeyed list accepts `limit` (default 30, maximum 100), `account` (1–5),
 `kind` (`send`, `faucet`, or `transaction`), and `status` filters. Filters
 combine and are applied before the limit. To read the next older page, pass the
@@ -243,7 +250,7 @@ keep the same account selection when retrying it.
 
 ## Decide what to do after a lost response
 
-![After a lost payment response, direct API callers reuse their saved key, dashboard callers resume retained payments, and CLI callers rerun the same command and instance. A new key requests a new payment. Activity omits keys and external faucet records; inspect txids and wallet snapshots separately.](../images/retry-decisions.svg)
+![After a lost payment response, direct API callers reuse their saved key, dashboard callers resume retained payments, and CLI callers rerun the same command and instance. A new key requests a new payment. Activity omits keys; a stored row is not proof nothing happened.](../images/retry-decisions.svg)
 
 1. Save any transaction ID or response you did receive. Query Recent
    activity or `GET /api/v1/activity`, then inspect Zakura's transaction
@@ -260,11 +267,11 @@ keep the same account selection when retrying it.
    when no transaction ID was returned to you; do not replace the key merely
    because the response was lost.
 4. `ths faucet <ADDRESS>` calls `POST /api/v1/faucet/address` with a
-   journaled idempotency key. A recognized user account appears in activity;
-   an external destination has a separate stored faucet record. Read either
-   through `GET /api/v1/faucet/address?idempotency_key=<key>` before replaying
-   the original request. The lookup is read-only; a stored external faucet
-   does not appear in `/api/v1/activity`.
+   journaled idempotency key. A recognized user account appears in activity
+   under that account; an external destination appears as its own faucet
+   entry, with no account and no idempotency key exposed. Either way, read
+   `GET /api/v1/faucet/address?idempotency_key=<key>` before replaying the
+   original request; that lookup is read-only and does not start payment work.
 
 The server validates key syntax and compares recorded payment intents;
 those checks are useful, but their boundary matters. Never reuse a key for

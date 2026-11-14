@@ -2,7 +2,8 @@ use super::activity::activity_for_key;
 use super::*;
 
 /// The order must match `row_address_faucet`.
-const ADDRESS_FAUCET_COLUMNS: &str = "id,address,amount_zatoshi,txid,block_hash,status,last_error";
+const ADDRESS_FAUCET_COLUMNS: &str =
+    "id,address,amount_zatoshi,txid,block_hash,status,last_error,created_at";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressFaucet {
@@ -13,6 +14,7 @@ pub struct AddressFaucet {
     pub block_hash: Option<String>,
     pub status: String,
     pub last_error: Option<String>,
+    pub created_at: String,
 }
 
 impl Store {
@@ -42,7 +44,7 @@ impl Store {
         }
         let id = Uuid::new_v4().to_string();
         db.execute(
-            "INSERT INTO address_faucets(key,id,address,amount_zatoshi) VALUES(?1,?2,?3,?4)",
+            "INSERT INTO address_faucets(key,id,address,amount_zatoshi,created_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP)",
             params![key, id, address, amount],
         )?;
         address_for_key(&db, key)?.context("address faucet claim was not stored")
@@ -189,6 +191,7 @@ fn row_address_faucet(row: &rusqlite::Row<'_>) -> rusqlite::Result<AddressFaucet
         block_hash: row.get(4)?,
         status: row.get(5)?,
         last_error: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -203,6 +206,18 @@ pub struct AddressFaucetIntent {
 }
 
 impl Store {
+    /// Every external-address faucet payment, regardless of status, for the
+    /// unified activity feed.
+    pub(crate) fn all_address_faucets(&self) -> Result<Vec<AddressFaucet>> {
+        let db = self.0.lock().unwrap();
+        let mut query = db.prepare(&format!(
+            "SELECT {ADDRESS_FAUCET_COLUMNS} FROM address_faucets"
+        ))?;
+        Ok(query
+            .query_map([], row_address_faucet)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn unresolved_address_faucets(&self) -> Result<Vec<AddressFaucetIntent>> {
         let db = self.0.lock().unwrap();
         let mut query = db.prepare(&format!(
@@ -212,7 +227,7 @@ impl Store {
             .query_map([], |row| {
                 Ok(AddressFaucetIntent {
                     payment: row_address_faucet(row)?,
-                    key: row.get(7)?,
+                    key: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)

@@ -1198,6 +1198,99 @@ async fn health_returns_unavailable_when_lightwalletd_stalls() {
 }
 
 #[tokio::test]
+async fn external_address_faucet_payments_appear_in_activity_through_reorg() {
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/issues/455:
+    // external-address faucet payments were stored but never surfaced in the
+    // unified activity feed.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let address = "tm-external-activity";
+    let internal = store
+        .claim_faucet(2, "transparent", 1_000, "internal-sibling")
+        .unwrap();
+    let claimed = store
+        .claim_address_faucet(address, 2_500_000, "external-activity-key")
+        .unwrap();
+    store
+        .record_address_prepared(&claimed.id, "external-txid", b"raw", 140)
+        .unwrap();
+    store
+        .mark_address_broadcast(&claimed.id, "external-txid")
+        .unwrap();
+
+    let find = |body: &Value, id: &str| {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing from activity"))
+            .clone()
+    };
+    let relative_order = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .filter(|id| *id == claimed.id || *id == internal.id)
+            .collect()
+    };
+
+    let (status, body) = api_get(&state, "/api/v1/activity?kind=faucet").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = find(&body, &claimed.id);
+    assert_eq!(entry["to_address"], json!(address));
+    assert_eq!(entry["from_account"], Value::Null);
+    assert_eq!(entry["to_account"], Value::Null);
+    assert_eq!(entry["amount_zatoshi"], json!(2_500_000));
+    assert_eq!(entry["status"], json!("broadcast"));
+    assert_eq!(entry["txid"], json!("external-txid"));
+    let first_order = relative_order(&body);
+    assert_eq!(first_order.len(), 2, "both payments must be present");
+
+    // Account filters never match an external payment; it has none.
+    for account in 1..=5 {
+        let (_, body) = api_get(&state, &format!("/api/v1/activity?account={account}")).await;
+        assert!(
+            body.as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["id"] != json!(claimed.id))
+        );
+    }
+
+    store
+        .confirm_address(&claimed.id, "external-txid", "external-block")
+        .unwrap();
+    let (_, filtered) = api_get(&state, "/api/v1/activity?status=confirmed").await;
+    let entry = find(&filtered, &claimed.id);
+    assert_eq!(entry["status"], json!("confirmed"));
+    assert_eq!(entry["block_hash"], json!("external-block"));
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    assert_eq!(relative_order(&body), first_order);
+
+    // A reorg unconfirms it without losing the transaction, same as an
+    // internal payment, then a later block can reconfirm it.
+    store
+        .unconfirm_blocks(&["external-block".to_owned()])
+        .unwrap();
+    let (_, filtered) = api_get(&state, "/api/v1/activity?status=unconfirmed").await;
+    let entry = find(&filtered, &claimed.id);
+    assert_eq!(entry["status"], json!("unconfirmed"));
+    assert_eq!(entry["txid"], json!("external-txid"));
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    assert_eq!(relative_order(&body), first_order);
+
+    store
+        .confirm_reorged_transaction("external-txid", "reorged-block")
+        .unwrap();
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    let entry = find(&body, &claimed.id);
+    assert_eq!(entry["status"], json!("confirmed"));
+    assert_eq!(entry["block_hash"], json!("reorged-block"));
+    assert_eq!(relative_order(&body), first_order);
+}
+
+#[tokio::test]
 async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() {
     let (state, _dir) = state_with_local_wallet();
     let store = &state.0.store;
@@ -1248,15 +1341,14 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
     store
         .confirm(&confirmed.id, "confirmed-txid", "block")
         .unwrap();
-    store
+    let external = store
         .claim_address_faucet("tm-external", 5, "lookup-external")
         .unwrap();
 
     let (status, listed) = api_get(&state, "/api/v1/activity?limit=10").await;
     assert_eq!(status, StatusCode::OK);
-    let listed: Vec<_> = listed
-        .as_array()
-        .unwrap()
+    let listed_array = listed.as_array().unwrap();
+    let listed: Vec<_> = listed_array
         .iter()
         .map(|row| {
             (
@@ -1265,6 +1357,16 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
                 row["txid"].clone(),
             )
         })
+        .collect();
+    // The external claim's relative position depends on wall-clock timing
+    // (first-seen ordering falls back to `created_at`, second-resolution),
+    // so only its presence is asserted; the journaled entries' relative
+    // order does not depend on it.
+    assert_eq!(listed_array.len(), 5);
+    assert!(listed.contains(&(json!(external.id), json!("preparing"), json!(""))));
+    let listed: Vec<_> = listed
+        .into_iter()
+        .filter(|(id, _, _)| *id != json!(external.id))
         .collect();
     assert_eq!(
         listed,
