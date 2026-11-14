@@ -58,6 +58,7 @@ describe('FaucetDialog', () => {
     let posted = false;
     const result = (status: string) => ({
       address,
+      destination_pool: 'transparent',
       amount_zatoshi: 100_000_000,
       txid: 'f'.repeat(64),
       block_hash: status === 'confirmed' ? 'b'.repeat(64) : null,
@@ -66,16 +67,8 @@ describe('FaucetDialog', () => {
     });
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = requestUrl(input);
-      if (url.endsWith('/zip321/parse'))
-        return Promise.resolve(
-          Response.json({
-            address,
-            destination_pool: 'transparent',
-            to_account: null,
-            amount_zatoshi: null,
-            memo: null,
-          }),
-        );
+      if (url.endsWith('/faucet/address/parse'))
+        return Promise.resolve(Response.json({ to_account: null }));
       if (url.endsWith('/faucet/address') && init?.method === 'POST') {
         if (!posted) {
           posted = true;
@@ -126,20 +119,13 @@ describe('FaucetDialog', () => {
     const address = 'uregtest1externalrecipient';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = requestUrl(input);
-      if (url.endsWith('/zip321/parse'))
-        return Promise.resolve(
-          Response.json({
-            address,
-            destination_pool: 'ironwood',
-            to_account: null,
-            amount_zatoshi: null,
-            memo: null,
-          }),
-        );
+      if (url.endsWith('/faucet/address/parse'))
+        return Promise.resolve(Response.json({ to_account: null }));
       if (url.endsWith('/faucet/address') && init?.method === 'POST')
         return Promise.resolve(
           Response.json({
             address,
+            destination_pool: 'ironwood',
             amount_zatoshi: 100_000_000,
             txid: 'f'.repeat(64),
             block_hash: 'b'.repeat(64),
@@ -177,11 +163,53 @@ describe('FaucetDialog', () => {
     expect(request.idempotency_key).toHaveLength(36);
   });
 
+  it('submits a unified address with only a transparent receiver', async () => {
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/issues/438:
+    // the Send rule (`/zip321/parse`) rejects this address shape, but the
+    // address faucet accepts it, so the dialog must not pre-validate through
+    // the Send rule.
+    const address = 'uregtest1transparentonly';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/faucet/address/parse'))
+        return Promise.resolve(Response.json({ to_account: null }));
+      if (url.endsWith('/faucet/address') && init?.method === 'POST')
+        return Promise.resolve(
+          Response.json({
+            address,
+            destination_pool: 'transparent',
+            amount_zatoshi: 100_000_000,
+            txid: 'f'.repeat(64),
+            block_hash: 'b'.repeat(64),
+            status: 'confirmed',
+            last_error: null,
+          }),
+        );
+      if (url.endsWith('/accounts') || url.includes('/activity?'))
+        return Promise.resolve(Response.json([]));
+      if (url.endsWith('/mining/jobs')) return Promise.resolve(Response.json({ job: null }));
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+    await chooseExternalAddress();
+    await userEvent.type(screen.getByLabelText('Destination address'), address);
+    await userEvent.click(screen.getByRole('button', { name: 'Add funds' }));
+    await waitFor(() =>
+      expect(
+        fetchSpy.mock.calls.some(
+          ([input, init]) =>
+            requestUrl(input).endsWith('/faucet/address') && init?.method === 'POST',
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByText('unified destination must include an Ironwood receiver')).toBeNull();
+  });
+
   it.each(['invalid', 't1wrongnetworkaddress'])(
     'rejects %s before funding an address',
     async (address) => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
-        requestUrl(input).endsWith('/zip321/parse')
+        requestUrl(input).endsWith('/faucet/address/parse')
           ? Promise.resolve(
               new Response(
                 JSON.stringify({
@@ -204,19 +232,13 @@ describe('FaucetDialog', () => {
   );
   it('routes a development-account address through the account faucet', async () => {
     const address = 'tmAg2wTARgKBHA9mFouqR727cU98MJmfjSq';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) =>
-      requestUrl(input).endsWith('/zip321/parse')
-        ? Promise.resolve(
-            Response.json({
-              address,
-              destination_pool: 'transparent',
-              to_account: 2,
-              amount_zatoshi: null,
-              memo: null,
-            }),
-          )
-        : Promise.resolve(Response.json([])),
-    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input) =>
+        requestUrl(input).endsWith('/faucet/address/parse')
+          ? Promise.resolve(Response.json({ to_account: 2 }))
+          : Promise.resolve(Response.json([])),
+      );
     renderWithProviders(<FaucetDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
     await chooseExternalAddress();
     await userEvent.type(screen.getByLabelText('Destination address'), address);

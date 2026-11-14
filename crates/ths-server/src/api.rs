@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/faucet/address",
             get(payments::faucet_address_status).post(payments::faucet_address),
         )
+        .route(
+            "/api/v1/faucet/address/parse",
+            post(payments::parse_faucet_address),
+        )
         .route("/api/v1/mine", post(mining::mine))
         .route("/api/v1/reorg", post(chain::reorg))
         .route("/api/v1/rollback", post(chain::rollback))
