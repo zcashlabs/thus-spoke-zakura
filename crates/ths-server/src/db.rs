@@ -24,6 +24,7 @@ pub use accounts::{Account, DevelopmentAccountSecret, DevelopmentSecrets};
 pub(crate) use activity::ActivityRecovery;
 pub use activity::{Activity, ActivityIntent, PreparedTransaction, Recipient};
 pub use address_faucet::AddressFaucet;
+pub(crate) use address_faucet::UNKNOWN_CREATED_AT;
 
 pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 pub const USER_ACCOUNT_COUNT: u8 = 5;

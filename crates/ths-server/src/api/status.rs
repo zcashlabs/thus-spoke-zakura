@@ -3,7 +3,7 @@ use super::payments::require_key;
 use crate::network::regtest_network;
 use crate::state::AppState;
 use crate::{
-    db::{Account, Activity, AddressFaucet, USER_ACCOUNT_COUNT},
+    db::{Account, Activity, AddressFaucet, UNKNOWN_CREATED_AT, USER_ACCOUNT_COUNT},
     rpc::{ChainCheckpoint, ChainInfo, NodeRpc},
     state::{WalletSyncStatus, wallet_matches_tip},
     wallet::{CanonicalActivity, CanonicalActivityIndex},
@@ -302,6 +302,13 @@ fn known_pool(pool: String) -> Option<String> {
     (pool != UNKNOWN_POOL).then_some(pool)
 }
 
+/// `None` for the sentinel `created_at` a stored payment gets when its real
+/// creation time was never recorded, so the dashboard shows an unknown time
+/// rather than a literal 1970 date.
+fn known_created_at(created_at: String) -> Option<String> {
+    (created_at != UNKNOWN_CREATED_AT).then_some(created_at)
+}
+
 impl ActivityEntry {
     fn journal(activity: Activity) -> Self {
         let from_account = visible_account(activity.from_account);
@@ -334,7 +341,7 @@ impl ActivityEntry {
             tx_index: None,
             confirmations: 0,
             status: activity.status,
-            created_at: Some(activity.created_at),
+            created_at: known_created_at(activity.created_at),
             memos: Vec::new(),
             last_error: activity.last_error,
         }
@@ -424,7 +431,7 @@ impl ActivityEntry {
             self.status = journal.status;
             self.last_error = journal.last_error;
         }
-        self.created_at = Some(journal.created_at);
+        self.created_at = known_created_at(journal.created_at);
         self
     }
 }

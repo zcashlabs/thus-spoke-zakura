@@ -81,6 +81,18 @@ fn journal_entry(id: &str, status: &str, created_at: &str) -> Activity {
     activity
 }
 
+#[test]
+fn unknown_created_at_is_reported_as_no_timestamp() {
+    // Regression for a review comment on #456: a payment carrying the
+    // sentinel the migration backfills for a real creation time that was
+    // never recorded must report no timestamp, not a literal 1970 date.
+    assert_eq!(known_created_at(UNKNOWN_CREATED_AT.to_owned()), None);
+    assert_eq!(
+        known_created_at("2026-01-01 00:00:00".to_owned()),
+        Some("2026-01-01 00:00:00".to_owned())
+    );
+}
+
 fn page(
     limit: Option<u32>,
     account: Option<u8>,

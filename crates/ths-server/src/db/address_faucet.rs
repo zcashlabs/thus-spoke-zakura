@@ -5,6 +5,14 @@ use super::*;
 const ADDRESS_FAUCET_COLUMNS: &str =
     "id,address,amount_zatoshi,txid,block_hash,status,last_error,created_at";
 
+/// `created_at` for a payment whose real creation time was never recorded: one
+/// that predates the column (schema migration backfill), stored before the
+/// column's own default was ever actually used (every insert supplies a real
+/// timestamp explicitly). The activity feed reports this as an unknown time
+/// rather than a real one, and the `activity_order` backfill treats a payment
+/// carrying it as older than anything already sequenced.
+pub(crate) const UNKNOWN_CREATED_AT: &str = "1970-01-01 00:00:00";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressFaucet {
     pub id: String,
