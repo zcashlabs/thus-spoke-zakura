@@ -90,7 +90,7 @@ server.listen(0, '127.0.0.1', () => {
   if (mode === 'credentials') endpoints.dashboard = `http://user:pass@127.0.0.1:${port}`;
   if (mode === 'bad-p2p') endpoints.p2p = '0.0.0.0:1234';
   if (mode === 'no-output') return;
-  // Signal that cancellation is safe without declaring startup complete.
+  // Let cancellation tests find the services before startup completes.
   if (startupMarker) { writeFileSync(startupMarker, JSON.stringify(endpoints)); return; }
   const data = JSON.stringify(endpoints) + '\n';
   if (mode === 'split') { process.stdout.write(data.slice(0, 30)); setTimeout(() => process.stdout.write(data.slice(30)), 30); }

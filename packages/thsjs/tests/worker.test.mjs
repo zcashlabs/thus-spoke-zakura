@@ -31,7 +31,7 @@ for (const signal of ['SIGTERM', 'SIGKILL']) {
         if (worker.exitCode === null && worker.signalCode === null) worker.kill('SIGTERM');
         await exited;
         if (config) {
-          // The regression must also clean up when run against the broken implementation.
+          // Clean up leaked fixtures when this regression runs against an older client.
           try { await assertClosed(config); }
           catch (error) {
             if (!(error instanceof assert.AssertionError)) throw error;

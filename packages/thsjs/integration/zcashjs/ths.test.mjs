@@ -1,4 +1,3 @@
-// Opt-in native integration: THS_BINARY=... THS_RUNTIME_DIR=... npm test --prefix integration/zcashjs
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { spawn, execFile } from 'node:child_process';

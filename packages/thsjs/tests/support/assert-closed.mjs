@@ -23,7 +23,7 @@ export async function waitForClosed(endpoints, timeoutMs = 5000) {
   while (true) {
     try { await assertClosed(endpoints); return; }
     catch (error) {
-      // Closing listeners may reset a racing handshake; only a later refusal proves closure.
+      // A connection can reset while a service stops; wait for connection refusal.
       if (!(error instanceof assert.AssertionError) && error.code !== 'ECONNRESET') throw error;
       if (Date.now() >= deadline) throw error;
     }

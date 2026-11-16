@@ -6,10 +6,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 export interface TestTHSOptions {
-  /** Existing native-capable THS launcher; defaults to `ths` on PATH. */
+  /** Installed THS launcher with native support; defaults to `ths` on PATH. */
   readonly executable?: string;
   readonly runtimeDir?: string;
-  /** Bound for startup, each mutation (including settlement), and shutdown. Default: 180000. */
+  /** Timeout in milliseconds for startup, each operation, and shutdown. Default: 180000. */
   readonly timeoutMs?: number;
 }
 export interface TestTHSConfig {
@@ -39,10 +39,10 @@ export interface TestTHSClient {
   /** Sends one treasury payment; confirmations remain under the test's control. */
   fundAddress(address: string, amountZatoshi: bigint,
     options?: { readonly idempotencyKey?: string }): Promise<TestTHSFunding>;
-  /** Direct node RPC. Mutations are not retried and do not automatically wait for wallet sync. */
+  /** Calls the node directly; does not retry or wait for wallet sync. */
   rpc(method: string, params?: readonly unknown[]): Promise<unknown>;
   waitUntilSettled(): Promise<void>;
-  /** Cancels startup/requests and waits for the launcher's owned-resource cleanup. */
+  /** Cancels pending work and waits for this instance's services to stop. */
   stop(): Promise<void>;
 }
 type ProcessResult = { code: number | null; signal: string | null };
@@ -87,7 +87,7 @@ function endpoints(value: unknown): Omit<TestTHSConfig, 'instance' | 'genesisHas
     tls: false };
 }
 
-/** Node-only test helper. Uses an installed THS native runtime; never downloads binaries or attaches to an instance. */
+/** Starts a fresh Regtest instance using an installed native THS runtime. Requires Node.js. */
 export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient {
   const { executable = 'ths', runtimeDir, timeoutMs = 180_000 } = options;
   integer(timeoutMs, 2147483647);
@@ -157,7 +157,7 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
     current.stopping = true;
     current.abort.abort();
     current.cleanup = (async () => {
-      // Only signal the live child handle. Never escalate to a numeric PID after its exit.
+      // Signal only our live child; a saved process ID could later belong to another process.
       if (!current.result && current.child.exitCode === null && current.child.signalCode === null) {
         current.signalled = current.child.kill('SIGTERM');
       }
@@ -194,7 +194,7 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
     const args = ['--name', instance, '--json', 'start', '--native',
       ...(runtimeDir === undefined ? [] : ['--runtime-dir', runtimeDir]),
       '--timeout', String(Math.ceil(timeoutMs / 1000)), '--no-open', '--no-auto-mine'];
-    // Keep the cleanup supervisor outside the test runner's process group.
+    // Let the supervisor finish cleanup even if the test runner's process group is killed.
     const child = spawn(process.execPath,
       [fileURLToPath(new URL('./supervisor.js', import.meta.url)), executable, ...args],
       { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true }) as ChildProcessByStdio<null, Readable, Readable>;
