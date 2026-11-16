@@ -129,6 +129,45 @@ Use `wallet_sync.observed_height`, `observed_hash`,
 needs to explain why the node and wallet differ. A same-height
 reorganization can change a hash without changing a height.
 
+## Start THS from JavaScript tests
+
+[`@zcashlabs/thsjs`](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs)
+is a separate Node.js testing package maintained with THS. It starts a fresh
+native Regtest sandbox, exposes its endpoints and chain controls, and waits
+for cleanup after the test. It has no runtime dependencies and does not add
+THS process management to ZcashJS or another wallet SDK.
+
+Build and install its archive using the package README; it has not been
+published to npm yet. Install a compatible [native runtime](development.md#native-runtime-no-docker)
+before running a test. Node 22.23.4 or newer is required.
+
+```javascript
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { withTestTHS } from '@zcashlabs/thsjs';
+
+test('application chain control', { timeout: 240_000 }, async t => {
+  await withTestTHS(async ths => {
+    const before = await ths.rpc('getblockcount');
+    await ths.produceBlock(3);
+    assert.equal(await ths.rpc('getblockcount'), before + 3);
+    // Connect your application wallet to ths.config().lightwalletd.
+  }, { signal: t.signal });
+});
+```
+
+`fundAddress` accepts bigint zatoshi and a retry key. Mine the confirmations
+your application needs, then sync its wallet. `produceBlock`, `reorg`, and
+`rollback` wait for THS settlement; they do not sync external wallets. A
+timed-out mutation might already have taken effect and is not automatically
+retried. The helper uses only its own instance and never attaches to an
+existing environment.
+
+Use `createTestTHSClient` with explicit `start()` and `stop()` for test-runner
+setup/teardown hooks. The package README covers cancellation and cleanup
+errors, and its separate ZcashJS integration test demonstrates a real wallet
+using both packages.
+
 ## Listen for changes, then fetch state
 
 `GET /api/v1/events` is a server-sent event stream. Each `update` event

@@ -56,6 +56,10 @@ through gated `#[path]` declarations. Fixtures live under `support/`, and server
 activity scenarios under `scenarios/activity_recovery/`. The existing integration
 roots and Cargo commands above still apply.
 
+For the standalone JavaScript testing package, run `npm ci --prefix packages/thsjs`
+and `npm test --prefix packages/thsjs`. See its README for the optional live
+ZcashJS integration test. These checks do not require Docker or a wallet SDK.
+
 ## Pull requests
 
 - Branch from `main` and keep each pull request focused on one change.
