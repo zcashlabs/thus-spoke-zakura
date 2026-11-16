@@ -58,7 +58,7 @@ pub(crate) async fn blocks(
     let start = end.saturating_sub(limit.saturating_sub(1));
     let mut page = Vec::new();
     for height in (start..=end).rev() {
-        page.push(state.0.rpc.block(&height.to_string()).await?);
+        page.push(state.0.rpc.block_summary(&height.to_string()).await?);
     }
     Ok(Json(
         json!({"blocks":page,"next_before":start.checked_sub(1)}),

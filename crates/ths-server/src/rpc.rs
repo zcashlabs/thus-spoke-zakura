@@ -135,6 +135,9 @@ impl NodeRpc {
     pub async fn block(&self, id: &str) -> Result<Value> {
         self.call("getblock", json!([id, 2])).await
     }
+    pub async fn block_summary(&self, id: &str) -> Result<Value> {
+        self.call("getblock", json!([id, 1])).await
+    }
     pub async fn treestate(&self, block_hash: &str) -> Result<Value> {
         self.call("z_gettreestate", json!([block_hash])).await
     }

@@ -1,8 +1,9 @@
 use super::error::{ApiError, ApiJson, ApiQuery, ApiResult};
 use super::payments::require_key;
+use crate::network::regtest_network;
 use crate::state::AppState;
 use crate::{
-    db::{Account, Activity, USER_ACCOUNT_COUNT},
+    db::{Account, Activity, AddressFaucet, UNKNOWN_CREATED_AT, USER_ACCOUNT_COUNT},
     rpc::{ChainCheckpoint, ChainInfo, NodeRpc},
     state::{WalletSyncStatus, wallet_matches_tip},
     wallet::{CanonicalActivity, CanonicalActivityIndex},
@@ -20,6 +21,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     time::{Duration, Instant},
 };
+use zcash_keys::address::Address;
 pub(crate) async fn health(State(state): State<AppState>) -> Response {
     let (node, lightwalletd) =
         tokio::join!(state.0.rpc.chain_info(), state.0.wallet.latest_checkpoint());
@@ -302,7 +304,9 @@ fn journal_recipients(activity: &Activity) -> (Vec<u8>, Vec<String>, Vec<String>
         return (
             visible_account(activity.to_account).into_iter().collect(),
             activity.to_address.iter().cloned().collect(),
-            vec![activity.destination_pool.clone()],
+            known_pool(activity.destination_pool.clone())
+                .into_iter()
+                .collect(),
         );
     }
     let accounts = activity
@@ -340,6 +344,23 @@ fn activity_direction(
     }
 }
 
+/// Not a pool the SDK ever actually selects (`require_pool` never admits it
+/// into the `activity` table); marks a stored external faucet payment whose
+/// address doesn't resolve to a pool this feed can report, the same way a
+/// canonical multi-pool transaction reports no single pool.
+const UNKNOWN_POOL: &str = "unknown";
+
+fn known_pool(pool: String) -> Option<String> {
+    (pool != UNKNOWN_POOL).then_some(pool)
+}
+
+/// `None` for the sentinel `created_at` a stored payment gets when its real
+/// creation time was never recorded, so the dashboard shows an unknown time
+/// rather than a literal 1970 date.
+fn known_created_at(created_at: String) -> Option<String> {
+    (created_at != UNKNOWN_CREATED_AT).then_some(created_at)
+}
+
 impl ActivityEntry {
     fn journal(activity: Activity) -> Self {
         let from_account = visible_account(activity.from_account);
@@ -366,9 +387,9 @@ impl ActivityEntry {
             // account's address is added once the wallet sees the transaction.
             recipient_addresses: external_addresses.clone(),
             external_addresses,
-            source_pool: Some(activity.source_pool.clone()),
+            source_pool: known_pool(activity.source_pool.clone()),
             destination_pool: only_pool(&destination_pools),
-            source_pools: vec![activity.source_pool],
+            source_pools: known_pool(activity.source_pool).into_iter().collect(),
             destination_pools,
             amount_zatoshi: activity.amount_zatoshi,
             received_zatoshi: None,
@@ -380,7 +401,7 @@ impl ActivityEntry {
             tx_index: None,
             confirmations: 0,
             status: activity.status,
-            created_at: Some(activity.created_at),
+            created_at: known_created_at(activity.created_at),
             memos: Vec::new(),
             last_error: activity.last_error,
         }
@@ -471,9 +492,9 @@ impl ActivityEntry {
             // first address must not stand in for several.
             single_recipient_address(&[], &self.external_addresses)
         };
-        self.source_pool = Some(journal.source_pool.clone());
+        self.source_pool = known_pool(journal.source_pool.clone());
         self.destination_pool = only_pool(&destination_pools);
-        self.source_pools = vec![journal.source_pool];
+        self.source_pools = known_pool(journal.source_pool).into_iter().collect();
         self.destination_pools = destination_pools;
         self.amount_zatoshi = journal.amount_zatoshi;
         self.block_hash = self.block_hash.or(journal.block_hash);
@@ -481,7 +502,7 @@ impl ActivityEntry {
             self.status = journal.status;
             self.last_error = journal.last_error;
         }
-        self.created_at = Some(journal.created_at);
+        self.created_at = known_created_at(journal.created_at);
         self
     }
 }
@@ -635,6 +656,45 @@ fn order_activity_by_first_seen(
     }
     activity.sort_by(|left, right| sequences[&right.id].cmp(&sequences[&left.id]));
     Ok(())
+}
+
+/// The pool a payment to `address` lands in, mirroring the SDK's own choice:
+/// a unified address needs an Orchard receiver to spend through Ironwood, and
+/// otherwise falls back to its transparent receiver when it has one. Returns
+/// [`UNKNOWN_POOL`] for a shape that resolves to neither (a Sapling-only
+/// unified address) or that no longer decodes.
+fn external_faucet_pool(address: &str) -> &'static str {
+    match Address::decode(&regtest_network(), address) {
+        Some(Address::Transparent(_)) => "transparent",
+        Some(Address::Unified(unified)) if unified.has_orchard() => "ironwood",
+        Some(Address::Unified(unified)) if unified.has_transparent() && !unified.has_sapling() => {
+            "transparent"
+        }
+        _ => UNKNOWN_POOL,
+    }
+}
+
+/// Adapts a stored external-address faucet payment into the same shape as a
+/// journaled account payment, so it can be merged into one feed through the
+/// existing candidate pipeline instead of threading a second payment type
+/// through every filtering, paging, and ordering step.
+fn address_faucet_as_activity(payment: AddressFaucet) -> Activity {
+    Activity {
+        id: payment.id,
+        kind: "faucet".to_owned(),
+        from_account: None,
+        to_account: None,
+        to_address: Some(payment.address.clone()),
+        source_pool: "ironwood".to_owned(),
+        destination_pool: external_faucet_pool(&payment.address).to_owned(),
+        amount_zatoshi: payment.amount_zatoshi,
+        txid: payment.txid,
+        block_hash: payment.block_hash,
+        status: payment.status,
+        created_at: payment.created_at,
+        last_error: payment.last_error,
+        outputs: Vec::new(),
+    }
 }
 
 fn activity_candidates(
@@ -915,7 +975,15 @@ pub(crate) async fn activity(
         )
         .into_response());
     }
-    let journal = state.0.store.all_activities()?;
+    let mut journal = state.0.store.all_activities()?;
+    journal.extend(
+        state
+            .0
+            .store
+            .all_address_faucets()?
+            .into_iter()
+            .map(address_faucet_as_activity),
+    );
     let journal_ids = journal.iter().map(|entry| entry.id.clone()).collect();
     let (canonical, prepared_txids) = state.0.wallet.canonical_activity_index(journal_ids).await?;
     let mut candidates = activity_candidates(journal, canonical, &prepared_txids);

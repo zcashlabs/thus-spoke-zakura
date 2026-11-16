@@ -272,7 +272,7 @@ impl Store {
     /// `outputs` is empty for a single-recipient payment.
     fn claim(
         &self,
-        mut request: Activity,
+        request: Activity,
         key: &str,
         memo: Option<&str>,
         outputs: &[ActivityOutput],
@@ -322,9 +322,10 @@ impl Store {
                 params![request.id, position, output.to_account, output.to_address, output.destination_pool, output.amount_zatoshi, output.memo],
             )?;
         }
+        // Read database defaults before committing so admission and replay agree.
+        let activity = activity_by_id(&tx, &request.id)?;
         tx.commit()?;
-        request.outputs = outputs.to_vec();
-        Ok(request)
+        Ok(activity)
     }
 
     #[cfg(test)]
