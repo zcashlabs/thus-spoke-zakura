@@ -616,6 +616,11 @@ impl RealWallet {
         })
         .await
     }
+
+    #[cfg(test)]
+    pub(crate) fn user_account_id(&self, account: u8) -> AccountUuid {
+        self.account_ids[usize::from(account) - 1]
+    }
 }
 
 #[cfg(test)]
