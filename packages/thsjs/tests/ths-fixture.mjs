@@ -13,6 +13,9 @@ let pending = 0, height = 200, identity = instance, stopped = false;
 const server = createServer(async (req, res) => {
   let body = ''; for await (const chunk of req) body += chunk;
   res.setHeader('content-type', 'application/json');
+  if (req.url === '/fixture/stop') {
+    res.end('{}', () => process.kill(process.pid, 'SIGTERM')); return;
+  }
   if (mode === 'redirect' && req.url === '/api/v1/status') {
     res.writeHead(302, { location: 'http://example.com/' }); res.end(); return;
   }
@@ -88,7 +91,7 @@ server.listen(0, '127.0.0.1', () => {
   if (mode === 'bad-p2p') endpoints.p2p = '0.0.0.0:1234';
   if (mode === 'no-output') return;
   // Signal that cancellation is safe without declaring startup complete.
-  if (startupMarker) { writeFileSync(startupMarker, 'ready'); return; }
+  if (startupMarker) { writeFileSync(startupMarker, JSON.stringify(endpoints)); return; }
   const data = JSON.stringify(endpoints) + '\n';
   if (mode === 'split') { process.stdout.write(data.slice(0, 30)); setTimeout(() => process.stdout.write(data.slice(30)), 30); }
   else if (mode === 'output-exit') { process.stdout.write(data, () => process.exit(6)); }

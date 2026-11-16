@@ -3,6 +3,7 @@ import type { ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 export interface TestTHSOptions {
   /** Existing native-capable THS launcher; defaults to `ths` on PATH. */
@@ -193,7 +194,10 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
     const args = ['--name', instance, '--json', 'start', '--native',
       ...(runtimeDir === undefined ? [] : ['--runtime-dir', runtimeDir]),
       '--timeout', String(Math.ceil(timeoutMs / 1000)), '--no-open', '--no-auto-mine'];
-    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Keep the cleanup supervisor outside the test runner's process group.
+    const child = spawn(process.execPath,
+      [fileURLToPath(new URL('./supervisor.js', import.meta.url)), executable, ...args],
+      { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true }) as ChildProcessByStdio<null, Readable, Readable>;
     const abort = new AbortController();
     let finish!: (value: ProcessResult) => void;
     const closed = new Promise<ProcessResult>((resolve) => {

@@ -168,6 +168,11 @@ setup/teardown hooks. The package README covers cancellation and cleanup
 errors, and its separate ZcashJS integration test demonstrates a real wallet
 using both packages.
 
+A private Node supervisor also stops the owned launcher if the JavaScript
+worker exits or is killed. That cleanup runs after the worker is gone; use
+`stop()` when the calling test needs to wait for confirmed shutdown. Other
+instances and the application's signal handlers are left alone.
+
 ## Listen for changes, then fetch state
 
 `GET /api/v1/events` is a server-sent event stream. Each `update` event

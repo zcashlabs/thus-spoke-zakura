@@ -102,7 +102,14 @@ With `createTestTHSClient()` the executable defaults to `ths` on PATH and runtim
 
 `produceBlock(count)` accepts integers from 1 to 10,000. `reorg(depth, { keepTransactions })` and `rollback(depth)` accept integers from 1 to 1,000; the chain must also contain sufficient blocks. `keepTransactions` defaults to `false`. These methods resolve with no value after THS reports its node, index and internal wallet settled. External SDK wallets must still call `wallet.sync()` themselves. Every RPC, funding and settlement call also has one total `timeoutMs` budget and is cancelled by `stop()`. Chain operations are not automatically retried: a timed-out operation might already have changed the chain.
 
-Always await `stop()` in `finally`. It cancels startup and pending requests, sends SIGTERM to the owned launcher, and awaits the launcher's service cleanup. Repeated stops are harmless. A cleanup timeout is an error; the helper retains the run and prevents restart until cleanup is confirmed by a subsequent stop. Unexpected nonzero launcher exits are reported as errors; code 143 is accepted after the helper successfully requests SIGTERM on its live child. An interrupted native startup can exit with code 1 after cleaning its processes and deleting its instance state; both `start()` and `stop()` then reject, preserving the launcher's error message. Errors use ordinary JavaScript `Error`/`AggregateError`, with launcher diagnostics for startup failures.
+Always await `stop()` in `finally`. It cancels startup and pending requests, asks its supervisor to send SIGTERM to the owned launcher, and awaits the launcher's service cleanup. Repeated stops are harmless. A cleanup timeout is an error; the helper retains the run and prevents restart until cleanup is confirmed by a subsequent stop. Unexpected nonzero launcher exits are reported as errors; code 143 is accepted after the helper requests shutdown. An interrupted native startup can exit with code 1 after cleaning its processes and deleting its instance state; both `start()` and `stop()` then reject, preserving the launcher's error message. Errors use ordinary JavaScript `Error`/`AggregateError`, with launcher diagnostics for startup failures.
+
+Each run has a private Node supervisor that watches its connection to the test
+worker. If the worker exits or is killed, including with SIGKILL, the supervisor
+stops its own launcher and waits for cleanup. It does not replace your
+application's signal handlers or stop other THS instances. Cleanup continues
+after the worker has exited; awaiting `stop()` is how a live caller confirms
+that cleanup has finished.
 
 ## Package development
 
@@ -119,7 +126,9 @@ reject browser imports. No Docker or real node is needed for this suite.
 The opt-in [ZcashJS integration](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/integration/zcashjs) uses separately
 installed package archives and a real native runtime. It covers an external
 wallet, exact funding and replay, payment submission, mining, reorg, rollback,
-and cleanup after passing, failing and cancelled tests. ZcashJS is never
+and cleanup after passing, failing and cancelled tests. It also terminates
+JavaScript workers and verifies that all four sandbox ports close while an
+independent instance stays usable. ZcashJS is never
 installed by the package's ordinary build or tests.
 
 This client was extracted from ZcashJS PR #27. Import from `@zcashlabs/thsjs`

@@ -10,7 +10,7 @@
     "url": "git+https://github.com/zcashlabs/thus-spoke-zakura.git",
     "directory": "packages/thsjs"
   },
-  "files": ["dist/index.js", "dist/index.d.ts", "LICENSE", "README.md"],
+  "files": ["dist/index.js", "dist/index.d.ts", "dist/supervisor.js", "LICENSE", "README.md"],
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {

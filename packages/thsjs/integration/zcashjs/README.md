@@ -28,6 +28,8 @@ changes to its exports are required by this consumer.
 
 The test checks native startup, exactly-once funding, a wallet-built payment,
 mining, reorg, rollback, and cleanup after success, failure and cancellation.
+It also kills test workers with SIGTERM and SIGKILL, checks all four sandbox
+ports using TCP, and verifies that an independent instance still works.
 It writes results under `packages/thsjs/.cache/zcashjs/`. It intentionally runs
 outside the normal package suite because it needs real node binaries and a
 built wallet SDK. The package itself has no ZcashJS dependency.

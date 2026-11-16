@@ -137,6 +137,11 @@ They also install the packed archive into a separate project and verify its
 JavaScript API, TypeScript declarations and Node-only exports. CI runs the
 suite on Node 22 and 24 on Linux and macOS.
 
+Worker termination regressions cover SIGTERM and SIGKILL during startup and
+after readiness, with an independent instance that must remain usable. The
+live integration verifies shutdown by requiring connection refusal on all
+four TCP ports; an HTTP error or a timeout is not evidence that a service stopped.
+
 The opt-in ZcashJS consumer under `packages/thsjs/integration/zcashjs` runs
 against real native services and a separately built SDK archive. Follow its
 README for setup. ZcashJS is only a test consumer: neither its source nor its

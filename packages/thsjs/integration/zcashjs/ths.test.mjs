@@ -1,8 +1,13 @@
 // Opt-in native integration: THS_BINARY=... THS_RUNTIME_DIR=... npm test --prefix integration/zcashjs
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { spawn, execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createWalletClient, defineNetwork, encodeNetworkParameters, createLightClient } from '@zcashlabs/zcash.js';
 import { withTestTHS } from '@zcashlabs/thsjs';
+import { assertClosed, waitForClosed } from '../../tests/support/assert-closed.mjs';
 
 assert.ok(process.env.THS_BINARY, 'Set THS_BINARY to an installed native THS launcher.');
 const options = { executable: process.env.THS_BINARY,
@@ -13,15 +18,11 @@ const json = data => JSON.stringify(data, (_, value) => typeof value === 'bigint
 async function check(label, fn) {
   const result = await fn(); evidence.checks.push({ label, result }); console.log(`PASS ${label}`); return result;
 }
-async function assertClosed(endpoints) {
-  for (const endpoint of [endpoints.dashboard, endpoints.rpc, endpoints.lightwalletd]) {
-    await assert.rejects(fetch(endpoint, { signal: AbortSignal.timeout(1000) }));
-  }
-}
 try {
   await withTestTHS(async ths => {
     config = await check('native isolated startup through the library', () => ths.config());
     evidence.config = config;
+    await assert.rejects(assertClosed({ ...config, dashboard: config.lightwalletd }), /still listening/);
     let wallet, signer, binding;
     async function sync() {
       const receipt = await wallet.sync({ signal: AbortSignal.timeout(60_000) });
@@ -87,6 +88,35 @@ try {
     } finally {
       try { await binding?.dispose(); }
       finally { try { await wallet?.close(); } finally { await signer?.dispose(); } }
+    }
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      await check(`${signal} on a JavaScript worker closes its sandbox and preserves another instance`, async () => {
+        const worker = spawn(process.execPath,
+          [fileURLToPath(new URL('../../tests/support/worker.mjs', import.meta.url)),
+            JSON.stringify(options), import.meta.resolve('@zcashlabs/thsjs')],
+          { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+        const exited = once(worker, 'exit');
+        let diagnostics = '', workerConfig, cleaned = false;
+        worker.stderr.on('data', chunk => { diagnostics += chunk; });
+        try {
+          [workerConfig] = await Promise.race([
+            once(worker, 'message', { signal: AbortSignal.timeout(options.timeoutMs) }),
+            exited.then(() => { throw Error(`Worker exited before ready: ${diagnostics}`); }),
+          ]);
+          assert.notEqual(workerConfig.instance, config.instance);
+          worker.kill(signal); assert.deepEqual(await exited, [null, signal]);
+          await waitForClosed(workerConfig, options.timeoutMs); cleaned = true;
+          assert.equal(typeof await ths.rpc('getblockcount'), 'number');
+          return { instance: workerConfig.instance, closed: true, survivor: config.instance };
+        } finally {
+          if (worker.exitCode === null && worker.signalCode === null) worker.kill('SIGTERM');
+          await exited;
+          if (workerConfig && !cleaned) {
+            await promisify(execFile)(options.executable, ['--name', workerConfig.instance, 'stop'],
+              { timeout: options.timeoutMs });
+          }
+        }
+      });
     }
   }, options);
   await check('test scope waits for all owned listeners to close', async () => {
