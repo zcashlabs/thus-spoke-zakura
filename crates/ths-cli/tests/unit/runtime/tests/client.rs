@@ -661,6 +661,28 @@ fn activity_output_distinguishes_routes_and_hides_the_treasury() {
 }
 
 #[test]
+fn activity_output_names_external_recipients_of_a_batch() {
+    let activity: Vec<serde_json::Value> = serde_json::from_str(
+        r#"[
+            {"id":"m","kind":"send","direction":"outgoing","from_accounts":[1],"to_accounts":[2,3],"to_address":null,"external_addresses":["tmexternal"],"source_pool":"ironwood","destination_pool":null,"destination_pools":["ironwood","transparent"],"amount_zatoshi":35000000,"txid":"mixed-tx","block_hash":null,"status":"broadcast","last_error":null},
+            {"id":"x","kind":"send","direction":"outgoing","from_accounts":[1],"to_accounts":[],"to_address":null,"external_addresses":["tmfirst","tmsecond"],"source_pool":"ironwood","destination_pool":"transparent","amount_zatoshi":20000000,"txid":"external-tx","block_hash":null,"status":"broadcast","last_error":null}
+        ]"#,
+    )
+    .unwrap();
+
+    let output = activity_lines(&activity).unwrap();
+    for expected in [
+        "account 1 (ironwood) -> accounts 2, 3 and tmexternal (ironwood+transparent)",
+        "account 1 (ironwood) -> tmfirst, tmsecond (transparent)",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing `{expected}` from {output}"
+        );
+    }
+}
+
+#[test]
 fn activity_output_handles_empty_history_and_preserves_json_fields() {
     assert_eq!(activity_lines(&[]).unwrap(), "No wallet activity yet.");
 

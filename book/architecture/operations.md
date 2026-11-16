@@ -188,8 +188,9 @@ development accounts, and is the same pending or confirmed. `to_address` is set
 only when the entry pays no development account and exactly one external
 address. A batch to several addresses, or to both accounts and addresses, keeps
 it `null`; the dashboard shows such a row as "N recipients". `direction` is
-`self` only when an account pays nothing but itself: a batch that pays the
-sender's other pool and an external address is `outgoing`. A
+`self` or `internal` only when every recipient is a development account: a
+batch that also pays an external address is `outgoing`, whether its other
+outputs pay the sender's other pool or another account. A
 transaction appears once even when it affects multiple development accounts.
 Outputs to the hidden treasury account are excluded from the user-facing
 amount, recipients, and account lists.

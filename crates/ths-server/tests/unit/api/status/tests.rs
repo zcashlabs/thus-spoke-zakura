@@ -1550,7 +1550,8 @@ fn pending_batch_lists_every_recipient_and_pool() {
     assert_eq!(activity.len(), 1);
     let entry = &activity[0];
     assert_eq!(entry.id, "batch-1");
-    assert_eq!(entry.direction, "internal");
+    // Accounts 2 and 3 are paid, but so is an external address.
+    assert_eq!(entry.direction, "outgoing");
     assert_eq!(entry.to_account, None);
     assert_eq!(entry.to_accounts, [2, 3]);
     assert_eq!(entry.to_address, None);
@@ -1582,6 +1583,7 @@ fn mined_batch_keeps_every_recipient_and_pool() {
     assert_eq!(activity.len(), 1);
     let entry = &activity[0];
     assert_eq!(entry.id, "batch-1");
+    assert_eq!(entry.direction, "outgoing");
     assert_eq!(entry.to_accounts, [2, 3]);
     assert_eq!(
         entry.recipient_addresses,

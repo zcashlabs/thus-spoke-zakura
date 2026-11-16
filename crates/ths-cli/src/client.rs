@@ -172,6 +172,10 @@ struct ActivityHistoryEntry {
     to_accounts: Vec<u8>,
     #[serde(default)]
     to_address: Option<String>,
+    /// Recipients outside the development accounts. A batch to accounts and
+    /// addresses together keeps `to_address` null, so the route needs these.
+    #[serde(default)]
+    external_addresses: Vec<String>,
     #[serde(default)]
     source_pool: Option<String>,
     #[serde(default)]
@@ -1664,9 +1668,17 @@ fn activity_account(accounts: &[u8], account: Option<u8>) -> Option<String> {
 }
 
 fn activity_recipient(entry: &ActivityHistoryEntry) -> String {
-    activity_account(&entry.to_accounts, entry.to_account)
-        .or_else(|| entry.to_address.clone())
-        .unwrap_or_else(|| "an unknown recipient".to_owned())
+    let accounts = activity_account(&entry.to_accounts, entry.to_account);
+    if entry.external_addresses.is_empty() {
+        return accounts
+            .or_else(|| entry.to_address.clone())
+            .unwrap_or_else(|| "an unknown recipient".to_owned());
+    }
+    let addresses = entry.external_addresses.join(", ");
+    match accounts {
+        Some(accounts) => format!("{accounts} and {addresses}"),
+        None => addresses,
+    }
 }
 
 pub(crate) fn activity_lines(activity: &[serde_json::Value]) -> Result<String> {

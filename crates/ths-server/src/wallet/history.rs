@@ -141,24 +141,19 @@ struct OutputSummary {
     memos: Vec<String>,
 }
 
-/// A payment back to its own sender is `self` only when nothing else leaves
-/// the development accounts; a batch that also pays an external address is
-/// `outgoing`.
+/// `self` and `internal` mean value stayed inside the development accounts, so
+/// a batch from them that also pays an external address is `outgoing`, even
+/// when other outputs pay the sender or another account.
 pub(crate) fn direction(
     from_accounts: &[u8],
     to_accounts: &[u8],
     pays_external: bool,
 ) -> &'static str {
     match (from_accounts, to_accounts) {
-        ([from], [to]) if from == to => {
-            if pays_external {
-                "outgoing"
-            } else {
-                "self"
-            }
-        }
         ([], []) => "unknown",
         ([], _) => "incoming",
+        (_, _) if pays_external => "outgoing",
+        ([from], [to]) if from == to => "self",
         (_, []) => "outgoing",
         (_, _) => "internal",
     }
