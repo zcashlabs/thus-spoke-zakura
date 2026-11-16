@@ -88,3 +88,41 @@ fn status_of(script: &str) -> std::process::ExitStatus {
         .status()
         .unwrap()
 }
+
+/// `--head` reads Docker's stdout and stderr through one pipe, so Docker's own
+/// error would be printed as a log line. A missing container is refused before
+/// `docker logs` runs.
+#[cfg(unix)]
+#[test]
+fn log_head_refuses_a_missing_container_before_reading_logs() {
+    let marker = tempfile::tempdir().unwrap();
+    let ran_logs = marker.path().join("ran-logs");
+    let stub = format!(
+        "#!/bin/sh\nif [ \"$1\" = logs ]; then : > '{}'; echo 'Error response from daemon: No such container' >&2; exit 1; fi\nexit 0\n",
+        ran_logs.display()
+    );
+    let error =
+        super::docker::with_stub_docker(&stub, || print_log_head("ths-nosuch-app", 5)).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("container ths-nosuch-app does not exist"),
+        "{error:#}"
+    );
+    assert!(
+        !ran_logs.exists(),
+        "docker logs ran for a missing container"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn log_head_reports_an_unreachable_daemon_in_the_error() {
+    let error = super::docker::with_stub_docker(
+        "#!/bin/sh\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n",
+        || print_log_head("ths-default-app", 5),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("Cannot connect to the Docker daemon"),
+        "{error:#}"
+    );
+}
