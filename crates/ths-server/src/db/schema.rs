@@ -1,4 +1,5 @@
 use super::accounts::derived_addresses;
+use super::address_faucet::UNKNOWN_CREATED_AT;
 use super::*;
 
 impl Store {
@@ -44,7 +45,7 @@ impl Store {
     /// wallet seed, which is the moment a new instance comes into existence.
     fn create_or_migrate(&self) -> Result<bool> {
         let db = self.0.lock().unwrap();
-        db.execute_batch(
+        db.execute_batch(&format!(
             r#"
             CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS accounts (
@@ -62,14 +63,16 @@ impl Store {
             CREATE TABLE IF NOT EXISTS address_faucets (
                 key TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, address TEXT NOT NULL,
                 amount_zatoshi INTEGER NOT NULL, txid TEXT NOT NULL DEFAULT '',
-                block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT
+                block_hash TEXT, status TEXT NOT NULL DEFAULT 'preparing', last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT '{UNKNOWN_CREATED_AT}'
             );
-        "#,
-        )?;
+        "#
+        ))?;
         db.execute_batch(ACTIVITY_TABLE)?;
         add_missing_column(&db, "idempotency", "memo")?;
         add_missing_column(&db, "activity", "last_error")?;
         add_missing_column(&db, "address_faucets", "last_error")?;
+        add_address_faucets_created_at(&db)?;
         migrate_activity_recipients(&db)?;
         db.execute_batch(ACTIVITY_ORDER_TABLE)?;
         // Existing journals already have an immutable insertion order. Preserve
@@ -77,6 +80,26 @@ impl Store {
         db.execute(
             "INSERT OR IGNORE INTO activity_order(activity_id)
              SELECT id FROM activity ORDER BY rowid ASC",
+            [],
+        )?;
+        // An external payment predating the `created_at` column (and so this
+        // merged feed) is backfilled with an explicit negative sequence,
+        // always older than any positive, autoincremented sequence already
+        // assigned above or earlier on a prior startup. Ordering the two
+        // statements would not be enough on its own: on an instance that
+        // already ran before address faucets joined this table,
+        // `activity_order` already holds rows, so a plain autoincremented
+        // backfill would still give these older payments the newest
+        // sequence numbers. A payment created after the column exists
+        // always carries a real `created_at` and is excluded here, so it
+        // gets a normal sequence the first time `/api/v1/activity` reads it,
+        // same as any other new activity.
+        db.execute(
+            &format!(
+                "INSERT OR IGNORE INTO activity_order(sequence,activity_id)
+                 SELECT -ROW_NUMBER() OVER (ORDER BY rowid DESC), id FROM address_faucets
+                 WHERE created_at = '{UNKNOWN_CREATED_AT}'"
+            ),
             [],
         )?;
         let stored_seed = db
@@ -152,6 +175,32 @@ fn add_missing_column(db: &Connection, table: &str, column: &str) -> Result<()> 
         .any(|existing| existing == column);
     if !exists {
         db.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
+    }
+    Ok(())
+}
+
+/// Rows created before this column existed predate per-row creation times.
+/// SQLite refuses a non-constant `ADD COLUMN` default (`CURRENT_TIMESTAMP`)
+/// once the table holds rows, so backfill the `UNKNOWN_CREATED_AT` sentinel
+/// instead: the activity feed reports it as an unknown time rather than a
+/// real one, and treats it as older than anything already sequenced (see
+/// the `activity_order` backfill below). Every insert going forward
+/// supplies a real `created_at` explicitly, so this default otherwise only
+/// matters for this one-time backfill.
+fn add_address_faucets_created_at(db: &Connection) -> Result<()> {
+    let exists = db
+        .prepare("PRAGMA table_info(address_faucets)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|existing| existing == "created_at");
+    if !exists {
+        db.execute(
+            &format!(
+                "ALTER TABLE address_faucets ADD COLUMN created_at TEXT NOT NULL DEFAULT '{UNKNOWN_CREATED_AT}'"
+            ),
+            [],
+        )?;
     }
     Ok(())
 }
