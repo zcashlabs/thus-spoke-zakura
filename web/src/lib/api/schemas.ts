@@ -110,6 +110,8 @@ export type WalletTransaction = z.infer<typeof walletTransactionSchema>;
 
 export const addressFaucetSchema = z.object({
   address: z.string(),
+  /** `unknown` for a payment saved before a Sapling-only address was rejected. */
+  destination_pool: z.union([poolSchema, z.literal('unknown')]),
   amount_zatoshi: zatoshi,
   txid: z.string(),
   block_hash: z.string().nullable(),
@@ -127,6 +129,12 @@ export const paymentUriSchema = z.object({
   memo: z.string().nullable(),
 });
 export type PaymentUri = z.infer<typeof paymentUriSchema>;
+
+/** A Regtest address as resolved by the address faucet's own (looser) rule. */
+export const faucetAddressParsedSchema = z.object({
+  to_account: z.number().int().nullable(),
+});
+export type FaucetAddressParsed = z.infer<typeof faucetAddressParsedSchema>;
 
 export const chainInfoSchema = z.object({
   chain: z.string(),
