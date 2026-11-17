@@ -34,6 +34,12 @@ const server = createServer(async (req, res) => {
     if (!['getblockhash', 'getblockchaininfo'].includes(request.method)) {
       calls.push(['rpc', request.method, request.params]);
       if (request.method === 'hang') return;
+      if (request.method === 'hang-body' || request.method === 'truncated-body') {
+        res.write('{"result":');
+        if (request.method === 'truncated-body') setImmediate(() => res.destroy());
+        return;
+      }
+      if (request.method === 'invalid-body') { res.end('{invalid json}'); return; }
       if (request.method === 'fail') { res.end(JSON.stringify({ id: request.id, error: { code: -8, message: 'fixture RPC rejected' } })); return; }
       if (request.method === 'bad-id') { res.end(JSON.stringify({ id: 'foreign', result: 1 })); return; }
       if (request.method === 'missing-result') { res.end(JSON.stringify({ id: request.id })); return; }

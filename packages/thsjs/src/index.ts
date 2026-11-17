@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
+import { json } from 'node:stream/consumers';
+import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -111,18 +113,22 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
   }
   async function request(current: Run, url: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
     alive(current);
-    const response = await fetch(url, { redirect: 'error',
-      signal,
-      ...(body === undefined
-        ? {}
-        : { method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body) }) });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw Error(`THS API returned HTTP ${response.status}.`);
-    }
-    const data: unknown = await response.json();
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    // node:http keeps shutdown connection errors catchable, unlike affected Node fetch versions.
+    const data: unknown = await new Promise((resolve, reject) => {
+      const req = httpRequest(url, { signal, agent: false,
+        ...(payload === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' } }) },
+      response => {
+        if (response.statusCode === undefined || response.statusCode < 200 || response.statusCode >= 300) {
+          response.destroy();
+          reject(Error(`THS API returned HTTP ${response.statusCode}.`));
+          return;
+        }
+        json(response).then(resolve, reject);
+      });
+      req.once('error', reject);
+      req.end(payload);
+    });
     alive(current);
     return data;
   }

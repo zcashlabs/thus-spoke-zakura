@@ -103,8 +103,13 @@ test('stop waits for slow owned cleanup', async () => {
   const began = Date.now(); await ths.stop(); assert.ok(Date.now() - began >= 140);
 });
 test('a response arriving around process exit never yields a usable client', async () => {
-  const ths = client('output-exit');
-  await assert.rejects(ths.start()); await ths.stop();
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const ths = client('output-exit');
+    try {
+      await assert.rejects(ths.start());
+      assert.throws(() => ths.config());
+    } finally { await ths.stop(); }
+  }
 });
 test('mutation requests have a total bounded timeout', async t => {
   const ths = createTestTHSClient({ executable, runtimeDir: 'hang-mutation', timeoutMs: 1000 });
@@ -275,6 +280,18 @@ test('RPC captures parameters before asynchronous identity checks', async t => {
   assert.equal(await mining, 202);
 });
 
+for (const [method, expected] of [['hang-body', /timeout|aborted/i],
+  ['truncated-body', /terminated|aborted|socket|reset/i], ['invalid-body', /JSON/i]]) {
+  test(`RPC rejects an incomplete or invalid response without retrying: ${method}`, async t => {
+    const ths = createTestTHSClient({ executable, runtimeDir: 'normal', timeoutMs: 1000 });
+    t.after(() => ths.stop()); await ths.start();
+    await assert.rejects(ths.rpc(method), expected);
+    assert.equal(await ths.rpc('getblockcount'), 200);
+    const details = await (await fetch(`${ths.config().dashboard}/fixture`)).json();
+    assert.deepEqual(details.calls, [['rpc', method, []], ['rpc', 'getblockcount', []]]);
+  });
+}
+
 test('funding waits for broadcast, preserves exact amounts and keys, and leaves mining to the test', async t => {
   const ths = client('normal'); t.after(() => ths.stop()); await ths.start();
   const options = { idempotencyKey: 'funding-replay/&?key' };
@@ -313,7 +330,7 @@ test('explicit funding retry after a lost response reuses the original payment',
 });
 
 for (const [mode, expected] of [['failed-funding', /fixture funding rejected/], ['wrong-funding', /funding response/i],
-  ['bad-funding-txid', /funding response/i], ['hang-funding', /timeout|aborted/i], ['lost-funding-response', /fetch/i]]) {
+  ['bad-funding-txid', /funding response/i], ['hang-funding', /timeout|aborted/i], ['lost-funding-response', /socket hang up/i]]) {
   test(`funding failure remains observable with a retry key: ${mode}`, async t => {
     const ths = createTestTHSClient({ executable, runtimeDir: mode, timeoutMs: 500 });
     t.after(() => ths.stop()); await ths.start();
