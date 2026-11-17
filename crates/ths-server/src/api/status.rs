@@ -718,8 +718,13 @@ fn activity_candidates(
             .as_ref()
             .map(|entry| entry.affected_accounts.clone())
             .unwrap_or_default();
+        // A batch keeps its recipients in `outputs`, and until it is mined no
+        // canonical entry names them, so filtering by a recipient account
+        // would otherwise drop a preparing or failed batch.
+        let output_accounts = journal.outputs.iter().map(|output| output.to_account);
         for account in [journal.from_account, journal.to_account]
             .into_iter()
+            .chain(output_accounts)
             .flatten()
             .filter(|account| *account <= USER_ACCOUNT_COUNT)
         {

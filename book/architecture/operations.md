@@ -203,8 +203,10 @@ that. `destination_pool` is `null` for the rare address shape the faucet
 accepts but cannot resolve to a pool.
 
 The unkeyed list accepts `limit` (default 30, maximum 100), `account` (1–5),
-`kind` (`send`, `faucet`, or `transaction`), and `status` filters. Filters
-combine and are applied before the limit. To read the next older page, pass the
+`kind` (`send`, `faucet`, or `transaction`), and `status` filters. `account`
+matches the sender and every recipient account, including each recipient of a
+batch that is still preparing or has failed. Filters combine and are applied
+before the limit. To read the next older page, pass the
 last returned activity's `id` as `before`; for example,
 `GET /api/v1/activity?account=2&limit=30&before=<activity-id>`. The response
 remains a JSON array. `X-THS-Has-More` is `true` only when an older matching row

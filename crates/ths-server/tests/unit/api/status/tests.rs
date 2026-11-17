@@ -1866,3 +1866,65 @@ fn a_send_between_the_senders_own_pools_is_still_self() {
 
     assert_eq!(activity[0].direction, "self");
 }
+
+#[tokio::test]
+async fn account_filters_include_unmined_batch_recipients() {
+    // A batch row has no `to_account`; its recipients live in its outputs,
+    // and nothing canonical names them before the batch is mined.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let output = |to_account| ActivityOutput {
+        to_account: Some(to_account),
+        to_address: None,
+        destination_pool: "ironwood".to_owned(),
+        amount_zatoshi: 100_000_000,
+        memo: None,
+    };
+    let batch = store
+        .claim_batch_transfer(1, "ironwood", &[output(2), output(3)], "batch-filter")
+        .unwrap();
+    // A newer unrelated payment, so the batch is not the only page entry.
+    store
+        .claim_faucet(4, "ironwood", 1_000, "unrelated-faucet")
+        .unwrap();
+
+    let ids = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let assert_listed_for = |status: &'static str| {
+        let state = state.clone();
+        let id = batch.id.clone();
+        async move {
+            for account in [1, 2, 3] {
+                let (code, body) = api_get(
+                    &state,
+                    &format!("/api/v1/activity?account={account}&status={status}&limit=1"),
+                )
+                .await;
+                assert_eq!(code, StatusCode::OK);
+                assert_eq!(
+                    ids(&body),
+                    [id.as_str()],
+                    "account {account} while {status}"
+                );
+            }
+            let (_, body) = api_get(
+                &state,
+                &format!("/api/v1/activity?account=5&status={status}"),
+            )
+            .await;
+            assert!(
+                !ids(&body).contains(&id),
+                "account 5 is not paid by the batch"
+            );
+        }
+    };
+
+    assert_listed_for("preparing").await;
+    store.fail(&batch.id, "insufficient funds").unwrap();
+    assert_listed_for("failed").await;
+}
