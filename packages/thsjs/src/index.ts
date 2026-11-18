@@ -29,7 +29,7 @@ export interface TestTHSFunding {
   readonly amountZatoshi: bigint;
   readonly idempotencyKey: string;
   readonly txid: string;
-  readonly status: 'broadcast' | 'confirmed';
+  readonly status: 'broadcast' | 'confirmed' | 'unconfirmed';
 }
 export interface TestTHSClient {
   /** Starts a fresh isolated native instance; concurrent calls share the same result. */
@@ -340,7 +340,7 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
           if (data.address !== address || data.amount_zatoshi !== Number(amountZatoshi)
             || typeof data.status !== 'string') throw Error('Invalid THS funding response.');
           if (data.status === 'failed') throw Error(`THS funding failed: ${String(data.last_error)}`);
-          if (data.status === 'broadcast' || data.status === 'confirmed') {
+          if (data.status === 'broadcast' || data.status === 'confirmed' || data.status === 'unconfirmed') {
             if (typeof data.txid !== 'string' || !/^[a-f0-9]{64}$/.test(data.txid)) {
               throw Error('Invalid THS funding response transaction ID.');
             }

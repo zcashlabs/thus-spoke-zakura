@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { createTestTHSClient } from '@zcashlabs/thsjs';
 import * as testing from '@zcashlabs/thsjs';
 const executable = new URL('./ths-fixture.mjs', import.meta.url).pathname;
@@ -38,6 +42,27 @@ test('coalesces start, parses split JSON, exposes frozen config, stops repeatedl
     '--timeout', '2', '--no-open', '--no-auto-mine']);
   await ths.stop(); await ths.stop(); assert.throws(() => ths.config(), /ready/i);
   assert.notEqual((await ths.start()).instance, a.instance);
+});
+
+test('THS requests stay on loopback when the Node process enables a proxy', async t => {
+  let proxied = 0;
+  const proxy = createServer((_request, response) => { proxied++; response.writeHead(502).end(); });
+  proxy.on('connect', (_request, socket) => {
+    proxied++;
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  });
+  proxy.listen(0, '127.0.0.1');
+  await once(proxy, 'listening');
+  t.after(() => new Promise(resolve => proxy.close(resolve)));
+  const url = `http://127.0.0.1:${proxy.address().port}`;
+  await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { withTestTHS } from '@zcashlabs/thsjs';
+    await withTestTHS(async ths => assert.equal(await ths.rpc('getblockcount'), 200),
+      { executable: ${JSON.stringify(executable)}, runtimeDir: 'normal', timeoutMs: 3000 });
+  `], { cwd: new URL('..', import.meta.url), timeout: 10_000,
+    env: { ...process.env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: url, http_proxy: url, NO_PROXY: '', no_proxy: '' } });
+  assert.equal(proxied, 0);
 });
 
 for (const mode of ['public', 'credentials', 'bad-p2p', 'identity', 'network', 'rpc-network', 'genesis', 'redirect', 'tls', 'url-path', 'zero-port', 'wallet-error', 'invalid-json', 'oversized']) {
@@ -326,6 +351,19 @@ test('explicit funding retry after a lost response reuses the original payment',
   await assert.rejects(ths.fundAddress('regtest-fixture-address', 1_000_000n, options), /lost-response-retry/);
   const funded = await ths.fundAddress('regtest-fixture-address', 1_000_000n, options);
   assert.equal(funded.txid, 'ab'.repeat(32));
+  assert.equal((await (await fetch(`${ths.config().dashboard}/fixture`)).json()).funded, 1_000_000);
+});
+
+test('funding replay after rollback returns the original transaction as unconfirmed', async t => {
+  const ths = client('funding-rollback'); t.after(() => ths.stop()); await ths.start();
+  const options = { idempotencyKey: 'funding-rollback-replay' };
+  const funded = await ths.fundAddress('regtest-fixture-address', 1_000_000n, options);
+  await ths.produceBlock(1);
+  assert.deepEqual(await ths.fundAddress(funded.address, funded.amountZatoshi, options),
+    { ...funded, status: 'confirmed' });
+  await ths.rollback(1);
+  assert.deepEqual(await ths.fundAddress(funded.address, funded.amountZatoshi, options),
+    { ...funded, status: 'unconfirmed' });
   assert.equal((await (await fetch(`${ths.config().dashboard}/fixture`)).json()).funded, 1_000_000);
 });
 

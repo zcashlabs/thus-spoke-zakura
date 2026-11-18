@@ -157,11 +157,13 @@ test('application chain control', { timeout: 240_000 }, async t => {
 ```
 
 `fundAddress` accepts bigint zatoshi and a retry key. Mine the confirmations
-your application needs, then sync its wallet. `produceBlock`, `reorg`, and
-`rollback` wait for THS settlement; they do not sync external wallets. A
-timed-out mutation might already have taken effect and is not automatically
-retried. The helper uses only its own instance and never attaches to an
-existing environment.
+your application needs, then sync its wallet. If a reorg or rollback removes
+the confirming block, replaying the funding key can return `unconfirmed` with
+the original transaction ID. `produceBlock`, `reorg`, and `rollback` wait for
+THS settlement; they do not sync external wallets. A timed-out mutation might
+already have taken effect and is not automatically retried. The helper
+connects directly to its own instance, bypassing Node's global proxy settings,
+and never attaches to an existing environment.
 
 Use `createTestTHSClient` with explicit `start()` and `stop()` for test-runner
 setup/teardown hooks. The package README covers cancellation and cleanup
