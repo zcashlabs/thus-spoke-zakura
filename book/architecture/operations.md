@@ -78,6 +78,14 @@ or mempool mode, use `ths mine 1`; interval mode supplies the next block on its
 schedule. While waiting, the operation stays `preparing` with its original key.
 New ordinary NU7 payments expire 120 blocks after their candidate inclusion height.
 
+`POST /api/v1/send/quote` never mines that block. It leaves such an output
+out of `max_zatoshi`, and reports its value as `pending_zatoshi` and the height
+that makes it spendable as `anchor_height`. In auto mode, `--max` mines that one
+block, waits for the wallet to scan it, and quotes again before sending; in the
+other modes it stops and names the block rather than sending less than the
+account holds. The dashboard's **Send ZEC** dialog shows the waiting amount
+under the amount field and requotes after each wallet scan.
+
 ## HTTP admission and status
 
 `POST /api/v1/send`, `POST /api/v1/faucet`, and

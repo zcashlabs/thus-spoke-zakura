@@ -107,7 +107,11 @@ $ curl -fsS "$DASHBOARD_URL/api/v1/send/quote" -H 'content-type: application/jso
 
 - `available_zatoshi` reports the funds available for one send before fees,
 - `fee_zatoshi` reports its fee,
-- and `max_zatoshi` reports the quoted maximum send amount.
+- `max_zatoshi` reports the quoted maximum send amount,
+- and `pending_zatoshi` reports Ironwood received in the latest block. That
+  value is not in `max_zatoshi` until the chain reaches `anchor_height`, which
+  is `null` when nothing is waiting; see
+  [spending newly confirmed Ironwood](architecture/operations.md#spending-newly-confirmed-ironwood).
 
 A transparent send can use at most 1,333 eligible inputs. If an account holds
 more, the quote's `available_zatoshi` can be lower than its full transparent

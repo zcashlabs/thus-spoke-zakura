@@ -390,7 +390,24 @@ struct SendQuote {
     available_zatoshi: u64,
     fee_zatoshi: u64,
     max_zatoshi: u64,
+    // Older servers omit these: they never report funds waiting for an anchor.
+    #[serde(default)]
+    pending_zatoshi: u64,
+    #[serde(default)]
+    anchor_height: Option<u64>,
 }
+
+impl SendQuote {
+    /// The height that makes Ironwood received at the tip spendable, when the
+    /// quote's maximum leaves that value out.
+    fn anchor_wait(&self) -> Option<u64> {
+        self.anchor_height.filter(|_| self.pending_zatoshi > 0)
+    }
+}
+
+/// A Max send mines at most this many anchor blocks before giving up, in case
+/// other payments keep landing new receipts at the tip.
+const MAX_ANCHOR_BLOCKS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransferAmount {
@@ -414,7 +431,7 @@ fn send_quote_request(
         }))
 }
 
-fn quote_max_amount(
+fn quote_max(
     client: &reqwest::blocking::Client,
     dashboard: &str,
     name: &InstanceName,
@@ -422,19 +439,19 @@ fn quote_max_amount(
     from: u8,
     source_pool: &str,
     destination_pool: &str,
-) -> Result<u64> {
+) -> Result<SendQuote> {
     let timeout = remaining(deadline)
         .ok_or_else(|| anyhow!("maximum transfer quote timed out"))
         .with_context(|| format!("asking environment {name} for the maximum transfer amount"))?;
-    let quote: SendQuote =
-        send_quote_request(client, dashboard, from, source_pool, destination_pool)
-            .timeout(timeout)
-            .send()
-            .map_err(anyhow::Error::from)
-            .and_then(decode_response)
-            .with_context(|| {
-                format!("asking environment {name} for the maximum transfer amount")
-            })?;
+    send_quote_request(client, dashboard, from, source_pool, destination_pool)
+        .timeout(timeout)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| format!("asking environment {name} for the maximum transfer amount"))
+}
+
+fn max_amount(quote: &SendQuote, from: u8, source_pool: &str) -> Result<u64> {
     if quote.max_zatoshi == 0 {
         bail!(
             "account {from} has no spendable {source_pool} funds remaining after the network fee"
@@ -508,14 +525,39 @@ impl Runtime {
         name: &InstanceName,
         dashboard: &str,
         client: &reqwest::blocking::Client,
-        mut out: impl std::io::Write,
+        out: impl std::io::Write,
         deadline: Instant,
         blocks: u32,
         json: bool,
     ) -> Result<()> {
+        self.mine_for_intent(
+            name,
+            dashboard,
+            client,
+            out,
+            deadline,
+            blocks,
+            json,
+            &format!("mine:{blocks}"),
+        )
+    }
+
+    /// Runs a mining job under `intent`'s saved idempotency key, so a command
+    /// interrupted mid-job resumes that job instead of mining again.
+    #[allow(clippy::too_many_arguments)]
+    fn mine_for_intent(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        mut out: impl std::io::Write,
+        deadline: Instant,
+        blocks: u32,
+        json: bool,
+        intent: &str,
+    ) -> Result<()> {
         let journal = IntentJournal::open(&self.instance_dir(name), "mining")?;
-        let intent = format!("mine:{blocks}");
-        let idempotency_key = journal.key_for(&intent)?;
+        let idempotency_key = journal.key_for(intent)?;
 
         let mut job = submit_mining_job(client, dashboard, blocks, &idempotency_key, deadline)
             .with_context(|| format!("asking environment {name} to mine {blocks} blocks"))?;
@@ -592,7 +634,7 @@ impl Runtime {
         // output above is written: if that write fails, the key must still
         // survive so a retry does not start a second job for output we never
         // actually delivered.
-        journal.clear(&[(&intent, &idempotency_key)])?;
+        journal.clear(&[(intent, &idempotency_key)])?;
 
         if job.state == MiningJobState::Failed {
             bail!(job.error.unwrap_or_else(|| "mining failed".to_owned()));
@@ -1143,6 +1185,63 @@ impl Runtime {
         }
     }
 
+    /// Quotes the largest amount `from` can send. Ironwood received at the tip
+    /// has no anchor yet, so the quote leaves it out. Sending that quote would
+    /// send short, so in auto mode this mines the anchor block, as a
+    /// fixed-amount send does, and quotes again. Other modes leave mining to
+    /// the user, so the command stops and says which block it needs.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_max_amount(
+        &self,
+        name: &InstanceName,
+        dashboard: &str,
+        client: &reqwest::blocking::Client,
+        deadline: Instant,
+        from: u8,
+        source_pool: &str,
+        destination_pool: &str,
+    ) -> Result<u64> {
+        for _ in 0..MAX_ANCHOR_BLOCKS {
+            let quote = quote_max(
+                client,
+                dashboard,
+                name,
+                deadline,
+                from,
+                source_pool,
+                destination_pool,
+            )?;
+            let Some(anchor_height) = quote.anchor_wait() else {
+                return max_amount(&quote, from, source_pool);
+            };
+            if mining_mode(dashboard, client, name, deadline)? != "auto" {
+                bail!(
+                    "account {from} received {} ZEC in the latest block, which becomes spendable \
+                     at block {anchor_height}; mine it with `ths mine 1` or wait for the next \
+                     block, then run this command again so --max includes it",
+                    format_zec(quote.pending_zatoshi)
+                );
+            }
+            self.mine_for_intent(
+                name,
+                dashboard,
+                client,
+                std::io::sink(),
+                deadline,
+                1,
+                true,
+                &format!("anchor:{anchor_height}"),
+            )
+            .with_context(|| {
+                format!("mining anchor block {anchor_height} for account {from}'s maximum send")
+            })?;
+        }
+        bail!(
+            "account {from}'s {source_pool} funds still wait for an anchor block after mining \
+             {MAX_ANCHOR_BLOCKS} blocks; run this command again"
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn submit_max_send(
         &self,
@@ -1174,10 +1273,10 @@ impl Runtime {
         let (fingerprint, amount_zatoshi) = match saved {
             Some(saved) => saved,
             None => {
-                let amount = quote_max_amount(
-                    client,
-                    dashboard,
+                let amount = self.resolve_max_amount(
                     name,
+                    dashboard,
+                    client,
                     deadline,
                     from,
                     source_pool,
@@ -1918,12 +2017,35 @@ pub(crate) struct Account {
 #[derive(Debug, Deserialize)]
 struct ServerStatus {
     wallet_sync: WalletSyncStatus,
+    #[serde(default)]
+    mining_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WalletSyncStatus {
     state: String,
     error: Option<String>,
+}
+
+/// The instance's mining mode. A server that predates mining modes only mined
+/// as part of payments, which is `auto`.
+fn mining_mode(
+    dashboard: &str,
+    client: &reqwest::blocking::Client,
+    name: &InstanceName,
+    deadline: Instant,
+) -> Result<String> {
+    let timeout = remaining(deadline)
+        .ok_or_else(|| anyhow!("timed out"))
+        .with_context(|| format!("checking the mining mode of environment {name}"))?;
+    let status: ServerStatus = client
+        .get(format!("{dashboard}/api/v1/status"))
+        .timeout(timeout)
+        .send()
+        .map_err(anyhow::Error::from)
+        .and_then(decode_response)
+        .with_context(|| format!("checking the mining mode of environment {name}"))?;
+    Ok(status.mining_mode.unwrap_or_else(|| "auto".to_owned()))
 }
 
 fn require_wallet_ready(
@@ -2029,7 +2151,13 @@ fn quote_lines(name: &InstanceName, route: &RouteQuote) -> String {
         format!("  Fee           {} ZEC", format_zec(quote.fee_zatoshi)),
         format!("  Maximum send  {} ZEC", format_zec(quote.max_zatoshi)),
     ];
-    if quote.max_zatoshi == 0 {
+    if let Some(anchor_height) = quote.anchor_wait() {
+        lines.push(format!(
+            "{} ZEC received in the latest block becomes spendable at block {anchor_height}; \
+             `--max` includes it once that block is mined.",
+            format_zec(quote.pending_zatoshi)
+        ));
+    } else if quote.max_zatoshi == 0 {
         lines.push(format!(
             "Account {from_account} has nothing spendable in the {source_pool} pool after the fee."
         ));
