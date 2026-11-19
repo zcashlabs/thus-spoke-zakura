@@ -536,7 +536,11 @@ export function SendDialog({
           label="Amount (ZEC)"
           hint={
             quote.data !== undefined
-              ? `${formatZecAmount(quote.data.max_zatoshi)} spendable after a ${formatZecAmount(quote.data.fee_zatoshi)} network fee.`
+              ? `${formatZecAmount(quote.data.max_zatoshi)} spendable after a ${formatZecAmount(quote.data.fee_zatoshi)} network fee.${
+                  quote.data.pending_zatoshi > 0n && quote.data.anchor_height !== null
+                    ? ` ${formatZecAmount(quote.data.pending_zatoshi)} received in the latest block becomes spendable at block ${quote.data.anchor_height.toLocaleString()}; Max includes it once that block is mined.`
+                    : ''
+                }`
               : `${formatZecAmount(available)} available in the ${sourcePool} pool.`
           }
           error={form.formState.errors.amount?.message}

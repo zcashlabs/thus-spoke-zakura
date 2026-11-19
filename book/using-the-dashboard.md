@@ -103,6 +103,9 @@ The dialog does the fee arithmetic for you. As soon as it has an account and
 a pool it asks `POST /api/v1/send/quote`, and the hint under the amount field
 shows the quoted spendable amount and network fee for that account and pool.
 The **Max** button fills in that spendable figure. An amount above it is rejected.
+Ironwood received in the latest block is not spendable until the next block;
+the hint names that amount and block, and **Max** includes it once the block
+is mined.
 An amount above 21,000,000 ZEC, the maximum supply, is rejected before the
 request is sent.
 

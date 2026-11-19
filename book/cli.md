@@ -718,7 +718,9 @@ and adds the route they answer:
   "destination_pool": "transparent",
   "available_zatoshi": 500000000,
   "fee_zatoshi": 15000,
-  "max_zatoshi": 499985000
+  "max_zatoshi": 499985000,
+  "pending_zatoshi": 0,
+  "anchor_height": null
 }
 ```
 
@@ -729,6 +731,10 @@ and adds the route they answer:
 - `max_zatoshi`: the largest amount `ths wallet send` could send along this
   route. `--max` on `send`, `shield`, and `unshield` asks for its own quote
   when it runs, so it can submit a different amount if the wallet has changed.
+- `pending_zatoshi` and `anchor_height`: Ironwood received in the latest
+  block, which `max_zatoshi` leaves out until the chain reaches
+  `anchor_height`. They are `0` and `null` when nothing is waiting. The text
+  output adds a line naming the amount and the block.
 
 The quote is a **snapshot** for the selected route, not a reservation: a later
 payment, faucet, or mined block can change it, and it does not simulate one
@@ -793,7 +799,12 @@ the dashboard's **Send ZEC** dialog and uses the same endpoint
 - `--amount <ZEC>` / `--max` (exactly one required): send an explicit amount,
   or ask `POST /api/v1/send/quote` for the maximum spendable amount after the
   network fee. The CLI submits the server's quoted `max_zatoshi`; it does not
-  calculate the fee itself. Spendable source funds must cover an explicit
+  calculate the fee itself. If the quote reports Ironwood waiting for its
+  anchor block (`pending_zatoshi`), `--max` mines that block in auto mode and
+  quotes again, so it sends everything; in the other mining modes it exits
+  nonzero and names the block instead of sending less. See
+  [spending newly confirmed Ironwood](architecture/operations.md#spending-newly-confirmed-ironwood).
+  Spendable source funds must cover an explicit
   amount plus the fee; use the quote's `max_zatoshi` as the ceiling, rather
   than the displayed balance. See [`ths wallet quote`](#ths-wallet-quote---from-n---source-pool-pool---destination-pool-pool).
 - `--source-pool <ironwood|transparent>`: pool to spend from (default

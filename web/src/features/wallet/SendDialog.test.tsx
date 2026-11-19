@@ -36,6 +36,8 @@ const QUOTE = {
   available_zatoshi: 500_000_000,
   fee_zatoshi: 10_000,
   max_zatoshi: 499_990_000,
+  pending_zatoshi: 0,
+  anchor_height: null as number | null,
 };
 
 const PENDING = {
@@ -862,6 +864,7 @@ describe('SendDialog', () => {
   it('describes capped quote funds as available for one send, not the account balance', async () => {
     fetchMock.mockImplementation(
       sendImpl({
+        ...QUOTE,
         available_zatoshi: 133_300_000,
         fee_zatoshi: 6_675_000,
         max_zatoshi: 126_625_000,
@@ -910,6 +913,7 @@ describe('SendDialog', () => {
   it('fills a maximum of 1,000 ZEC without separators and sends it exactly', async () => {
     fetchMock.mockImplementation(
       sendImpl({
+        ...QUOTE,
         available_zatoshi: 100_000_010_000,
         fee_zatoshi: 10_000,
         max_zatoshi: 100_000_000_000,
@@ -939,6 +943,46 @@ describe('SendDialog', () => {
     renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
 
     expect(await screen.findByRole('button', { name: 'Max' })).toBeDisabled();
+  });
+
+  it('explains funds waiting for their anchor block instead of reporting nothing spendable', async () => {
+    fetchMock.mockImplementation(
+      sendImpl({
+        ...QUOTE,
+        available_zatoshi: 0,
+        max_zatoshi: 0,
+        pending_zatoshi: 10_000_000,
+        anchor_height: 108,
+      }),
+    );
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+
+    expect(
+      await screen.findByText(
+        /0\.1 ZEC received in the latest block becomes spendable at block 108/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Max' })).toBeDisabled();
+  });
+
+  it('says Max leaves out funds that are waiting for their anchor block', async () => {
+    fetchMock.mockImplementation(
+      sendImpl({
+        ...QUOTE,
+        available_zatoshi: 50_000_000,
+        max_zatoshi: 49_990_000,
+        pending_zatoshi: 100_000_000,
+        anchor_height: 108,
+      }),
+    );
+    renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
+
+    expect(
+      await screen.findByText(
+        /0\.4999 ZEC spendable after a 0\.0001 ZEC network fee\. 1 ZEC received in the latest block becomes spendable at block 108/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Max' })).toBeEnabled();
   });
 
   it('quotes the fee without the destination account', async () => {

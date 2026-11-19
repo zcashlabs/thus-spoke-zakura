@@ -18,7 +18,9 @@ const TOPICS: Record<string, readonly unknown[][]> = {
     ['wallet-transaction'],
     ['address'],
   ],
-  sync: [[...queryKeys.status]],
+  // An anchor block can make received funds spendable without changing any
+  // balance, so no wallet update follows it; the scan that publishes it does.
+  sync: [[...queryKeys.status], ['send-quote']],
   mining: [[...queryKeys.mining]],
 };
 
