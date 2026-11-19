@@ -317,8 +317,8 @@ export type Transaction = z.infer<typeof transactionSchema>;
 export const addressSchema = z.object({
   address: z.string(),
   balance: z.looseObject({
-    balance: z.number().int().nonnegative().default(0),
-    received: z.number().int().nonnegative().default(0),
+    balance: zatoshi.default(0n),
+    received: zatoshi.default(0n),
   }),
 });
 export type AddressInfo = z.infer<typeof addressSchema>;

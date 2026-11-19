@@ -92,7 +92,7 @@ describe('Development account identity', () => {
   it('links a known transparent address to its account without exposing a key in Explorer', async () => {
     vi.spyOn(api, 'address').mockResolvedValue({
       address: accounts[1]!.transparent_address,
-      balance: { balance: 100, received: 100 },
+      balance: { balance: 100n, received: 100n },
     });
     renderAt(`/explorer/address/${accounts[1]!.transparent_address}`);
     const link = await screen.findByRole('link', { name: 'Account 2' });
@@ -258,7 +258,7 @@ describe('Development account identity', () => {
     treasury.transparent_address,
     'tmUnknownTransparentAddress00000000',
   ])('preserves raw address navigation for %s', async (address) => {
-    vi.spyOn(api, 'address').mockResolvedValue({ address, balance: { balance: 0, received: 0 } });
+    vi.spyOn(api, 'address').mockResolvedValue({ address, balance: { balance: 0n, received: 0n } });
     renderAt(`/explorer/address/${address}`, [...accounts, treasury]);
     expect(await screen.findByText(address, { exact: true })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Account 6' })).not.toBeInTheDocument();

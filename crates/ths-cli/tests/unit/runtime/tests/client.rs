@@ -759,12 +759,100 @@ fn activity_history_forwards_only_explicit_limits() {
             &reqwest::blocking::Client::new(),
             &name("alpha"),
             limit,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
 
         assert!(activity.is_empty());
         assert_eq!(requests.recv().unwrap().0, expected_request);
     }
+}
+
+#[test]
+fn activity_history_forwards_filters_and_fetches_older_pages() {
+    let entry = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "kind": "send",
+            "from_account": 2,
+            "to_account": 3,
+            "status": "confirmed",
+            "amount_zatoshi": 100,
+            "txid": id,
+        })
+        .to_string()
+    };
+    let (url, requests) = serve(vec![
+        ("200 OK", format!("[{}]", entry("page-one"))),
+        ("200 OK", format!("[{}]", entry("page-zero"))),
+    ]);
+    let client = reqwest::blocking::Client::new();
+
+    let first = activity_history(
+        &url,
+        &client,
+        &name("alpha"),
+        Some(1),
+        Some(2),
+        Some("send"),
+        Some("confirmed"),
+        None,
+    )
+    .unwrap();
+    let before = first[0]["id"].as_str().unwrap();
+    let older = activity_history(
+        &url,
+        &client,
+        &name("alpha"),
+        Some(1),
+        Some(2),
+        Some("send"),
+        Some("confirmed"),
+        Some(before),
+    )
+    .unwrap();
+
+    assert_eq!(older[0]["id"], "page-zero");
+    assert_ne!(older[0]["id"], first[0]["id"]);
+    assert_eq!(
+        requests.recv().unwrap().0,
+        "GET /api/v1/activity?limit=1&account=2&kind=send&status=confirmed HTTP/1.1"
+    );
+    assert_eq!(
+        requests.recv().unwrap().0,
+        format!(
+            "GET /api/v1/activity?limit=1&account=2&kind=send&status=confirmed&before={before} HTTP/1.1"
+        )
+    );
+}
+
+#[test]
+fn activity_history_reports_a_stale_cursor_from_the_server() {
+    let (url, _requests) = serve(vec![(
+        "409 Conflict",
+        r#"{"error":{"message":"activity cursor is stale; reload from the first page","status":409}}"#,
+    )]);
+
+    let error = activity_history(
+        &url,
+        &reqwest::blocking::Client::new(),
+        &name("alpha"),
+        None,
+        None,
+        None,
+        None,
+        Some("wallet:send:old"),
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("409"), "{error:#}");
+    assert!(
+        format!("{error:#}").contains("activity cursor is stale"),
+        "{error:#}"
+    );
 }
 
 #[test]

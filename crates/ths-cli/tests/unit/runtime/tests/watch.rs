@@ -65,7 +65,38 @@ fn watch_limited(
     probe_states: Vec<EnvironmentState>,
     tick: impl Fn(Duration) -> Result<Tick>,
 ) -> (Result<()>, String, String) {
-    let (url, _requests) = serve(responses);
+    let (result, out, err, _requests) = watch_with_filters(
+        responses,
+        tty,
+        json,
+        limit,
+        None,
+        None,
+        None,
+        probe_states,
+        tick,
+    );
+    (result, out, err)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn watch_with_filters(
+    responses: Vec<(&'static str, String)>,
+    tty: bool,
+    json: bool,
+    limit: Option<u32>,
+    account: Option<u8>,
+    kind: Option<&str>,
+    status: Option<&str>,
+    probe_states: Vec<EnvironmentState>,
+    tick: impl Fn(Duration) -> Result<Tick>,
+) -> (
+    Result<()>,
+    String,
+    String,
+    std::sync::mpsc::Receiver<(String, String)>,
+) {
+    let (url, requests) = serve(responses);
     let mut out = Vec::new();
     let mut err = Vec::new();
     let result = runtime_for_tests().wallet_activity_watch_with(
@@ -76,6 +107,9 @@ fn watch_limited(
         &mut err,
         tty,
         limit,
+        account,
+        kind,
+        status,
         json,
         &probes(probe_states),
         &tick,
@@ -84,6 +118,7 @@ fn watch_limited(
         result,
         String::from_utf8(out).unwrap(),
         String::from_utf8(err).unwrap(),
+        requests,
     )
 }
 
@@ -237,6 +272,9 @@ fn watch_forwards_the_limit_to_every_poll() {
             &mut err,
             false,
             Some(5),
+            None,
+            None,
+            None,
             false,
             &probes(vec![]),
             &ticks(1),
@@ -245,6 +283,34 @@ fn watch_forwards_the_limit_to_every_poll() {
     for _ in 0..2 {
         let (request_line, _) = requests.recv().unwrap();
         assert_eq!(request_line, "GET /api/v1/activity?limit=5 HTTP/1.1");
+    }
+}
+
+#[test]
+fn watch_forwards_filters_to_every_poll() {
+    let responses = vec![
+        ("200 OK", format!("[{}]", entry("first", "confirmed"))),
+        ("200 OK", format!("[{}]", entry("second", "confirmed"))),
+    ];
+    let (result, output, _err, requests) = watch_with_filters(
+        responses,
+        false,
+        false,
+        Some(5),
+        Some(2),
+        Some("transaction"),
+        Some("confirmed"),
+        vec![],
+        ticks(1),
+    );
+    result.unwrap();
+
+    for txid in ["first", "second"] {
+        assert!(output.contains(txid), "{output}");
+        assert_eq!(
+            requests.recv().unwrap().0,
+            "GET /api/v1/activity?limit=5&account=2&kind=transaction&status=confirmed HTTP/1.1"
+        );
     }
 }
 
@@ -279,6 +345,9 @@ fn watch_bounds_a_stalled_read_by_the_request_timeout() {
             &mut out,
             &mut err,
             false,
+            None,
+            None,
+            None,
             None,
             false,
             &probes(vec![]),
