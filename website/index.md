@@ -3,7 +3,7 @@
 Run a complete Zcash Regtest network locally. Fund accounts, send transactions, mine blocks, and inspect every step.
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
 ```
 
 Linux and macOS · Docker required · then run `ths`

@@ -21,7 +21,13 @@ ths start --native
 
 Native installation requires a release containing native runtime archives.
 For a source checkout, see [native builds](book/development.md). To use Docker,
-install with `THS_INSTALL_RUNTIME=docker`, start Docker, and run `ths`.
+start Docker, then install and run `ths`:
+
+```console
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
+ths
+```
+
 Fresh installations default to Docker unless native mode is selected. Once
 native bundles are installed, ordinary `ths update` installs the matching new
 bundle too. Select native startup with `--native`; later commands find the
