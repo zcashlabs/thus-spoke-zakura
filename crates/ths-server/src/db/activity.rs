@@ -83,9 +83,10 @@ impl Store {
         self.activities_with_limit(-1)
     }
 
-    /// Returns a permanent order for every visible activity. Callers pass the
-    /// current newest-first view; identities not seen before are recorded from
-    /// oldest to newest so their relative order is retained on later reads.
+    /// Returns a permanent order for every visible activity. New payments are
+    /// sequenced when admitted; callers pass the current newest-first view so
+    /// identities from older stores are recorded from oldest to newest and
+    /// retain their relative order on later reads.
     pub(crate) fn activity_sequences(
         &self,
         newest_first: &[String],
