@@ -1,0 +1,29 @@
+# Thus Spoke Zakura
+
+> Thus Spoke Zakura (`ths`) is an open-source launcher that runs a disposable Zcash Regtest network on your machine. It starts a Zakura node, lightwalletd, and a wallet-backed dashboard in Docker, with five development accounts. Regtest only: coins have no value and the development keys are public.
+
+Install on macOS or Linux (Intel or ARM) with Docker running, then run `ths`:
+
+```
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
+```
+
+## Site
+
+- [Home page as Markdown](https://ths.zypherpunk.xyz/index.md): What ths runs, the walkthrough, and default endpoints.
+
+## Docs
+
+- [Your first instance](https://ths.zypherpunk.xyz/book/getting-started.html): Install everything and bring up your first network.
+- [Components and state](https://ths.zypherpunk.xyz/book/architecture/overview.html): What each service owns, and where state actually lives.
+- [Accounts and balances](https://ths.zypherpunk.xyz/book/accounts-and-balances.html): The five development accounts, pools, and the public seed.
+- [Fund and send](https://ths.zypherpunk.xyz/book/using-the-dashboard.html): Move ZEC from the dashboard and from the CLI.
+- [Mining and wallet sync](https://ths.zypherpunk.xyz/book/mining-and-sync.html): Advance the chain and keep the wallet in step.
+- [Connect your application](https://ths.zypherpunk.xyz/book/connect-an-app.html): Point your app or test suite at the running network.
+- [The ths CLI](https://ths.zypherpunk.xyz/book/cli.html): Every command and option, with examples.
+- [Troubleshooting](https://ths.zypherpunk.xyz/book/troubleshooting.html): Docker permissions and services that will not start.
+
+## Optional
+
+- [Develop from source](https://ths.zypherpunk.xyz/book/development.html): Build it yourself, run the tests, and contribute.
+- [Source code](https://github.com/zcashlabs/thus-spoke-zakura): Rust launcher and server, React dashboard, MIT licensed.
