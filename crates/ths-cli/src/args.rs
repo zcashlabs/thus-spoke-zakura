@@ -222,6 +222,18 @@ pub(crate) enum WalletCommand {
         /// Maximum number of entries to print (1-100).
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: Option<u32>,
+        /// Only show activity involving this account (1-5).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        account: Option<u8>,
+        /// Only show activity of this kind.
+        #[arg(long, value_enum)]
+        kind: Option<ActivityKind>,
+        /// Only show activity in this state.
+        #[arg(long, value_enum)]
+        status: Option<ActivityStatus>,
+        /// Show entries older than this activity ID; not usable with --watch.
+        #[arg(long, value_name = "ACTIVITY_ID", conflicts_with = "watch")]
+        before: Option<String>,
         /// Keep the recent-activity view updated until interrupted.
         #[arg(long)]
         watch: bool,
@@ -384,6 +396,50 @@ impl Pool {
         match self {
             Pool::Ironwood => "ironwood",
             Pool::Transparent => "transparent",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub(crate) enum ActivityKind {
+    Send,
+    Faucet,
+    Transaction,
+}
+
+impl ActivityKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::Faucet => "faucet",
+            Self::Transaction => "transaction",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub(crate) enum ActivityStatus {
+    Preparing,
+    Prepared,
+    Broadcast,
+    Pending,
+    Confirmed,
+    Unconfirmed,
+    Failed,
+}
+
+impl ActivityStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Broadcast => "broadcast",
+            Self::Pending => "pending",
+            Self::Confirmed => "confirmed",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Failed => "failed",
         }
     }
 }

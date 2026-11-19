@@ -31,6 +31,9 @@ impl Runtime {
         &self,
         name: &InstanceName,
         limit: Option<u32>,
+        account: Option<u8>,
+        kind: Option<&str>,
+        status: Option<&str>,
         json: bool,
     ) -> Result<()> {
         let shutdown = Shutdown::install()?;
@@ -60,6 +63,9 @@ impl Runtime {
             std::io::stderr().lock(),
             std::io::stdout().is_terminal(),
             limit,
+            account,
+            kind,
+            status,
             json,
             &|| self.environment_state(name, &app_container, backend),
             &|duration| {
@@ -110,6 +116,9 @@ impl Runtime {
         mut err_out: impl Write,
         tty: bool,
         limit: Option<u32>,
+        account: Option<u8>,
+        kind: Option<&str>,
+        status: Option<&str>,
         json: bool,
         probe: &dyn Fn() -> EnvironmentState,
         tick: &dyn Fn(Duration) -> Result<Tick>,
@@ -120,23 +129,25 @@ impl Runtime {
         let mut warned: Option<String> = None;
 
         loop {
-            let state = match activity_history(dashboard, client, name, limit) {
-                Ok(activity) => {
-                    last_update = Some(watch_timestamp());
-                    warned = None;
-                    last_body = Some(if json {
-                        serde_json::to_string(&activity)?
-                    } else {
-                        render_activity_history(&activity, false)?
-                    });
-                    WatchState::Fresh
-                }
-                Err(error) => match probe() {
-                    EnvironmentState::Deleted => bail!("environment {name} was deleted"),
-                    EnvironmentState::Stopped => WatchState::Stopped,
-                    EnvironmentState::Running => WatchState::Unreachable(format!("{error:#}")),
-                },
-            };
+            let state =
+                match activity_history(dashboard, client, name, limit, account, kind, status, None)
+                {
+                    Ok(activity) => {
+                        last_update = Some(watch_timestamp());
+                        warned = None;
+                        last_body = Some(if json {
+                            serde_json::to_string(&activity)?
+                        } else {
+                            render_activity_history(&activity, false)?
+                        });
+                        WatchState::Fresh
+                    }
+                    Err(error) => match probe() {
+                        EnvironmentState::Deleted => bail!("environment {name} was deleted"),
+                        EnvironmentState::Stopped => WatchState::Stopped,
+                        EnvironmentState::Running => WatchState::Unreachable(format!("{error:#}")),
+                    },
+                };
 
             if json {
                 // stdout carries one snapshot line per change; status goes to

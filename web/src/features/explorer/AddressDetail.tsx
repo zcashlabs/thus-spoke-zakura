@@ -37,6 +37,7 @@ export function AddressDetail() {
 
   const { balance, received } = info.data.balance;
   const spent = received - balance;
+  const totalSent = spent > 0n ? spent : 0n;
 
   return (
     <div className="grid gap-4">
@@ -58,11 +59,11 @@ export function AddressDetail() {
       <section className="grid gap-3 sm:grid-cols-3">
         <Stat
           label="Balance"
-          value={formatZecAmount(BigInt(balance))}
-          tone={balance > 0 ? 'accent' : 'muted'}
+          value={formatZecAmount(balance)}
+          tone={balance > 0n ? 'accent' : 'muted'}
         />
-        <Stat label="Total received" value={formatZecAmount(BigInt(received))} />
-        <Stat label="Total sent" value={formatZecAmount(BigInt(Math.max(spent, 0)))} />
+        <Stat label="Total received" value={formatZecAmount(received)} />
+        <Stat label="Total sent" value={formatZecAmount(totalSent)} />
       </section>
 
       <Panel eyebrow="DETAILS" title="Address">

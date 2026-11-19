@@ -1491,15 +1491,32 @@ fn format_zec(zatoshi: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn activity_history(
     dashboard: &str,
     client: &reqwest::blocking::Client,
     name: &InstanceName,
     limit: Option<u32>,
+    account: Option<u8>,
+    kind: Option<&str>,
+    status: Option<&str>,
+    before: Option<&str>,
 ) -> Result<Vec<serde_json::Value>> {
     let mut request = client.get(format!("{dashboard}/api/v1/activity"));
     if let Some(limit) = limit {
         request = request.query(&[("limit", limit)]);
+    }
+    if let Some(account) = account {
+        request = request.query(&[("account", account)]);
+    }
+    if let Some(kind) = kind {
+        request = request.query(&[("kind", kind)]);
+    }
+    if let Some(status) = status {
+        request = request.query(&[("status", status)]);
+    }
+    if let Some(before) = before {
+        request = request.query(&[("before", before)]);
     }
     request
         .send()
@@ -1764,10 +1781,15 @@ pub(crate) fn render_activity_history(
 }
 
 impl Runtime {
+    #[allow(clippy::too_many_arguments)]
     pub fn wallet_activity(
         &self,
         name: &InstanceName,
         limit: Option<u32>,
+        account: Option<u8>,
+        kind: Option<&str>,
+        status: Option<&str>,
+        before: Option<&str>,
         json: bool,
     ) -> Result<()> {
         let (dashboard, client) = self.instance_client(name)?;
@@ -1777,10 +1799,15 @@ impl Runtime {
             &client,
             std::io::stdout().lock(),
             limit,
+            account,
+            kind,
+            status,
+            before,
             json,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn wallet_activity_with(
         &self,
         name: &InstanceName,
@@ -1788,9 +1815,15 @@ impl Runtime {
         client: &reqwest::blocking::Client,
         mut out: impl std::io::Write,
         limit: Option<u32>,
+        account: Option<u8>,
+        kind: Option<&str>,
+        status: Option<&str>,
+        before: Option<&str>,
         json: bool,
     ) -> Result<()> {
-        let activity = activity_history(dashboard, client, name, limit)?;
+        let activity = activity_history(
+            dashboard, client, name, limit, account, kind, status, before,
+        )?;
         writeln!(out, "{}", render_activity_history(&activity, json)?)?;
         Ok(())
     }

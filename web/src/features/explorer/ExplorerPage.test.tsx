@@ -148,7 +148,7 @@ describe('ExplorerPage', () => {
 
   it('does not label a valid P2SH address as P2PKH', async () => {
     const address = 't26YoyZ1iPgiMEWL4zGUm74eVWfhyDMXzY2';
-    vi.spyOn(api, 'address').mockResolvedValue({ address, balance: { balance: 0, received: 0 } });
+    vi.spyOn(api, 'address').mockResolvedValue({ address, balance: { balance: 0n, received: 0n } });
     renderAt(`/explorer/address/${address}`);
 
     expect(await screen.findByText(address)).toBeInTheDocument();

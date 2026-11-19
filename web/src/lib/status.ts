@@ -1,7 +1,9 @@
 import type { Status } from './api/schemas';
 
 const BLOCKER_LABELS: Record<string, string> = {
+  starting: 'Starting the environment',
   node_unavailable: 'Waiting for Zakura',
+  chain_operation: 'Chain operation in progress',
   lightwalletd_unavailable: 'Waiting for lightwalletd',
   wallet_error: 'Wallet synchronization failed',
   wallet_syncing: 'Wallet is syncing',

@@ -5,7 +5,9 @@ use std::{io::Write, process::ExitCode, time::Duration};
 use clap::CommandFactory;
 
 use crate::{
-    args::{Cli, Command, CompletionShell, Pool, SendArgs, WalletCommand},
+    args::{
+        ActivityKind, ActivityStatus, Cli, Command, CompletionShell, Pool, SendArgs, WalletCommand,
+    },
     runtime::{DEFAULT_NU7_ACTIVATION_HEIGHT, InstanceName, MiningConfig, Runtime},
     updater,
 };
@@ -134,11 +136,28 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Wallet { action } => match action {
             WalletCommand::Balances => runtime.wallet_balances(&name, cli.json),
-            WalletCommand::Activity { limit, watch } => {
+            WalletCommand::Activity {
+                limit,
+                account,
+                kind,
+                status,
+                before,
+                watch,
+            } => {
+                let kind = kind.map(ActivityKind::as_str);
+                let status = status.map(ActivityStatus::as_str);
                 if watch {
-                    runtime.wallet_activity_watch(&name, limit, cli.json)
+                    runtime.wallet_activity_watch(&name, limit, account, kind, status, cli.json)
                 } else {
-                    runtime.wallet_activity(&name, limit, cli.json)
+                    runtime.wallet_activity(
+                        &name,
+                        limit,
+                        account,
+                        kind,
+                        status,
+                        before.as_deref(),
+                        cli.json,
+                    )
                 }
             }
             WalletCommand::Tx { txid, account } => {
