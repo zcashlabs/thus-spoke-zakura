@@ -67,11 +67,13 @@ const server = createServer(async (req, res) => {
       const job = funding.get(key);
       if (!job) { res.writeHead(404); res.end('{}'); return; }
       if (mode === 'hang-funding') return;
-      job.status = mode === 'failed-funding' ? 'failed' : 'broadcast';
-      job.last_error = mode === 'failed-funding' ? 'fixture funding rejected' : null;
-      job.txid = 'ab'.repeat(32);
-      if (mode === 'wrong-funding') job.amount_zatoshi++;
-      if (mode === 'bad-funding-txid') job.txid = 'invalid';
+      if (job.status === 'preparing') {
+        job.status = mode === 'failed-funding' ? 'failed' : 'broadcast';
+        job.last_error = mode === 'failed-funding' ? 'fixture funding rejected' : null;
+        job.txid = 'ab'.repeat(32);
+        if (mode === 'wrong-funding') job.amount_zatoshi++;
+        if (mode === 'bad-funding-txid') job.txid = 'invalid';
+      }
     }
     res.end(JSON.stringify(funding.get(key))); return;
   }
@@ -79,6 +81,12 @@ const server = createServer(async (req, res) => {
   if (mode === 'hang-mutation') return;
   pending = 2;
   if (req.url === '/api/v1/mine') height += JSON.parse(body).blocks;
+  if (mode === 'funding-rollback') {
+    for (const job of funding.values()) {
+      if (req.url === '/api/v1/mine' && job.status === 'broadcast') job.status = 'confirmed';
+      if (req.url === '/api/v1/rollback' && job.status === 'confirmed') job.status = 'unconfirmed';
+    }
+  }
   if (mode === 'api-error') { res.writeHead(500); res.end('{"error":"fixture mutation failed"}'); return; }
   res.end('{}');
 });
