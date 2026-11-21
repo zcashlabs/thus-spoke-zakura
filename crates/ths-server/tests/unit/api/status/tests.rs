@@ -1304,6 +1304,50 @@ async fn external_address_faucet_payments_appear_in_activity_through_reorg() {
     assert_eq!(relative_order(&body), first_order);
 }
 
+async fn activity_ids(state: &AppState, uri: &str) -> Vec<String> {
+    let (status, body) = api_get(state, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn external_faucet_claim_keeps_newer_account_payment_ahead() {
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/issues/462:
+    // the external claim must receive its first-seen sequence at admission,
+    // before any activity read can assign one lazily.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let external = store
+        .claim_address_faucet("tm-external-order", 2_500_000, "external-order-key")
+        .unwrap();
+    let account = store
+        .claim_faucet(2, "transparent", 1_000, "account-order-key")
+        .unwrap();
+
+    let expected = vec![account.id.clone(), external.id.clone()];
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+
+    let replay = store
+        .claim_address_faucet("tm-external-order", 2_500_000, "external-order-key")
+        .unwrap();
+    assert_eq!(replay.id, external.id);
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+}
+
 #[tokio::test]
 async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() {
     let (state, _dir) = state_with_local_wallet();

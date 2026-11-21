@@ -222,8 +222,9 @@ last returned activity's `id` as `before`; for example,
 `GET /api/v1/activity?account=2&limit=30&before=<activity-id>`. The response
 remains a JSON array. `X-THS-Has-More` is `true` only when an older matching row
 exists after the returned page. The server records an immutable first-seen
-sequence for each activity identity and orders every later page by that
-sequence. Preparation, confirmation, rollback, and reorg therefore cannot move
+sequence for each activity identity when its payment is admitted, including
+external-address faucet claims, and orders every later page by that sequence.
+Preparation, confirmation, rollback, and reorg therefore cannot move
 a row across an existing cursor boundary. If the cursor activity disappears or
 no longer belongs to the filtered list, the server returns 409 with `activity
 cursor is stale; reload from the first page`. Start again without `before`. The
