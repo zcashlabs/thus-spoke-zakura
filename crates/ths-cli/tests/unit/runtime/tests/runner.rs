@@ -25,9 +25,12 @@ fn run_removes_its_lock_when_the_startup_deadline_has_already_expired() {
 #[test]
 fn run_timeout_after_allocation_skips_child_and_cleans_its_instance() {
     let (mut host, events) = RecordingHost::new();
-    host.allocate_delay = Duration::from_millis(80);
+    // The deadline must outlast the lock, existence check and journal setup
+    // before `allocate`, even under parallel load. Allocation sleeping past the
+    // deadline then guarantees it expires there rather than earlier.
+    host.allocate_delay = Duration::from_millis(600);
     let mut context = LifecycleContext::new(LifecyclePolicy::default());
-    context.overall_deadline = Some(Deadline::after(Duration::from_millis(30)));
+    context.overall_deadline = Some(Deadline::after(Duration::from_millis(500)));
     let (_sender, shutdown) = Shutdown::channel();
     let runtime = runtime_for_tests();
     let error = runtime
