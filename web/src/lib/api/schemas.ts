@@ -184,6 +184,8 @@ export const statusSchema = z.object({
   endpoints: endpointsSchema.optional(),
   // Optional so a newer dashboard remains compatible with an older server.
   wallet_sync: walletSyncSchema.optional(),
+  // Optional so a dashboard built before #450 still loads; absent on older servers.
+  nu7_activation_height: z.number().int().nonnegative().optional(),
 });
 export type Status = z.infer<typeof statusSchema>;
 

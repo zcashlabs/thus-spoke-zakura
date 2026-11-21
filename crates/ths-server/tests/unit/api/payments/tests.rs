@@ -1070,6 +1070,63 @@ async fn send_quote_reports_an_unscanned_wallet_as_unavailable() {
     }
 }
 
+/// The dust cap in `send_quote` applies at the API layer, not the wallet layer.
+/// These two boundary cases exercise the fix directly through the HTTP router.
+#[tokio::test]
+async fn send_quote_caps_transparent_max_at_zero_for_sub_dust_balances() {
+    use zcash_script::script::Evaluable as _;
+    for (amount, expected_max) in [(10_053u64, 0u64), (10_054, 54)] {
+        let (_dir, store, wallet) =
+            crate::wallet::transparent_history_test_support::setup(10).await;
+        let transparent_addr = store.account(1).unwrap().transparent_address;
+        let Address::Transparent(taddr) =
+            Address::decode(&regtest_network(), &transparent_addr).unwrap()
+        else {
+            panic!("account 1 must have a transparent address");
+        };
+        wallet
+            .insert_transparent_outputs(vec![crate::wallet::TransparentOutputData {
+                txid: [1; 32],
+                index: 0,
+                value_zatoshi: i64::try_from(amount).unwrap(),
+                script: taddr.script().to_bytes(),
+                height: 10,
+                account_id: wallet.user_account_id(1),
+            }])
+            .await
+            .unwrap();
+        let state = AppState::new(store, wallet, "http://127.0.0.1:1".into(), "test".into());
+        state.mark_started();
+        let (status, body) = api_request(
+            &state,
+            "POST",
+            "/api/v1/send/quote",
+            json!({
+                "from_account": 1,
+                "source_pool": "transparent",
+                "destination_pool": "transparent",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "amount={amount}: {body}");
+        assert_eq!(
+            body["available_zatoshi"].as_u64().unwrap(),
+            amount,
+            "amount={amount}"
+        );
+        assert_eq!(
+            body["fee_zatoshi"].as_u64().unwrap(),
+            10_000,
+            "amount={amount}"
+        );
+        assert_eq!(
+            body["max_zatoshi"].as_u64().unwrap(),
+            expected_max,
+            "amount={amount}"
+        );
+    }
+}
+
 use crate::state::tests::{api_get, api_request};
 #[tokio::test]
 async fn address_faucet_status_reads_internal_and_external_records() {

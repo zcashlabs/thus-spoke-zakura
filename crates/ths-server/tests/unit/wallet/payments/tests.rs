@@ -397,6 +397,31 @@ fn transparent_quote_to_transparent_reports_fee_and_max() {
     assert_eq!(quote.max_zatoshi, 99_990_000);
 }
 
+// ZIP-317: 1 P2PKH input + 1 P2PKH output = 2 logical actions = 10_000 zat fee.
+// 10_053 - 10_000 = 53, which is below the 54-zat transparent dust threshold.
+// The wallet returns the raw remainder; the API layer caps it to 0.
+#[test]
+fn transparent_to_transparent_quote_returns_sub_dust_max_at_boundary() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 10_053);
+    let quote = quote(&mut st, "transparent", "transparent").unwrap();
+    assert_eq!(quote.available_zatoshi, 10_053);
+    assert_eq!(quote.fee_zatoshi, 10_000);
+    assert_eq!(quote.max_zatoshi, 53);
+}
+
+// One zatoshi above the boundary: remainder is exactly 54 zat (the dust threshold),
+// so max stays valid and the API layer must not cap it.
+#[test]
+fn transparent_to_transparent_quote_max_is_valid_one_above_boundary() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 10_054);
+    let quote = quote(&mut st, "transparent", "transparent").unwrap();
+    assert_eq!(quote.available_zatoshi, 10_054);
+    assert_eq!(quote.fee_zatoshi, 10_000);
+    assert_eq!(quote.max_zatoshi, 54);
+}
+
 #[test]
 fn transparent_quote_max_is_zero_when_balance_is_below_the_fee() {
     let mut st = test_state();
