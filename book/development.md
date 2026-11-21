@@ -120,6 +120,34 @@ forwards interruption to the application group and returns a failure, including
 when another shell requests `stop`. No other instance's directory or process
 is removed.
 
+## JavaScript testing package
+
+`packages/thsjs` builds and tests independently of the Rust workspace and the
+dashboard. It exports the standalone `@zcashlabs/thsjs` package for Node test
+suites; it has no runtime dependency on ZcashJS.
+
+```console
+npm ci --prefix packages/thsjs
+npm test --prefix packages/thsjs
+npm pack ./packages/thsjs --pack-destination /tmp
+```
+
+The ordinary tests use local CLI fixtures and need no Docker or node binaries.
+They also install the packed archive into a separate project and verify its
+JavaScript API, TypeScript declarations and Node-only exports. CI runs the
+suite on Node 22 and 24 on Linux and macOS.
+
+Worker termination regressions cover SIGTERM and SIGKILL during startup and
+after readiness, with an independent instance that must remain usable. The
+live integration verifies shutdown by requiring connection refusal on all
+four TCP ports; an HTTP error or a timeout is not evidence that a service stopped.
+
+The opt-in ZcashJS consumer under `packages/thsjs/integration/zcashjs` runs
+against real native services and a separately built SDK archive. Follow its
+README for setup. ZcashJS is only a test consumer: neither its source nor its
+runtime belongs in the published THS package. Package publication is separate
+from THS's binary releases; this change does not add an npm publishing job.
+
 ## Find the part you need to change
 
 | Need | Start reading |
