@@ -13,6 +13,7 @@ pin() {
 }
 checkout() {
   name="$1"
+  patch="${2:-}"
   repository="$(pin "${name}_repository")"
   commit="$(pin "${name}_commit")"
   directory="$build/$name"
@@ -23,10 +24,17 @@ checkout() {
     git -C "$directory" checkout --detach FETCH_HEAD
   fi
   [ "$(git -C "$directory" rev-parse HEAD)" = "$commit" ] || { echo "$name build checkout has the wrong commit" >&2; exit 1; }
-  [ -z "$(git -C "$directory" status --porcelain)" ] || { echo "$name build checkout has local modifications" >&2; exit 1; }
+  if [ -n "$patch" ]; then
+    if ! git -C "$directory" apply --reverse --check "$patch" 2>/dev/null; then
+      [ -z "$(git -C "$directory" status --porcelain)" ] || { echo "$name build checkout has local modifications" >&2; exit 1; }
+      git -C "$directory" apply "$patch"
+    fi
+  else
+    [ -z "$(git -C "$directory" status --porcelain)" ] || { echo "$name build checkout has local modifications" >&2; exit 1; }
+  fi
 }
 checkout zakura
-checkout lightwalletd
+checkout lightwalletd "$root/patches/lightwalletd-v7.patch"
 (
   cd "$build/zakura"
   cargo +1.98.0 build --locked --release --target-dir "$build/zakura/target" -p zakura --bin zakurad --features internal-miner

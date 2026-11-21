@@ -3908,8 +3908,6 @@ dependencies = [
 [[package]]
 name = "zakura-primitives"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c380aeac887e935cbe05aebe0f417cb1cd16ecc802ee67b05b1cbaf2294d8467"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -3953,8 +3951,6 @@ dependencies = [
 [[package]]
 name = "zakura-protocol"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b28415ef2e0210e62bc4f9277a1d2878aecdcf13d71dc92aac5582a108cd1ff5"
 dependencies = [
  "corez",
  "hex",

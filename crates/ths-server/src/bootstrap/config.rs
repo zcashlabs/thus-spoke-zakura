@@ -101,6 +101,7 @@ lockbox_disbursements = [{{ address = "{LOCKBOX_MARKER_ADDRESS}", amount = 0 }}]
 "NU6.2" = 1
 "NU6.3" = 1
 "NU7" = {nu7_activation_height}
+"NuTachyon" = {nu7_activation_height}
 
 [rpc]
 listen_addr = "{rpc}"

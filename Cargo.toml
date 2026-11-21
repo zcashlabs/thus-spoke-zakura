@@ -43,3 +43,7 @@ inherits = "dev"
 
 [profile.dev-runtime.package."*"]
 opt-level = 3
+
+[patch.crates-io]
+zakura-protocol = { path = "patches/zakura-protocol" }
+zakura-primitives = { path = "patches/zakura-primitives" }
