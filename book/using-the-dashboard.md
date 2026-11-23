@@ -103,9 +103,15 @@ The dialog does the fee arithmetic for you. As soon as it has an account and
 a pool it asks `POST /api/v1/send/quote`, and the hint under the amount field
 shows the quoted spendable amount and network fee for that account and pool.
 The **Max** button fills in that spendable figure. An amount above it is rejected.
-Ironwood received in the latest block is not spendable until the next block;
-the hint names that amount and block, and **Max** includes it once the block
-is mined.
+Ironwood received in the latest block is not spendable until the next block,
+and the hint names that amount and block. In auto mode, which mines only for
+payments, **Max** mines that block through the mining-job API, waits for the
+wallet to scan it, and then fills in the full amount; a typed amount that needs
+those funds is sent, because the payment mines the block itself. In the other
+modes **Max** stays disabled rather than filling a partial amount: press
+**Mine** (or, in interval mode, wait for the next block) and **Max** then
+includes it. Until then an amount that needs those funds is rejected with the
+block it is waiting for.
 An amount above 21,000,000 ZEC, the maximum supply, is rejected before the
 request is sent.
 

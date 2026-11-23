@@ -1201,7 +1201,9 @@ impl Runtime {
         source_pool: &str,
         destination_pool: &str,
     ) -> Result<u64> {
-        for _ in 0..MAX_ANCHOR_BLOCKS {
+        // One more quote than anchor blocks: the last block mined still needs a
+        // quote to show whether it made the funds spendable.
+        for attempt in 0..=MAX_ANCHOR_BLOCKS {
             let quote = quote_max(
                 client,
                 dashboard,
@@ -1221,6 +1223,9 @@ impl Runtime {
                      block, then run this command again so --max includes it",
                     format_zec(quote.pending_zatoshi)
                 );
+            }
+            if attempt == MAX_ANCHOR_BLOCKS {
+                break;
             }
             self.mine_for_intent(
                 name,

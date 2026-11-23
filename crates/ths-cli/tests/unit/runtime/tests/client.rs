@@ -1307,6 +1307,98 @@ fn max_send_mines_the_anchor_block_in_auto_mode_and_sends_everything() {
     assert_eq!(json_stdout(&out)["amount_zatoshi"], 149_990_000);
 }
 
+const ANCHOR_WAIT_QUOTE: &str = r#"{"available_zatoshi":0,"fee_zatoshi":10000,"max_zatoshi":0,"pending_zatoshi":10000000,"anchor_height":108}"#;
+
+/// Responses for `blocks` anchor rounds in which the quote still waits.
+fn anchor_rounds(blocks: usize) -> Vec<(&'static str, &'static str)> {
+    (0..blocks)
+        .flat_map(|_| {
+            [
+                ("200 OK", ANCHOR_WAIT_QUOTE),
+                ("200 OK", AUTO_STATUS),
+                ("201 Created", ANCHOR_JOB),
+            ]
+        })
+        .collect()
+}
+
+fn send_max_from_one(
+    runtime: &Runtime,
+    alpha: &InstanceName,
+    url: &str,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    runtime.wallet_send_with(
+        alpha,
+        url,
+        &reqwest::blocking::Client::new(),
+        out,
+        Instant::now() + Duration::from_secs(5),
+        1,
+        3,
+        "ironwood",
+        "ironwood",
+        TransferAmount::Max,
+        None,
+        true,
+    )
+}
+
+#[test]
+fn max_send_quotes_again_after_its_last_anchor_block() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":3,"to_address":null,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":9990000,"txid":"max-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let mut responses = anchor_rounds(3);
+    responses.push((
+        "200 OK",
+        r#"{"available_zatoshi":10000000,"fee_zatoshi":10000,"max_zatoshi":9990000,"pending_zatoshi":0,"anchor_height":null}"#,
+    ));
+    responses.push(("200 OK", confirmed));
+    let (url, requests) = serve(responses);
+    let mut out = Vec::new();
+
+    send_max_from_one(&runtime, &alpha, &url, &mut out).unwrap();
+
+    let lines: Vec<_> = requests.try_iter().map(|request| request.0).collect();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("POST /api/v1/mining/jobs "))
+            .count(),
+        3,
+        "{lines:?}"
+    );
+    assert!(
+        lines[9].starts_with("POST /api/v1/send/quote "),
+        "{lines:?}"
+    );
+    assert!(lines[10].starts_with("POST /api/v1/send "), "{lines:?}");
+    assert_eq!(json_stdout(&out)["amount_zatoshi"], 9_990_000);
+}
+
+#[test]
+fn max_send_stops_without_a_fourth_anchor_block_or_a_short_send() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let mut responses = anchor_rounds(3);
+    responses.push(("200 OK", ANCHOR_WAIT_QUOTE));
+    responses.push(("200 OK", AUTO_STATUS));
+    let (url, requests) = serve(responses);
+
+    let error = send_max_from_one(&runtime, &alpha, &url, &mut Vec::new()).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("after mining 3 blocks"),
+        "{error:#}"
+    );
+    let lines: Vec<_> = requests.try_iter().map(|request| request.0).collect();
+    assert_eq!(lines.len(), 11, "{lines:?}");
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("POST /api/v1/send "))
+    );
+}
+
 #[test]
 fn max_send_explains_an_anchor_wait_instead_of_sending_short_outside_auto_mode() {
     for mode in ["manual", "interval", "mempool"] {

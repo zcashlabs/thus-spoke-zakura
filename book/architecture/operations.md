@@ -84,7 +84,9 @@ that makes it spendable as `anchor_height`. In auto mode, `--max` mines that one
 block, waits for the wallet to scan it, and quotes again before sending; in the
 other modes it stops and names the block rather than sending less than the
 account holds. The dashboard's **Send ZEC** dialog shows the waiting amount
-under the amount field and requotes after each wallet scan.
+under the amount field and requotes after each wallet scan. In auto mode its
+**Max** button mines the block through `POST /api/v1/mining/jobs` and fills in
+the requoted maximum once the job completes, as `--max` does.
 
 ## HTTP admission and status
 
