@@ -40,7 +40,7 @@ impl Store {
         if amount == 0 {
             bail!("amount must be greater than zero");
         }
-        let db = self.0.lock().unwrap();
+        let mut db = self.0.lock().unwrap();
         if let Some(payment) = address_for_key(&db, key)? {
             if payment.address != address || payment.amount_zatoshi != amount {
                 return Err(IdempotencyConflict.into());
@@ -51,11 +51,20 @@ impl Store {
             return Err(IdempotencyConflict.into());
         }
         let id = Uuid::new_v4().to_string();
-        db.execute(
+        let tx = db.transaction()?;
+        tx.execute(
             "INSERT INTO address_faucets(key,id,address,amount_zatoshi,created_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP)",
             params![key, id, address, amount],
         )?;
-        address_for_key(&db, key)?.context("address faucet claim was not stored")
+        // Record first-seen order with the claim so a later account payment
+        // cannot overtake this one when activity is first read.
+        tx.execute(
+            "INSERT OR IGNORE INTO activity_order(activity_id) VALUES(?1)",
+            [&id],
+        )?;
+        let payment = address_for_key(&tx, key)?.context("address faucet claim was not stored")?;
+        tx.commit()?;
+        Ok(payment)
     }
 
     #[cfg(test)]
