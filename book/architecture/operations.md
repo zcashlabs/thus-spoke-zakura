@@ -161,13 +161,15 @@ affects multiple development accounts. Outputs to the hidden treasury account
 are excluded from the user-facing amount, recipients, and account lists.
 
 A faucet payment to an address outside accounts 1–5 appears the same way: its
-own entry, `kind` `faucet`, `to_address` set, and both account arrays empty.
+own entry, `kind` `faucet`, `direction` `outgoing`, `to_address` set, and both
+account arrays empty. A faucet payment to a development account reports
+`direction` `incoming`.
 It carries no idempotency key, so it is not reachable through the keyed
 lookup above; read `GET /api/v1/faucet/address?idempotency_key=<key>` for
 that. `destination_pool` is `null` for the rare address shape the faucet
 accepts but cannot resolve to a pool.
 
-The unkeyed list accepts `limit` (default 30, maximum 100), `account` (1–5),
+The unkeyed list accepts `limit` (default 30, explicit values 1–100), `account` (1–5),
 `kind` (`send`, `faucet`, or `transaction`), and `status` filters. Filters
 combine and are applied before the limit. To read the next older page, pass the
 last returned activity's `id` as `before`; for example,

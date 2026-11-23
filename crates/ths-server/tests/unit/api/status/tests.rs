@@ -609,6 +609,10 @@ fn changed_cursor_outside_the_filter_is_stale() {
 fn activity_rejects_invalid_filters_and_empty_cursors() {
     for (page, expected) in [
         (
+            page(Some(0), None, None, None, None),
+            "limit must be greater than 0",
+        ),
+        (
             page(None, Some(6), None, None, None),
             "account must be between 1 and 5",
         ),
@@ -1251,11 +1255,13 @@ async fn external_address_faucet_payments_appear_in_activity_through_reorg() {
     assert_eq!(status, StatusCode::OK);
     let entry = find(&body, &claimed.id);
     assert_eq!(entry["to_address"], json!(address));
+    assert_eq!(entry["direction"], json!("outgoing"));
     assert_eq!(entry["from_account"], Value::Null);
     assert_eq!(entry["to_account"], Value::Null);
     assert_eq!(entry["amount_zatoshi"], json!(2_500_000));
     assert_eq!(entry["status"], json!("broadcast"));
     assert_eq!(entry["txid"], json!("external-txid"));
+    assert_eq!(find(&body, &internal.id)["direction"], json!("incoming"));
     let first_order = relative_order(&body);
     assert_eq!(first_order.len(), 2, "both payments must be present");
 
@@ -1630,3 +1636,53 @@ async fn health_and_chain_effects_wait_until_startup_finishes() {
 }
 
 use crate::api::payments::tests::valid_send;
+
+#[tokio::test]
+async fn activity_rejects_zero_limit_with_and_without_cursor() {
+    let (state, _dir) = state_with_local_wallet();
+    let activity = state
+        .0
+        .store
+        .claim_faucet(1, "ironwood", 1_000, "zero-limit")
+        .unwrap();
+
+    for uri in [
+        "/api/v1/activity?limit=0".to_owned(),
+        format!("/api/v1/activity?limit=0&before={}", activity.id),
+    ] {
+        let (code, body) = api_get(&state, &uri).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            json!("limit must be greater than 0")
+        );
+    }
+}
+
+#[tokio::test]
+async fn activity_positive_limit_keeps_has_more_header() {
+    let (state, _dir) = state_with_local_wallet();
+    for (account, key) in [(1, "first-page"), (2, "older-page")] {
+        state
+            .0
+            .store
+            .claim_faucet(account, "ironwood", 1_000, key)
+            .unwrap();
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/activity?limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-ths-has-more"], "true");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let activity: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(activity.as_array().unwrap().len(), 1);
+}

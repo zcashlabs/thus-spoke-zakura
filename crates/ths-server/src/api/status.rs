@@ -280,7 +280,13 @@ fn only_account(accounts: &[u8]) -> Option<u8> {
 
 fn activity_direction(kind: &str, from_accounts: &[u8], to_accounts: &[u8]) -> &'static str {
     if kind == "faucet" {
-        "incoming"
+        // A faucet payment is incoming only when its recipient is one of the
+        // development accounts. External-address payments leave the treasury.
+        if to_accounts.is_empty() {
+            "outgoing"
+        } else {
+            "incoming"
+        }
     } else {
         match (from_accounts, to_accounts) {
             ([from], [to]) if from == to => "self",
@@ -738,6 +744,9 @@ const ACTIVITY_STATUSES: [&str; 7] = [
 ];
 
 fn validate_activity_page(page: &Page) -> ApiResult<()> {
+    if page.limit == Some(0) {
+        return Err(ApiError::bad_request("limit must be greater than 0"));
+    }
     if let Some(account) = page.account
         && !(1..=USER_ACCOUNT_COUNT).contains(&account)
     {
