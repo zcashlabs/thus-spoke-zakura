@@ -49,6 +49,8 @@ export const activitySchema = z.object({
   to_accounts: z.array(z.number().int().min(1).max(5)).optional(),
   to_address: z.string().nullable().default(null),
   recipient_addresses: z.array(z.string()).optional(),
+  /** Recipients outside the development accounts; `recipient_addresses` may also list accounts. */
+  external_addresses: z.array(z.string()).optional(),
   source_pool: poolSchema.nullable(),
   destination_pool: poolSchema.nullable(),
   source_pools: z.array(poolSchema).optional(),
@@ -182,6 +184,8 @@ export const statusSchema = z.object({
   endpoints: endpointsSchema.optional(),
   // Optional so a newer dashboard remains compatible with an older server.
   wallet_sync: walletSyncSchema.optional(),
+  // Optional so a dashboard built before #450 still loads; absent on older servers.
+  nu7_activation_height: z.number().int().nonnegative().optional(),
 });
 export type Status = z.infer<typeof statusSchema>;
 

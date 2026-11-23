@@ -82,10 +82,12 @@ mod transparent_history;
 
 pub(crate) use transparent_history::{HistoryQuery, HistoryTransaction};
 
-pub(crate) use history::{CanonicalActivity, CanonicalActivityIndex};
+pub(crate) use history::{
+    CanonicalActivity, CanonicalActivityIndex, direction as payment_direction,
+};
 pub use journal::PreparedPayment;
 use journal::{PreparedPaymentsMigration, prepared_payment};
-pub use payments::{PaymentError, SendQuote};
+pub use payments::{PaymentError, SendPayment, SendQuote};
 #[cfg(test)]
 pub(crate) use submission::check_broadcast_response;
 
@@ -615,6 +617,11 @@ impl RealWallet {
             Ok(())
         })
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn user_account_id(&self, account: u8) -> AccountUuid {
+        self.account_ids[usize::from(account) - 1]
     }
 }
 
