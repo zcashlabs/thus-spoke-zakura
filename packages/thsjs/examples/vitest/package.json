@@ -1,0 +1,10 @@
+{
+  "name": "thsjs-vitest-example",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "vitest run" },
+  "devDependencies": {
+    "@zcashlabs/thsjs": "file:../..",
+    "vitest": "5.1.0"
+  }
+}

@@ -23,6 +23,11 @@ The archive contains JavaScript and TypeScript declarations. Consumers do not
 need a compiler, the THS source tree, or ZcashJS to use it. Installing it does
 not start THS or download runtime binaries.
 
+## Examples
+
+- [Vitest](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/vitest): a shared sandbox in `beforeAll`/`afterAll` and a per-test sandbox.
+- [ZcashJS wallet](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/zcashjs-wallet): an application wallet receives test funds and checks when they become spendable.
+
 ## Automatic setup and cleanup
 
 Wrap a test body in `withTestTHS`. It starts a fresh sandbox, calls your test only after startup succeeds, and waits for shutdown before returning the test's result. It also shuts down when an assertion throws. If the test and shutdown both fail, an `AggregateError` preserves both errors, with the test error first. Concurrent calls use separate instances. Use the callback from Node's test runner, Vitest, or Jest; no test-runner dependency is required.

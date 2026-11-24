@@ -3,3 +3,4 @@
 /*.tgz
 /.cache/
 /integration/zcashjs/node_modules/
+/examples/*/node_modules/
