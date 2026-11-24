@@ -1,0 +1,6 @@
+{
+  "name": "thsjs-zcashjs-integration",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node ths.test.mjs" }
+}
