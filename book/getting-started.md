@@ -4,61 +4,93 @@ In this chapter you will start one private chain, identify its endpoints, and
 watch a second one be thrown away. The next chapter will explain what the
 three services behind those endpoints do.
 
-An **instance** is one named set of services, data, and loopback ports. It can
-use native processes or Docker containers. The default name is `default`. Starting it
+An **instance** is one named set of services, data, and loopback ports. It
+runs as native processes by default, or as Docker containers with `--docker`.
+The default name is `default`. Starting it
 again creates a **fresh** chain and wallet after cleanup succeeds; stopping
 it requests deletion of its data. Check the command result before assuming
 cleanup completed.
 
-## Start without Docker
+## Install the launcher
 
 Use macOS 12 or newer, or Linux with glibc 2.35 or newer, on Intel or ARM.
-For a release with native bundles, the installer verifies and installs the
-launcher, Zakura, lightwalletd, `ths-server`, and dashboard together:
+The installer verifies each release archive's SHA-256 digest and installs the
+launcher, Zakura, lightwalletd, `ths-server`, and the dashboard together. It
+installs `ths` in `~/.local/bin` by default:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=native sh
-ths doctor --native
-ths start --native --no-open
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
+ths --version
+ths doctor
 ```
 
-This path needs neither Docker nor Python. Keep the launcher terminal open.
-Native startup chooses free loopback ports; read them with `ths endpoints
---json`. Ordinary commands such as `ths wallet`, `ths mine`, `ths reorg`,
-`ths wait`, and `ths stop` use the recorded backend automatically. A second
-native instance only needs a different name: `ths --name alice start --native`.
+This path needs neither Docker nor Python. `ths doctor` checks the installed
+native runtime without starting anything.
 
-The runtime lives beside the installed executable under `.ths-runtime/<version>`.
-`--runtime-dir DIR` or `THS_RUNTIME_DIR` selects a locally built bundle. The
-launcher checks its version, platform, and component pins before startup. See
-[development](development.md) to build from source before native assets have
-been published.
+The unpinned command selects the latest published release. To explicitly
+request an exact release version, such as **0.3.0**, set `THS_VERSION` on
+the installer process:
 
-Use `ths update` to update a native installation.
-It installs the new immutable runtime before replacing the launcher.
+```console
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_VERSION=0.3.0 sh
+```
+
+The installer reads these environment variables: `THS_INSTALL_DIR` chooses the
+destination directory (default `~/.local/bin`), `THS_VERSION` installs an exact
+release instead of the latest. `THS_INSTALL_RUNTIME` selects what is installed
+beside the launcher: by default the native runtime; `docker` pulls the Docker
+images instead; `none` installs only the launcher. Releases up to 0.4.1 have no
+native runtime, so by default they install Docker images. Explicit choices
+never remove bundles that are already installed. A missing or invalid native
+runtime fails the install without replacing the launcher.
+`THS_SKIP_IMAGE_PULL=1` skips the Docker image download. In Docker mode the
+image pull happens **before** the binary is moved into place, so if Docker is
+not running the installer aborts with nothing installed.
+
+The runtime lives beside the installed executable under
+`.ths-runtime/<version>`. `--runtime-dir DIR` or `THS_RUNTIME_DIR` selects a
+locally built bundle instead. The launcher checks its version, platform, and
+component pins before startup.
+
+`ths update` installs the new immutable runtime before replacing the launcher.
 Previous bundles remain available to running instances. Reinstalling the same
-version verifies its files and refuses to overwrite a modified bundle. Uninstall
-removes only the launcher; remove unused bundles manually after their instances
-have stopped.
+version verifies its files and refuses to overwrite a modified bundle.
+Uninstall removes only the launcher; remove unused bundles manually after
+their instances have stopped. If a release launcher finds no runtime of its
+own version, for example after `ths update` from a launcher released before
+native support, `ths start` and `ths run` install it once, with the same
+checks, before starting.
 
-When moving from a launcher released before native support, rerun the public
-installer above. Older launchers embed their original installer, so their
-`ths update` command does not install native bundles.
+If `ths` in the destination is a directory or a symlink to a directory, the
+installer stops without changing its contents. An existing executable is replaced.
 
-The rest of this chapter walks through Docker startup. Its fixed ports,
-containers, images, and volumes apply to Docker; the wallet and API behavior
-is shared by both backends. Native shutdown asks its owning launcher to stop
-the services and delete that instance's data. If the owner has died, THS retains
-the data and reports uncertain cleanup instead of trusting stored process IDs.
+If your shell says `ths: command not found`, either the install aborted or
+`~/.local/bin` is not on `PATH`. See [troubleshooting](troubleshooting.md) for
+the exact checks.
 
-## Docker startup
+If you are working from a clone, use the [source build
+instructions](development.md) instead.
 
-An **image** is the built template from which Docker starts a container;
-changing source files does not alter an image that already exists.
+## Use Docker instead
+
+`ths start --docker` runs the same services as containers. Install Docker
+Desktop on macOS or Docker Engine/Desktop on Linux. Start it and confirm that
+both the client and daemon respond without `sudo`:
+
+```console
+docker version
+ths doctor --docker
+```
+
+`--docker` pulls this launcher's images when they are missing, so the default
+installation is enough. To prepare only Docker, install with
+`THS_INSTALL_RUNTIME=docker`, or run `ths pull`. An **image** is the built
+template from which Docker starts a container; changing source files does not
+alter an image that already exists.
 
 ![Five startup stages left to right: ths start, checking Docker and images, claiming the fixed loopback ports, starting Zakura then lightwalletd then the app, and funded readiness. HTTP serves local saved status during startup. Interruption or failure triggers bounded, instance-scoped cleanup; incomplete deletion retains lifecycle-recovery.json.](images/instance-lifecycle.svg)
 
-1. `ths` checks Docker and the required images.
+1. `ths start --docker` checks Docker and the required images.
 2. It removes leftovers for the selected instance name, then creates its
    network, volumes, and containers. Other names are untouched.
 3. An init container creates the seed, account records, wallet database, and
@@ -70,61 +102,12 @@ changing source files does not alter an image that already exists.
    of that instance's resources and metadata. Check the command result;
    failed or uncertain cleanup retains recovery metadata.
 
-## Prepare Docker
-
-Install Docker Desktop on macOS or Docker Engine/Desktop on Linux. Start it
-and confirm that both the client and daemon respond:
-
-```console
-docker version
-```
-
-The server section must respond without `sudo`. If it does not, fix Docker
-access before continuing. `ths doctor` performs the same basic Docker
-reachability check after installation.
-
-## Install the launcher
-
-The installer supports Intel and ARM macOS and Linux. It verifies the
-release archive's SHA-256 digest, installs `ths` in `~/.local/bin` by default,
-and pulls matching runtime images:
-
-```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
-ths --version
-ths doctor
-```
-
-The unpinned command selects the latest published release. To explicitly
-request an exact release version, such as **0.3.0**, set `THS_VERSION` on
-the installer process:
-
-```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_VERSION=0.3.0 THS_INSTALL_RUNTIME=docker sh
-```
-
-The installer reads these environment variables: `THS_INSTALL_DIR` chooses the
-destination directory (default `~/.local/bin`), `THS_VERSION` installs an exact
-release instead of the latest. `THS_INSTALL_RUNTIME` accepts `auto` (the default),
-`native`, `docker`, or `none` (launcher only). `auto` selects native when the
-destination contains a `.ths-runtime` directory; otherwise it selects Docker.
-Explicit choices override that detection without removing older bundles. Native
-updates fail without replacing the launcher if the matching bundle is missing
-or invalid. `THS_SKIP_IMAGE_PULL=1` skips the Docker image
-download. In Docker mode the image pull happens **before** the binary is moved into place, so
-if Docker is not running the installer aborts with nothing installed. Start
-Docker first, or install with `THS_SKIP_IMAGE_PULL=1` and run `ths pull` later.
-
-If `ths` in the destination is a directory or a symlink to a directory, the
-installer stops without changing its contents. An existing executable is replaced.
-
-If your shell says `ths: command not found`, either the install aborted or
-`~/.local/bin` is not on `PATH`. See [troubleshooting](troubleshooting.md) for
-the exact checks.
-
-If you are working from a clone, use the [source build
-instructions](development.md) instead. The launcher uses Docker images, so a
-source edit does not automatically change a running app.
+Native startup follows the same order with local processes instead of
+containers. Native shutdown asks its owning launcher to stop the services and
+delete that instance's data. If the owner has died, THS retains the data and
+reports uncertain cleanup instead of trusting stored process IDs. Ordinary
+commands such as `ths wallet`, `ths mine`, `ths wait`, and `ths stop` use each
+instance's recorded backend, so they take no `--docker` flag.
 
 ## Start the running example
 
@@ -142,20 +125,23 @@ default is ready 🌸
 ```
 
 There is no fixed `sleep` interval that means the wallet is ready; wait for
-`default is ready`. Startup time depends on Docker, image availability,
-reward maturity, indexing, and wallet synchronization.
+`default is ready`. Startup time depends on reward maturity, indexing, and
+wallet synchronization, and with Docker on image availability.
 
 ## What scrolls past before that line
 
-Everything above `default is ready` is the launcher narrating its work, and
-it is noisier than the result. You will see `Preparing a fresh default
-environment…`, `Starting default…`, then raw Docker network, volume, and
-container IDs, because `ths` lets Docker write to your terminal directly.
+Native startup prints only the ready line; each service writes to its own log,
+which `ths logs` reads. With `--docker`, everything above `default is ready`
+is the launcher narrating its work, and it is noisier than the result. You
+will see `Preparing a fresh default environment…`, `Starting default…`, then
+raw Docker network, volume, and container IDs, because `ths` lets Docker
+write to your terminal directly.
 
-Interleaved with those IDs, the init container prints the instance's
-**secrets**: a `⚠ DISPOSABLE REGTEST SECRETS` banner, the BIP-39 mnemonic,
-and for each of the five development accounts its unified address and its
-**unified spending key** in hex. That is deliberate. These are the supported
+The initializer prints the instance's **secrets**, interleaved with those IDs
+under Docker and into the instance's `logs/init.log` natively: a
+`⚠ DISPOSABLE REGTEST SECRETS` banner, the BIP-39 mnemonic, and for each of
+the five development accounts its unified address and its **unified spending
+key** in hex. That is deliberate. These are the supported
 way to import one of these accounts into an external wallet, and they are
 safe to print because they protect nothing — [Chapter
 3](accounts-and-balances.md#an-account-is-a-wallet-identity) explains why.
@@ -183,7 +169,7 @@ default: running
   P2P          127.0.0.1:18233
 ```
 
-`ths status` reports the combined app, Zakura, and lightwalletd container state
+`ths status` reports the combined app, Zakura, and lightwalletd state
 and prints endpoints. It exits nonzero unless all three services are running.
 It does **not** report the node height or wallet scan status; use `ths wait`
 when a script needs the node, index, and wallet settled at one tip.

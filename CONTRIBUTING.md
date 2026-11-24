@@ -14,9 +14,11 @@ For questions about setup or contributing, join the [Zypherpunks Discord](https:
 
 ## Development setup
 
-You need Rust 1.98 and Node 24. The instructions below use Docker. For native
-processes without Docker, follow [native development](book/development.md#native-runtime-no-docker)
-and the [bundle build instructions](RELEASING.md#native-runtime-contract).
+You need Rust 1.98 and Node 24. Installed launchers start native processes by
+default, but a source checkout has no native bundle, so the instructions below
+use Docker. For native processes, follow
+[native development](book/development.md#native-runtime-no-docker) and the
+[bundle build instructions](RELEASING.md#native-runtime-contract).
 
 Install the web dependencies and build development runtime images:
 
@@ -30,7 +32,7 @@ cargo run -p thus-spoke-zakura -- build --dev
 Run the launcher from the checkout:
 
 ```console
-cargo run -p thus-spoke-zakura
+cargo run -p thus-spoke-zakura -- start --docker
 ```
 
 After changing the server or web app, rerun `build --dev` before starting again.

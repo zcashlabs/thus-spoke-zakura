@@ -68,10 +68,10 @@ case "\${1:-}" in
     printf 'pull\n' >> "\$NATIVE_INSTALL_PULLS"
     ;;
   doctor)
-    test "\$2" = --native && test "\$3" = --runtime-dir
-    test "\$(cat "\$4/manifest.json")" = '$version'
-    for name in zakurad lightwalletd ths-server; do test -x "\$4/bin/\$name" || exit 1; done
-    test -f "\$4/web/index.html"
+    test "\$2" = --runtime-dir
+    test "\$(cat "\$3/manifest.json")" = '$version'
+    for name in zakurad lightwalletd ths-server; do test -x "\$3/bin/\$name" || exit 1; done
+    test -f "\$3/web/index.html"
     if [ -n "\${NATIVE_LATE_TARGET:-}" ]; then
       mkdir -p "\$NATIVE_LATE_TARGET"
       printf '%s\n' sentinel > "\$NATIVE_LATE_TARGET/ths"
@@ -141,18 +141,14 @@ test "$(grep -c '/releases/latest$' "$NATIVE_INSTALL_REQUESTS")" -eq 1
 if grep -q '/latest/download/' "$NATIVE_INSTALL_REQUESTS"; then exit 1; fi
 # An identical version can be installed twice without mutating its runtime.
 THS_VERSION=v9.8.7 "$root/install.sh"
-# A native installation must keep receiving matching bundles on default
-# updates, whether Docker is available or not.
-for selection in default auto; do
-  if [ "$selection" = default ]; then version=9.8.8; allow_pull=0
-  else version=9.8.9; allow_pull=1; fi
+# Default updates install the matching bundle and never pull Docker images.
+for version in 9.8.8 9.8.9; do
   fixture "$version"
   : > "$NATIVE_INSTALL_REQUESTS"
   : > "$NATIVE_INSTALL_PULLS"
   (
-    if [ "$selection" = default ]; then unset THS_INSTALL_RUNTIME
-    else export THS_INSTALL_RUNTIME=auto; fi
-    THS_VERSION="$version" THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL="$allow_pull" "$root/install.sh"
+    unset THS_INSTALL_RUNTIME
+    THS_VERSION="$version" THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
   )
   test "$("$destination/ths" --version)" = "ths $version"
   test "$(cat "$destination/.ths-runtime/$version/manifest.json")" = "$version"
@@ -251,27 +247,20 @@ rm "$bin/mv"
 THS_VERSION=v9.8.7 "$root/install.sh"
 test "$("$destination/ths" --version)" = 'ths 9.8.7'
 
-# Without a native installation, default installs and updates prepare Docker,
-# even when the release also offers native bundles.
-for selection in auto default; do
-  for version in 9.8.7 9.8.8; do
-    fixture "$version"
-    : > "$NATIVE_INSTALL_REQUESTS"
-    : > "$NATIVE_INSTALL_PULLS"
-    (
-      if [ "$selection" = default ]; then unset THS_INSTALL_RUNTIME
-      else export THS_INSTALL_RUNTIME=auto; fi
-      THS_INSTALL_DIR="$tmp/docker-$selection" THS_VERSION="$version" THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
-    )
-    test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
-    test "$("$tmp/docker-$selection/ths" --version)" = "ths $version"
-    if grep -q '/ths-runtime-' "$NATIVE_INSTALL_REQUESTS"; then
-      echo 'default Docker installation unexpectedly downloaded a native runtime' >&2; exit 1
-    fi
-    test ! -e "$tmp/docker-$selection/.ths-runtime"
-  done
-done
-# Explicit choices still override native detection, without removing bundles.
+# Default installations are native, also where Docker images were the only runtime.
+fixture 9.8.7
+: > "$NATIVE_INSTALL_REQUESTS"
+: > "$NATIVE_INSTALL_PULLS"
+mkdir -p "$tmp/docker-only"
+printf '%s\n' old > "$tmp/docker-only/ths"
+(
+  unset THS_INSTALL_RUNTIME
+  THS_INSTALL_DIR="$tmp/docker-only" THS_VERSION=v9.8.7 THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
+)
+test "$("$tmp/docker-only/ths" --version)" = 'ths 9.8.7'
+test -x "$tmp/docker-only/.ths-runtime/9.8.7/bin/zakurad"
+test ! -s "$NATIVE_INSTALL_PULLS"
+# Explicit choices install Docker images or only the launcher, without removing bundles.
 fixture 9.8.7
 : > "$NATIVE_INSTALL_REQUESTS"
 : > "$NATIVE_INSTALL_PULLS"
@@ -280,10 +269,22 @@ test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
 THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=none NATIVE_INSTALL_ALLOW_PULL=0 "$root/install.sh"
 if grep -q '/ths-runtime-' "$NATIVE_INSTALL_REQUESTS"; then exit 1; fi
 test -f "$destination/.ths-runtime/9.8.7/manifest.json"
-# Historical releases still support Docker or launcher-only installation.
+# Releases up to v0.4.1 have no native runtime: by default they install Docker,
+# so a rollback to one works, and an explicit native request fails.
+fixture 0.4.1
 sed '/ths-runtime-/d' "$fixtures/SHA256SUMS" > "$fixtures/checksums-old"
 mv "$fixtures/checksums-old" "$fixtures/SHA256SUMS"
-THS_INSTALL_DIR="$tmp/historical" THS_VERSION=v9.8.7 THS_INSTALL_RUNTIME=auto THS_SKIP_IMAGE_PULL=1 "$root/install.sh"
+: > "$NATIVE_INSTALL_PULLS"
+(
+  unset THS_INSTALL_RUNTIME
+  THS_VERSION=v0.4.1 THS_SKIP_IMAGE_PULL=0 NATIVE_INSTALL_ALLOW_PULL=1 "$root/install.sh"
+)
+test "$("$destination/ths" --version)" = 'ths 0.4.1'
+test "$(cat "$NATIVE_INSTALL_PULLS")" = pull
+test ! -e "$destination/.ths-runtime/0.4.1"
 printf '%s\n' old > "$destination/ths"
-must_fail 'explicit native request on a historical release'
+if THS_VERSION=v0.4.1 "$root/install.sh" > "$tmp/failure.log" 2>&1; then
+  echo 'native installer unexpectedly succeeded: explicit native request on a historical release' >&2; exit 1
+fi
+test "$(cat "$destination/ths")" = old
 echo 'native installer tests passed'

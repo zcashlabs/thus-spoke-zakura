@@ -24,6 +24,7 @@ impl Runtime {
             );
             (|| {
                 startup_docker_reachable(&docker, json)?;
+                pull_missing_images(&docker)?;
                 for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
                     startup_require_image(&docker, &image)?;
                 }

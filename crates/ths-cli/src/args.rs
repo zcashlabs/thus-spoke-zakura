@@ -29,12 +29,14 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Start an environment in the foreground; interrupting deletes it.
     Start {
+        /// Start Docker containers instead of the native runtime.
         #[arg(long)]
-        native: bool,
-        #[arg(long, requires = "native")]
+        docker: bool,
+        /// Native runtime bundle to use instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
         /// Native startup and settlement deadline in seconds (default 180).
-        #[arg(long, requires = "native", value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, conflicts_with = "docker", value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
         #[arg(long)]
         no_open: bool,
@@ -72,9 +74,11 @@ pub(crate) enum Command {
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
+        /// Start Docker containers instead of the native runtime.
         #[arg(long)]
-        native: bool,
-        #[arg(long, requires = "native")]
+        docker: bool,
+        /// Native runtime bundle to use instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
         /// Maximum time for startup and settlement, in seconds.
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
@@ -200,9 +204,11 @@ pub(crate) enum Command {
     List,
     /// Check local runtime and configuration prerequisites.
     Doctor {
+        /// Check Docker instead of the native runtime.
         #[arg(long)]
-        native: bool,
-        #[arg(long, requires = "native")]
+        docker: bool,
+        /// Native runtime bundle to check instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
     },
     /// Print a shell completion script.

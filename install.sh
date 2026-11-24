@@ -3,8 +3,8 @@ set -eu
 
 repo="zcashlabs/thus-spoke-zakura"
 requested_version="${THS_VERSION:-latest}"
-install_runtime="${THS_INSTALL_RUNTIME:-auto}"
-case "$install_runtime" in auto|native|docker|none) ;; *) echo 'THS_INSTALL_RUNTIME must be auto, native, docker, or none' >&2; exit 1 ;; esac
+install_runtime="${THS_INSTALL_RUNTIME:-}"
+case "$install_runtime" in ''|native|docker|none) ;; *) echo 'THS_INSTALL_RUNTIME must be native, docker, or none' >&2; exit 1 ;; esac
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) target="x86_64-unknown-linux-gnu" ;;
   Linux-aarch64|Linux-arm64) target="aarch64-unknown-linux-gnu" ;;
@@ -48,10 +48,14 @@ case "$tag" in v[0-9]*) ;; *) echo 'Release version must start with v and a digi
 case "$tag" in *[!a-zA-Z0-9.+-]*) echo 'Invalid release version' >&2; exit 1 ;; esac
 release_url="https://github.com/$repo/releases/download/$tag"
 curl --proto '=https' --tlsv1.2 -fsSL "$release_url/SHA256SUMS" -o "$stage/SHA256SUMS"
-if [ "$install_runtime" = auto ]; then
-  # Preserve native installations across updates; other installs follow the CLI default.
-  if [ -d "$destination/.ths-runtime" ]; then install_runtime=native
-  else install_runtime=docker; fi
+if [ -z "$install_runtime" ]; then
+  # v0.4.1 and earlier have no native runtime and run only in Docker, so rollbacks to them
+  # still work. Every later release must ship one: a missing archive fails the install.
+  if printf '%s\n' "${tag#v}" | awk -F. '{ exit !($1 == 0 && ($2 < 4 || ($2 == 4 && $3 + 0 <= 1))) }'; then
+    install_runtime=docker
+  else
+    install_runtime=native
+  fi
 fi
 
 fetch_verified() {
@@ -100,7 +104,7 @@ if [ "$install_runtime" = native ]; then
   ' || { echo 'Native archive contains unsafe or duplicate paths' >&2; exit 1; }
   [ -n "$members" ] || { echo 'Native archive is empty' >&2; exit 1; }
   tar -xzf "$stage/$runtime_asset" -C "$stage"
-  "$stage/ths" doctor --native --runtime-dir "$stage/ths-runtime"
+  "$stage/ths" doctor --runtime-dir "$stage/ths-runtime"
   runtime_root="$destination/.ths-runtime"
   [ ! -L "$runtime_root" ] || { echo 'Runtime installation directory must not be a symbolic link' >&2; exit 1; }
   mkdir -p "$runtime_root"
@@ -116,7 +120,7 @@ if [ "$install_runtime" = native ]; then
       echo "Existing runtime $runtime_destination differs from the release; it was not overwritten. Move it aside after stopping its instances, then reinstall." >&2
       exit 1
     fi
-    "$stage/ths" doctor --native --runtime-dir "$runtime_destination"
+    "$stage/ths" doctor --runtime-dir "$runtime_destination"
   else
     # Commit immutable runtime first. The old launcher stays usable if interrupted.
     mv "$stage/ths-runtime" "$runtime_destination"

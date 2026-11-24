@@ -4,6 +4,16 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
+- **Native by default (migration):** The installer now installs the launcher
+  with its native runtime, and `ths`, `ths start`, `ths run`, and `ths doctor`
+  use it without Docker. Add `--docker` to use containers; `start --docker`
+  and `run --docker` pull missing images. Native `start` uses the same fixed
+  default ports as Docker, so a second instance needs `--port-offset`.
+  `THS_INSTALL_RUNTIME=docker` installs images instead of the runtime, and
+  `none` only the launcher. After `ths update` from an older launcher, the
+  first `ths start` installs the native runtime.
+  [#452](https://github.com/zcashlabs/thus-spoke-zakura/pull/452)
+
 - **Zakura Common 4:** Upgrade the wallet to Common 4.0.0, backend/SQLite
   0.1.0-rc9.4, and Zakura 1.7.0; raise the minimum Rust version to 1.97.
   Recreate the disposable instance after updating to initialize a fresh chain

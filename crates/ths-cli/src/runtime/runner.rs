@@ -120,30 +120,38 @@ impl Runtime {
         let shutdown = Shutdown::install()?;
         // The child owns stdout, so launcher progress and Docker output go to stderr.
         let mut context = LifecycleContext::new_for_start(LifecyclePolicy::default(), true);
+        let mut ownership = self.own_start(name, &shutdown, &context)?;
+        ownership.remove_lifecycle_when_dropped();
+        let requested = || shutdown.try_interrupted();
+        // The timeout starts once Docker is reachable and the images are pulled: a first pull
+        // can take longer than the whole timeout.
+        let pulled = {
+            let docker = LifecycleDocker::production(
+                &context,
+                None,
+                context.policy.startup_docker,
+                Cancellation::Observe(&requested),
+            );
+            startup_docker_reachable(&docker, context.diagnostics_to_stderr)
+                .and_then(|()| pull_missing_images(&docker))
+        };
         let deadline = Deadline(
             Instant::now()
                 .checked_add(timeout)
                 .context("startup timeout is too large")?,
         );
         context.overall_deadline = Some(deadline);
-        let mut ownership = self.own_start(name, &shutdown, &context)?;
-        ownership.remove_lifecycle_when_dropped();
-        let prepared = {
-            let requested = || shutdown.try_interrupted();
+        let prepared = pulled.and_then(|()| {
             let docker = LifecycleDocker::production(
                 &context,
                 Some(deadline),
                 context.policy.startup_docker,
                 Cancellation::Observe(&requested),
             );
-            (|| {
-                startup_docker_reachable(&docker, context.diagnostics_to_stderr)?;
-                for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
-                    startup_require_image(&docker, &image)?;
-                }
-                Ok(())
-            })()
-        };
+            [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()]
+                .iter()
+                .try_for_each(|image| startup_require_image(&docker, image))
+        });
         if let Err(error) = prepared {
             let error = ownership.session().explain(name, error);
             let failures = context.finish_helpers(Deadline::after(context.policy.cleanup));

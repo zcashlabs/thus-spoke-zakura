@@ -1,11 +1,11 @@
 # Thus Spoke Zakura
 
-> Thus Spoke Zakura (`ths`) is an open-source launcher that runs a disposable Zcash Regtest network on your machine. It starts a Zakura node, lightwalletd, and a wallet-backed dashboard in Docker, with five development accounts. Regtest only: coins have no value and the development keys are public.
+> Thus Spoke Zakura (`ths`) is an open-source launcher that runs a disposable Zcash Regtest network on your machine. It starts a Zakura node, lightwalletd, and a wallet-backed dashboard as native processes, or in Docker with `ths start --docker`, with five development accounts. Regtest only: coins have no value and the development keys are public.
 
-Install on macOS or Linux (Intel or ARM) with Docker running, then run `ths`:
+Install on macOS or Linux (Intel or ARM), then run `ths`:
 
 ```
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
 ```
 
 ## Site

@@ -133,6 +133,7 @@ impl Fixture {
                 "--name",
                 &self.name,
                 "start",
+                "--docker",
                 "--no-open",
                 "--port-offset",
                 &self.port_offset.to_string(),
@@ -186,6 +187,7 @@ impl Fixture {
                 "--name",
                 &self.name,
                 "start",
+                "--docker",
                 "--port-offset",
                 &self.port_offset.to_string(),
             ])
@@ -369,6 +371,7 @@ fn start_with_slow_create(fixture: &Fixture, kind: &str, seconds: u32, own_group
             "--name",
             &fixture.name,
             "start",
+            "--docker",
             "--no-open",
             "--port-offset",
             &fixture.port_offset.to_string(),
@@ -508,6 +511,7 @@ fn run_and_wallet_balances_bypass_proxy_settings() {
                 "--name",
                 &fixture.name,
                 "run",
+                "--docker",
                 "--timeout",
                 "10",
                 "--",
@@ -534,7 +538,7 @@ fn run_advertises_allocated_service_ports_to_the_app() {
     let fixture = Fixture::new();
     let mut child = fixture
         .command()
-        .args(["--name", &fixture.name, "run", "--", "true"])
+        .args(["--name", &fixture.name, "run", "--docker", "--", "true"])
         .spawn()
         .unwrap();
     let success = finish(&mut child).success();
@@ -828,7 +832,7 @@ fn json_start_browser_open_failure_keeps_stdout_parseable_through_stop() {
     let fixture = Fixture::new();
     let doctor = fixture
         .command()
-        .args(["--json", "doctor"])
+        .args(["--json", "doctor", "--docker"])
         .output()
         .unwrap();
     assert!(doctor.status.success());
@@ -989,22 +993,30 @@ fn standalone_build_and_pull_keep_docker_output_on_stdout() {
 #[test]
 fn json_start_preflight_failures_keep_stdout_empty() {
     let fixture = Fixture::new();
-    for (fault, diagnostic) in [
-        ("THS_TEST_FAIL_DOCTOR", "Docker is not reachable"),
-        ("THS_TEST_MISSING_IMAGE", "required image"),
+    // Release launchers pull missing images first, keeping Docker's progress off stdout.
+    let missing_image: &[&str] = if cfg!(feature = "release-distribution") {
+        &["Pulling ", "docker lifecycle output", "required image"]
+    } else {
+        &["required image"]
+    };
+    for (fault, diagnostics) in [
+        ("THS_TEST_FAIL_DOCTOR", &["Docker is not reachable"][..]),
+        ("THS_TEST_MISSING_IMAGE", missing_image),
     ] {
         let output = fixture
             .command()
-            .args(["--json", "start", "--no-open"])
+            .args(["--json", "start", "--docker", "--no-open"])
             .env(fault, "1")
             .output()
             .unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            stderr.contains(diagnostic),
-            "expected {diagnostic}: {stderr}"
-        );
+        for diagnostic in diagnostics {
+            assert!(
+                stderr.contains(diagnostic),
+                "expected {diagnostic}: {stderr}"
+            );
+        }
     }
 }

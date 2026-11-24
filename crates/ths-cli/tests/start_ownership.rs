@@ -90,10 +90,10 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 fn a_start_in_docker_preflight_already_owns_the_environment() {
     let fixture = Fixture::new();
     let started = Instant::now();
-    let mut first = fixture.spawn(&["--name", "pre", "start", "--no-open"]);
+    let mut first = fixture.spawn(&["--name", "pre", "start", "--docker", "--no-open"]);
     wait_for_lock(fixture.home.path());
 
-    let second = fixture.run(&["--name", "pre", "start", "--no-open"]);
+    let second = fixture.run(&["--name", "pre", "start", "--docker", "--no-open"]);
     assert_eq!(second.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&second.stderr)
@@ -125,10 +125,10 @@ fn a_start_in_docker_preflight_already_owns_the_environment() {
 fn a_run_in_docker_preflight_already_owns_the_environment() {
     let fixture = Fixture::new();
     let started = Instant::now();
-    let mut run = fixture.spawn(&["--name", "pre", "run", "--", "true"]);
+    let mut run = fixture.spawn(&["--name", "pre", "run", "--docker", "--", "true"]);
     wait_for_lock(fixture.home.path());
 
-    let start = fixture.run(&["--name", "pre", "start", "--no-open"]);
+    let start = fixture.run(&["--name", "pre", "start", "--docker", "--no-open"]);
     assert_eq!(start.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&start.stderr)
@@ -160,7 +160,7 @@ fn a_run_in_docker_preflight_already_owns_the_environment() {
 fn wait_outlasts_a_start_in_slow_docker_preflight() {
     let fixture = Fixture::new();
     let started = Instant::now();
-    let mut start = fixture.spawn(&["--name", "pre", "start", "--no-open"]);
+    let mut start = fixture.spawn(&["--name", "pre", "start", "--docker", "--no-open"]);
     let mut wait = fixture.spawn(&["--name", "pre", "wait", "--timeout", "30"]);
 
     loop {
@@ -188,7 +188,7 @@ fn wait_outlasts_a_start_in_slow_docker_preflight() {
 fn wait_outlasts_a_run_in_slow_docker_preflight() {
     let fixture = Fixture::new();
     let started = Instant::now();
-    let mut start = fixture.spawn(&["--name", "pre", "run", "--", "true"]);
+    let mut start = fixture.spawn(&["--name", "pre", "run", "--docker", "--", "true"]);
     let mut wait = fixture.spawn(&["--name", "pre", "wait", "--timeout", "30"]);
 
     loop {

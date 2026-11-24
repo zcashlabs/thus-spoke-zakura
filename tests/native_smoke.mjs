@@ -1,4 +1,4 @@
-// Run with: ths run --native --runtime-dir DIR -- node tests/native_smoke.mjs
+// Run with: ths run --runtime-dir DIR -- node tests/native_smoke.mjs
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 const API = process.env.THS_API_URL;

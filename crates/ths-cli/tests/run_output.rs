@@ -30,7 +30,7 @@ fn install_fixtures(directory: &Path) {
 fn run_command(directory: &Path, name: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ths"));
     command
-        .args(["--name", name, "run", "--timeout", "20", "--"])
+        .args(["--name", name, "run", "--docker", "--timeout", "20", "--"])
         .env("HOME", directory)
         .env("XDG_CONFIG_HOME", directory)
         .env("PATH", format!("{}:/usr/bin:/bin", directory.display()))

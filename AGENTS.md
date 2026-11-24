@@ -34,7 +34,7 @@ npm run build --prefix web
 - Run the Rust checks after changing `crates/`, and the web checks after changing `web/`.
 - Run `tests/install.sh` after changing `install.sh`.
 - Use `cargo run -p thus-spoke-zakura -- <args>` to run the launcher from source. The package is `thus-spoke-zakura`; `ths` is only the binary name.
-- Rebuild images with `cargo run -p thus-spoke-zakura -- build --dev` after changing `crates/ths-server` or `web/`. `ths` runs prebuilt Docker images and will not pick up source changes otherwise.
+- Rebuild images with `cargo run -p thus-spoke-zakura -- build --dev` after changing `crates/ths-server` or `web/`, then start with `start --docker`. `ths` runs prebuilt Docker images or native bundles and will not pick up source changes otherwise. Without `--docker`, `start` and `run` use a native bundle, which a source build must be given with `--runtime-dir`.
 - Use `THS_DEV_API=<dashboard-url> npm run dev --prefix web` for frontend work against a running instance. Get the URL from `ths endpoints`.
 - Expect `cargo test --workspace` to run without Docker. The live `activity_recovery` regression is `#[ignore]`d and needs Docker; read "Activity-recovery integration test" in `book/development.md` before running or changing it.
 

@@ -64,7 +64,7 @@ pub fn run(requested: Option<&str>, check: bool, json: bool) -> Result<ExitCode>
     let install_dir = launcher
         .parent()
         .context("the running launcher has no parent directory")?;
-    run_installer(INSTALLER, &target, install_dir, json)?;
+    run_installer(INSTALLER, &target, install_dir, json, None)?;
     if json {
         print_report(&target, &target, Status::UpToDate, true)?;
     }
@@ -86,6 +86,18 @@ fn startup_notice_from(endpoint: &str, current: &Version) -> Option<String> {
     (compare_versions(current, &available) == Status::UpdateAvailable).then(|| {
         format!("Update available: {current} → {available}. Run `ths update` to install it.")
     })
+}
+
+/// Reinstalls this launcher's own release with its native runtime. Progress goes to stderr
+/// because `--json start` owns stdout.
+pub fn install_native_runtime() -> Result<()> {
+    ensure_release_distribution()?;
+    let current = parse_version(env!("CARGO_PKG_VERSION"))?;
+    let launcher = installed_launcher()?;
+    let install_dir = launcher
+        .parent()
+        .context("the running launcher has no parent directory")?;
+    run_installer(INSTALLER, &current, install_dir, true, Some("native"))
 }
 
 pub fn uninstall() -> Result<ExitCode> {
@@ -208,11 +220,22 @@ fn print_report(current: &Version, available: &Version, status: Status, json: bo
     Ok(())
 }
 
-fn run_installer(script: &str, version: &Version, install_dir: &Path, json: bool) -> Result<()> {
-    let mut child = Command::new("sh")
+fn run_installer(
+    script: &str,
+    version: &Version,
+    install_dir: &Path,
+    json: bool,
+    runtime: Option<&str>,
+) -> Result<()> {
+    let mut installer = Command::new("sh");
+    installer
         .arg("-s")
         .env("THS_VERSION", version.to_string())
-        .env("THS_INSTALL_DIR", install_dir)
+        .env("THS_INSTALL_DIR", install_dir);
+    if let Some(runtime) = runtime {
+        installer.env("THS_INSTALL_RUNTIME", runtime);
+    }
+    let mut child = installer
         .stdin(Stdio::piped())
         .stdout(if json {
             Stdio::from(std::io::stderr())
