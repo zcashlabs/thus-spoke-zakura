@@ -29,6 +29,10 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Start an environment in the foreground; interrupting deletes it.
     Start {
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
+        native: bool,
         /// Start Docker containers instead of the native runtime.
         #[arg(long)]
         docker: bool,
@@ -74,6 +78,10 @@ pub(crate) enum Command {
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
+        native: bool,
         /// Start Docker containers instead of the native runtime.
         #[arg(long)]
         docker: bool,
@@ -84,7 +92,10 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
         /// Command and arguments to execute.
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        // Without `allow_hyphen_values`, an unknown option before the command is
+        // rejected instead of being executed as the program. Arguments after the
+        // program name, and anything after `--`, still pass through unchanged.
+        #[arg(required = true, trailing_var_arg = true)]
         command: Vec<OsString>,
     },
     /// Build the runtime images from the current source.
@@ -204,6 +215,10 @@ pub(crate) enum Command {
     List,
     /// Check local runtime and configuration prerequisites.
     Doctor {
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
+        native: bool,
         /// Check Docker instead of the native runtime.
         #[arg(long)]
         docker: bool,

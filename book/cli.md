@@ -167,6 +167,12 @@ or resources cause a collision error rather than reuse. Each run uses free
 loopback ports, so concurrent runs do not collide. Cleanup removes the run's
 per-instance lock file; failures are reported.
 
+Options for `ths` go before the command. An unrecognized option there is
+rejected rather than run as the program; a program whose name starts with `-`
+must follow `--`. Everything after the program name passes to it unchanged.
+`--native` was removed when native became the default, and is rejected with
+that explanation.
+
 ```console
 ths run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
 ```

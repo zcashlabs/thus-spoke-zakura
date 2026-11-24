@@ -11,7 +11,9 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
   default ports as Docker, so a second instance needs `--port-offset`.
   `THS_INSTALL_RUNTIME=docker` installs images instead of the runtime, and
   `none` only the launcher. After `ths update` from an older launcher, the
-  first `ths start` installs the native runtime.
+  first `ths start` installs the native runtime. `--native` is rejected with
+  a migration message, and `run` no longer executes an unrecognized option
+  given before its command.
   [#452](https://github.com/zcashlabs/thus-spoke-zakura/pull/452)
 
 - **Zakura Common 4:** Upgrade the wallet to Common 4.0.0, backend/SQLite

@@ -14,6 +14,18 @@ use crate::{
 use wallet::send;
 
 pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if matches!(
+        cli.command,
+        Some(
+            Command::Start { native: true, .. }
+                | Command::Run { native: true, .. }
+                | Command::Doctor { native: true, .. }
+        )
+    ) {
+        anyhow::bail!(
+            "--native was removed: the native runtime is now the default; add --docker to use Docker"
+        );
+    }
     if cli.json && matches!(cli.command, Some(Command::Run { .. })) {
         anyhow::bail!("--json cannot be used with `run`; the child command owns stdout");
     }
@@ -40,6 +52,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let name = resolve_name(cli.name, run);
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
+        native: false,
         docker: false,
         runtime_dir: None,
         timeout: None,
@@ -51,6 +64,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         nu7_height: DEFAULT_NU7_ACTIVATION_HEIGHT,
     }) {
         Command::Start {
+            native: _,
             docker,
             runtime_dir,
             timeout,
@@ -83,6 +97,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run {
+            native: _,
             timeout,
             command,
             docker,
@@ -236,6 +251,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Reset { force } => runtime.reset(&name, force),
         Command::List => runtime.list(cli.json),
         Command::Doctor {
+            native: _,
             docker,
             runtime_dir,
         } => {
