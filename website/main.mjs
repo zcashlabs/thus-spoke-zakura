@@ -212,7 +212,7 @@ async function startStage() {
 
   /* Stop rendering entirely once the canvas is covered by opaque sections. */
   ScrollTrigger.create({
-    trigger: '#docs',
+    trigger: '#examples',
     start: 'top 80%',
     onEnter: () => scene.setRunning(false),
     onLeaveBack: () => scene.setRunning(true),

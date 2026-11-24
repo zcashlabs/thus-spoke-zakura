@@ -23,6 +23,11 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlab
 - [The ths CLI](https://ths.zypherpunk.xyz/book/cli.html): Every command and option, with examples.
 - [Troubleshooting](https://ths.zypherpunk.xyz/book/troubleshooting.html): Docker permissions and services that will not start.
 
+## Examples
+
+- [Vitest](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/vitest): Start a network for your tests, mine blocks, reorg and roll back.
+- [ZcashJS wallet](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/zcashjs-wallet): Fund a wallet and check when the payment becomes spendable.
+
 ## Optional
 
 - [Develop from source](https://ths.zypherpunk.xyz/book/development.html): Build it yourself, run the tests, and contribute.

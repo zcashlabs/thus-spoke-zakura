@@ -50,6 +50,13 @@ $ ths endpoints --json
 
 For another isolated network, run `ths --name second start --port-offset 10` and read its endpoints with `ths --name second endpoints --json`.
 
+## Start from a working test.
+
+Each example starts its own network with thsjs, then funds, mines and checks the result.
+
+- [Vitest](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/vitest): Start a network for your tests, mine blocks, reorg and roll back.
+- [ZcashJS wallet](https://github.com/zcashlabs/thus-spoke-zakura/tree/main/packages/thsjs/examples/zcashjs-wallet): Fund a wallet and check when the payment becomes spendable.
+
 ## Keep building.
 
 Start with the commands, then use the account and troubleshooting guides as your tests grow.
