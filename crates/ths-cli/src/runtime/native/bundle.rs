@@ -63,7 +63,10 @@ pub(super) fn resolve(runtime_dir: Option<&Path>, install_missing: bool) -> Resu
             env!("CARGO_PKG_VERSION")
         );
         crate::updater::install_native_runtime().context(
-            "installing the native runtime failed; check network access and retry, or add --docker",
+            format!(
+                "installing the native runtime for ths {} failed; the installer output above names the cause. Retry, or add --docker to use Docker",
+                env!("CARGO_PKG_VERSION")
+            ),
         )?;
     }
     validate(&directory)

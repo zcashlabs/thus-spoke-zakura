@@ -205,7 +205,7 @@ four defaults, the name alone is not enough:
 $ ths --name alice start --no-open
 Preparing a fresh alice environment…
 Starting alice…
-Error: port 32805 is already in use on 127.0.0.1
+Error: port 32805 is already in use on 127.0.0.1; another instance may hold it (see `ths list`), or start with a different --port-offset, such as 10
 ```
 
 Give it an offset instead:

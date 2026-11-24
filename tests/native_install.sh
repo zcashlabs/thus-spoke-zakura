@@ -164,7 +164,7 @@ for failure in missing damaged; do
   if [ "$failure" = missing ]; then
     sed '/ths-runtime-/d' "$fixtures/SHA256SUMS" > "$fixtures/checksums-old"
     mv "$fixtures/checksums-old" "$fixtures/SHA256SUMS"
-    expected='Missing or ambiguous checksum for ths-runtime-'
+    expected="Release v9.8.10 publishes no native runtime for $target"
   else
     checksums
     printf 'bad runtime\n' > "$fixtures/ths-runtime-$target.tar.gz"
@@ -287,4 +287,5 @@ if THS_VERSION=v0.4.1 "$root/install.sh" > "$tmp/failure.log" 2>&1; then
   echo 'native installer unexpectedly succeeded: explicit native request on a historical release' >&2; exit 1
 fi
 test "$(cat "$destination/ths")" = old
+grep -q "Release v0.4.1 publishes no native runtime for $target" "$tmp/failure.log"
 echo 'native installer tests passed'

@@ -93,6 +93,13 @@ installed_version="$("$stage/ths" --version | awk '{print $2}')"
 
 if [ "$install_runtime" = native ]; then
   runtime_asset="ths-runtime-$target.tar.gz"
+  # Name a release without this archive plainly, instead of failing on a 404.
+  awk -v asset="$runtime_asset" '
+    { name=$2; sub(/^\*/, "", name); if (name == asset) found=1 }
+    END { exit !found }
+  ' "$stage/SHA256SUMS" || {
+    echo "Release $tag publishes no native runtime for $target; set THS_INSTALL_RUNTIME=docker to install for Docker instead" >&2; exit 1
+  }
   fetch_verified "$runtime_asset"
   members="$(tar -tzf "$stage/$runtime_asset")"
   printf '%s\n' "$members" | awk '

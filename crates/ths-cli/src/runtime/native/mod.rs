@@ -97,7 +97,7 @@ impl Runtime {
                 reservations.push(Some(TcpListener::bind(("127.0.0.1", port)).map_err(
                     |error| {
                         if error.kind() == std::io::ErrorKind::AddrInUse {
-                            anyhow!("port {port} is already in use on 127.0.0.1")
+                            port_in_use(port)
                         } else {
                             anyhow!(error).context(format!("reserving loopback port {port}"))
                         }

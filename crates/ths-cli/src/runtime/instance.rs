@@ -212,8 +212,15 @@ pub(super) fn require_free_loopback(port: u16) -> Result<()> {
             drop(listener);
             Ok(())
         }
-        Err(_) => bail!("port {port} is already in use on 127.0.0.1"),
+        Err(_) => Err(port_in_use(port)),
     }
+}
+
+/// Fixed ports are never replaced by free ones, so the error names both ways out.
+pub(super) fn port_in_use(port: u16) -> anyhow::Error {
+    anyhow::anyhow!(
+        "port {port} is already in use on 127.0.0.1; another instance may hold it (see `ths list`), or start with a different --port-offset, such as 10"
+    )
 }
 
 pub(crate) fn prefix(name: &InstanceName) -> String {
