@@ -1,0 +1,7 @@
+{
+  "name": "thsjs-zcashjs-wallet-example",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.js" },
+  "devDependencies": { "@zcashlabs/thsjs": "file:../.." }
+}
