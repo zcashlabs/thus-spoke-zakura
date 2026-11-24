@@ -16,6 +16,57 @@ const EMPTY_SEARCH: &str =
     "q must be a block height, block hash, transaction id, or transparent address";
 const UNTRIMMED_ADDRESS: &str = "address must not have leading or trailing whitespace";
 
+#[tokio::test]
+async fn block_list_uses_summaries_while_detail_uses_full_transactions() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = format!("http://{}", listener.local_addr().unwrap());
+    let rpc = Router::new().route(
+        "/",
+        post(|Json(req): Json<Value>| async move {
+            let result = match req["method"].as_str().unwrap() {
+                "getblockchaininfo" => json!({"chain": "regtest", "blocks": 7}),
+                "getblock" => {
+                    assert_eq!(req["params"][0], "7");
+                    let tx = match req["params"][1].as_u64() {
+                        Some(1) => json!(["tx-id"]),
+                        Some(2) => json!([{"txid": "tx-id"}]),
+                        value => panic!("unexpected getblock verbosity {value:?}"),
+                    };
+                    json!({"height": 7, "hash": "block-hash", "nTx": 1, "size": 2, "time": 1, "tx": tx})
+                }
+                "z_gettreestate" => json!({}),
+                method => panic!("unexpected RPC method {method}"),
+            };
+            Json(json!({"result": result, "error": null, "id": req["id"]}))
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, rpc).await });
+
+    let (state, _dir) = state_at(node);
+    for (path, expected_tx) in [
+        ("/api/v1/blocks?limit=1", json!(["tx-id"])),
+        ("/api/v1/blocks/7", json!([{"txid": "tx-id"}])),
+    ] {
+        let response = router(state.clone())
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        if path.contains('?') {
+            assert_eq!(
+                body["blocks"][0],
+                json!({"height": 7, "hash": "block-hash", "nTx": 1, "size": 2, "time": 1, "tx": expected_tx})
+            );
+        } else {
+            assert_eq!(body["tx"], expected_tx);
+        }
+    }
+}
+
 async fn node_that_records_calls() -> (String, Arc<Mutex<Vec<String>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();

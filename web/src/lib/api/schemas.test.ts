@@ -300,16 +300,16 @@ describe('miningJobSchema', () => {
 });
 
 describe('addressSchema', () => {
-  it('accepts integer balances and fills missing fields with zero', () => {
+  it('converts integer balances to bigint and fills missing fields with zero', () => {
     expect(
       addressSchema.parse({
         address: 'tmAddress',
         balance: { balance: 100_000_000, received: 250_000_000 },
       }).balance,
-    ).toEqual({ balance: 100_000_000, received: 250_000_000 });
+    ).toEqual({ balance: 100_000_000n, received: 250_000_000n });
     expect(addressSchema.parse({ address: 'tmAddress', balance: {} }).balance).toEqual({
-      balance: 0,
-      received: 0,
+      balance: 0n,
+      received: 0n,
     });
   });
   it.each([{ balance: 1.5 }, { received: 100.25 }, { balance: -1 }, { received: -5 }])(

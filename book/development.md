@@ -191,6 +191,15 @@ the normal `ths` dashboard.
 
 ## Run the relevant checks
 
+The public website and this book deploy together on pushes to `main`, at
+<https://ths.zypherpunk.xyz/> and <https://ths.zypherpunk.xyz/book/>.
+The `Deploy website and book` workflow also builds pull requests without
+deploying them. Automatic runs are limited to changes in the website, book,
+theme, and their build, validation, and deployment files; manual runs remain
+available. For the Vercel project settings, GitHub Actions credentials,
+and a local preview of the combined site, see the
+[website deployment instructions](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/website/README.md#production-deployment).
+
 After changing `crates/`:
 
 ```console
@@ -260,7 +269,7 @@ cargo test --locked --profile dev-runtime -p ths-server --test activity_recovery
 ```
 
 Linux CI runs reorg/rollback, broadcast recovery, concurrent sends, address-faucet restart
-recovery, and queued-response cases on every push and PR. The other cases in
+recovery, and queued-response cases on every pull request and push to `main`. The other cases in
 `tests/activity_recovery.rs` cover startup funding, pool transfers, and
 external faucets. The fixture owns and cleans up only its own Docker resources;
 it fails on a timeout or incomplete cleanup.

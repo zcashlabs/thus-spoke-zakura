@@ -589,7 +589,7 @@ ths wallet balances
 ths wallet balances --json
 ```
 
-### `ths wallet activity [--limit <N>] [--watch]`
+### `ths wallet activity [--limit <N>] [--account <N>] [--kind <KIND>] [--status <STATUS>] [--before <ACTIVITY_ID>] [--watch]`
 
 Prints recent canonical activity for the five development accounts, newest
 first, together with pending or failed payment-journal entries. The output
@@ -606,9 +606,28 @@ Without `--limit`, the server's default of 30 entries is used. An explicit
 limit must be between 1 and 100. An environment with no activity prints a
 short empty-state message.
 
+`--account` keeps only activity involving one of accounts 1–5, as either a
+source or a destination. `--kind` accepts the server values `send`, `faucet`,
+and `transaction`; these are not the derived labels used in human-readable
+output, so a shield, for example, is still a `transaction`. `--status` accepts
+`preparing`, `prepared`, `broadcast`, `pending`, `confirmed`, `unconfirmed`,
+and `failed`. Filters combine and are applied before the limit.
+
+`--before <ACTIVITY_ID>` asks for the page of entries older than that activity
+ID, with the same filters and limit. Use `--json` to read the `id` of the last
+entry on a page and pass that exact value as the next page's `--before`. An ID
+from a different filter set is stale and the server rejects the request;
+propagate that error instead of restarting from the first page. `--before`
+cannot be combined with `--watch`, which always follows the latest matching
+entries.
+
 ```console
 ths wallet activity
 ths wallet activity --limit 20
+ths wallet activity --account 2 --kind send --status confirmed
+ths wallet activity --limit 30 --account 2 --json
+ths wallet activity --limit 30 --account 2 --before wallet:send:abc123 --json
+ths wallet activity --watch --kind transaction --status pending
 ths wallet activity --watch
 ths wallet activity --json
 ths wallet activity --limit 20 --json
@@ -627,7 +646,9 @@ hold up the activity response.
 
 `--watch` keeps the recent-activity view updated. The watch reads
 `GET /api/v1/activity` every two seconds and never submits, retries, or
-resumes payments. On a terminal it redraws in place under a header with the
+resumes payments. Any `--account`, `--kind`, and `--status` filters are sent on
+every poll, so the view follows only matching entries; `--before` is rejected.
+On a terminal it redraws in place under a header with the
 last update time; on a pipe it prints only snapshots that changed. With
 `--json`, each changed snapshot prints as one newline-delimited JSON array
 and status messages go to stderr. `Ctrl+C` stops only the watcher and leaves
@@ -820,18 +841,32 @@ see the [caller table](architecture/operations.md#which-caller-are-you-retrying)
 
 ### `ths wallet send --from <N> --uri <URI> [--amount <ZEC> | --max] [--source-pool <POOL>]`
 
-Pays a single-payment ZIP-321 `zcash:` URI, like the **Payment request** field
-in the dashboard's **Send ZEC** dialog. The URI sets the destination (any
-Regtest unified or transparent address), its pool, and any memo, so `--to`,
+Pays a ZIP-321 `zcash:` URI. The URI sets each destination (any Regtest unified
+or transparent address), its pool, and any memo, so `--to`,
 `--destination-pool`, and `--memo` can't be combined with `--uri`. The server
-parses the URI (`POST /api/v1/zip321/parse`), so the CLI and the dashboard
-accept exactly the same URIs: one payment to a supported Regtest address,
-with a text memo only for Ironwood. Multipayment, wrong-network, unsupported
-receiver, and nontext-memo requests are rejected.
+parses the URI, so the CLI and the API accept exactly the same URIs: payments
+to supported Regtest addresses, with a text memo only for Ironwood.
+Wrong-network, unsupported receiver, and nontext-memo requests are rejected.
+
+A single-payment URI works like the **Payment request** field in the
+dashboard's **Send ZEC** dialog (`POST /api/v1/zip321/parse`):
 
 - `--amount <ZEC>` or `--max`: required when the URI has no amount, and rejected
   when it sets one. `--max` quotes against the destination pool parsed from the
   URI.
+
+A multi-recipient URI (one with more than one payment, such as `address` and
+`address.1`) pays every recipient in **one transaction**, recorded as one
+payment with one idempotency key, txid, and status. An indexed address alone,
+as in `zcash:?address.1=...`, is still a single payment. The CLI submits the
+whole URI to `POST /api/v1/send`:
+
+- Every payment must set a positive amount, so `--amount` and `--max` are
+  rejected. Transparent outputs must be at least 54 zatoshi.
+- An invalid payment rejects the whole URI before anything is recorded; there
+  is no partial payout.
+- No payment may return to the source account in the source pool.
+- Output shows the total, then each recipient with its amount, pool, and memo.
 
 ```console
 DASHBOARD_URL="$(ths endpoints --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["dashboard"])')"
@@ -845,6 +880,9 @@ ths wallet send --from 1 --uri "zcash:tm..." --amount 0.5
 
 # Or send the maximum available after fees
 ths wallet send --from 1 --uri "zcash:tm..." --max
+
+# Pay two recipients in one transaction
+ths wallet send --from 1 --uri "zcash:?address=uregtest1...&amount=0.1&address.1=tm...&amount.1=0.2"
 ```
 
 ### `ths wallet shield --from <N> --to <N> (--amount <ZEC> | --max) [--memo <TEXT>]`
@@ -1023,11 +1061,11 @@ compinit
 | `ths rollback --depth N` | Remove recent blocks without replacements |
 | `ths faucet <ADDRESS> [--amount]` | Send disposable ZEC to any Regtest address |
 | `ths wallet balances [--json]` | Print the five accounts' balances and addresses |
-| `ths wallet activity [--limit N] [--json]` | Print recent development-wallet activity |
+| `ths wallet activity [--limit N] [--account N] [--kind KIND] [--status STATUS] [--before ID] [--watch] [--json]` | Print recent development-wallet activity, with filters and older pages |
 | `ths wallet quote --from --source-pool --destination-pool [--json]` | Show an account's maximum send and fee for one pool route without sending |
 | `ths wallet faucet --accounts <LIST> [--amount] [--pool]` | Fund one or more of the five accounts by index |
 | `ths wallet send --from --to (--amount \| --max) [--source-pool] [--destination-pool] [--memo]` | Send between accounts or pools, optionally with an Ironwood memo |
-| `ths wallet send --from --uri [--amount \| --max] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest address |
+| `ths wallet send --from --uri [--amount \| --max] [--source-pool]` | Pay a ZIP-321 `zcash:` URI to any Regtest addresses, several recipients in one transaction |
 | `ths wallet shield --from --to (--amount \| --max) [--memo]` | Spend transparent funds into the same or another account's Ironwood balance |
 | `ths wallet unshield --from --to (--amount \| --max)` | Spend Ironwood funds into the same or another account's transparent balance |
 | `ths logs [service] [-f] [--tail N \| --head N]` | Stream or print service logs |

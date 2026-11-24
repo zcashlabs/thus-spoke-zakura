@@ -1,5 +1,41 @@
 use super::*;
 use std::sync::Barrier;
+
+fn order_rows(store: &Store, id: &str) -> usize {
+    store
+        .0
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM activity_order WHERE activity_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn order_count(store: &Store) -> usize {
+    store
+        .0
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM activity_order", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn stored_sequence(store: &Store, id: &str) -> i64 {
+    store
+        .0
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT sequence FROM activity_order WHERE activity_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn address_faucet_replay_survives_restart_and_rejects_conflicting_intents() {
     let dir = tempfile::tempdir().unwrap();
@@ -63,6 +99,68 @@ fn address_faucet_replay_survives_restart_and_rejects_conflicting_intents() {
             .is_err()
     );
 }
+
+#[test]
+fn address_faucet_claim_records_first_seen_order_before_any_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    let store = Store::open(&path).unwrap();
+    store.initialize().unwrap();
+
+    let external = store
+        .claim_address_faucet("tm-external-order", 1_000, "external-order")
+        .unwrap();
+    assert_eq!(order_rows(&store, &external.id), 1);
+    let external_sequence = stored_sequence(&store, &external.id);
+
+    let account = store
+        .claim_faucet(2, "ironwood", 2_000, "account-order")
+        .unwrap();
+    assert!(stored_sequence(&store, &account.id) > external_sequence);
+
+    let replay = store
+        .claim_address_faucet("tm-external-order", 1_000, "external-order")
+        .unwrap();
+    assert_eq!(replay.id, external.id);
+    assert_eq!(stored_sequence(&store, &external.id), external_sequence);
+    assert!(
+        store
+            .claim_address_faucet("tm-external-order", 2_000, "external-order")
+            .is_err()
+    );
+    assert_eq!(stored_sequence(&store, &external.id), external_sequence);
+
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    reopened.initialize().unwrap();
+    assert_eq!(order_rows(&reopened, &external.id), 1);
+    assert_eq!(stored_sequence(&reopened, &external.id), external_sequence);
+    assert!(stored_sequence(&reopened, &account.id) > external_sequence);
+}
+
+#[test]
+fn address_faucet_claim_writes_payment_and_order_atomically() {
+    let store = Store::open(":memory:").unwrap();
+    store.initialize().unwrap();
+    let before = order_count(&store);
+    store.0.lock().unwrap().execute_batch(
+        "CREATE TRIGGER reject_order BEFORE INSERT ON activity_order BEGIN SELECT RAISE(ABORT,'injected failure'); END;"
+    ).unwrap();
+
+    assert!(
+        store
+            .claim_address_faucet("tm-atomic", 100, "atomic-order")
+            .is_err()
+    );
+    assert!(
+        store
+            .address_faucet_for_key("atomic-order")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(order_count(&store), before);
+}
+
 #[test]
 fn concurrent_address_faucet_claims_share_one_operation() {
     let store = Store::open(":memory:").unwrap();

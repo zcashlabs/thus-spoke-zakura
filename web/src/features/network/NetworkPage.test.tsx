@@ -145,13 +145,16 @@ describe('NetworkPage', () => {
   });
 
   it.each([
+    ['starting', 'Starting the environment'],
     ['node_unavailable', 'Waiting for Zakura'],
+    ['chain_operation', 'Chain operation in progress'],
     ['wallet_behind', 'Wallet is catching up'],
     ['wallet_error', 'Wallet synchronization failed'],
     ['wallet_syncing', 'Wallet is syncing'],
     ['lightwalletd_unavailable', 'Waiting for lightwalletd'],
     ['height_mismatch', 'Services are catching up'],
     ['chain_mismatch', 'Services disagree on the chain'],
+    ['unknown_blocker', 'Environment is not ready'],
   ])(
     'names the %s settlement blocker even when the wallet reports ready',
     async (blocker, label) => {

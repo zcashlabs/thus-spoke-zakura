@@ -407,6 +407,10 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
         Some(Command::Wallet {
             action: WalletCommand::Activity {
                 limit: None,
+                account: None,
+                kind: None,
+                status: None,
+                before: None,
                 watch: false,
             }
         })
@@ -420,6 +424,10 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
         Some(Command::Wallet {
             action: WalletCommand::Activity {
                 limit: Some(20),
+                account: None,
+                kind: None,
+                status: None,
+                before: None,
                 watch: false,
             }
         })
@@ -432,6 +440,10 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
         Some(Command::Wallet {
             action: WalletCommand::Activity {
                 limit: Some(10),
+                account: None,
+                kind: None,
+                status: None,
+                before: None,
                 watch: true,
             }
         })
@@ -441,6 +453,61 @@ fn parses_wallet_activity_flags_and_rejects_invalid_limits() {
         assert!(
             Cli::try_parse_from(["ths", "wallet", "activity", "--limit", limit]).is_err(),
             "accepted activity limit {limit}"
+        );
+    }
+}
+
+#[test]
+fn parses_wallet_activity_filters_and_rejects_invalid_values() {
+    let cli = Cli::try_parse_from([
+        "ths",
+        "wallet",
+        "activity",
+        "--limit",
+        "10",
+        "--account",
+        "3",
+        "--kind",
+        "faucet",
+        "--status",
+        "confirmed",
+        "--before",
+        "wallet:send:abc",
+        "--json",
+    ])
+    .unwrap();
+    assert!(cli.json);
+    assert!(matches!(
+        cli.command,
+        Some(Command::Wallet {
+            action: WalletCommand::Activity {
+                limit: Some(10),
+                account: Some(3),
+                kind: Some(ActivityKind::Faucet),
+                status: Some(ActivityStatus::Confirmed),
+                before: Some(before),
+                watch: false,
+            }
+        }) if before == "wallet:send:abc"
+    ));
+
+    for args in [
+        vec!["ths", "wallet", "activity", "--account", "0"],
+        vec!["ths", "wallet", "activity", "--account", "6"],
+        vec!["ths", "wallet", "activity", "--kind", "receive"],
+        vec!["ths", "wallet", "activity", "--status", "unknown"],
+        vec![
+            "ths",
+            "wallet",
+            "activity",
+            "--before",
+            "wallet:send:abc",
+            "--watch",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(args.clone()).is_err(),
+            "accepted {args:?}"
         );
     }
 }

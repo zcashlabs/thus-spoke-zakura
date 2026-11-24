@@ -49,6 +49,8 @@ export const activitySchema = z.object({
   to_accounts: z.array(z.number().int().min(1).max(5)).optional(),
   to_address: z.string().nullable().default(null),
   recipient_addresses: z.array(z.string()).optional(),
+  /** Recipients outside the development accounts; `recipient_addresses` may also list accounts. */
+  external_addresses: z.array(z.string()).optional(),
   source_pool: poolSchema.nullable(),
   destination_pool: poolSchema.nullable(),
   source_pools: z.array(poolSchema).optional(),
@@ -110,6 +112,8 @@ export type WalletTransaction = z.infer<typeof walletTransactionSchema>;
 
 export const addressFaucetSchema = z.object({
   address: z.string(),
+  /** `unknown` for a payment saved before a Sapling-only address was rejected. */
+  destination_pool: z.union([poolSchema, z.literal('unknown')]),
   amount_zatoshi: zatoshi,
   txid: z.string(),
   block_hash: z.string().nullable(),
@@ -127,6 +131,12 @@ export const paymentUriSchema = z.object({
   memo: z.string().nullable(),
 });
 export type PaymentUri = z.infer<typeof paymentUriSchema>;
+
+/** A Regtest address as resolved by the address faucet's own (looser) rule. */
+export const faucetAddressParsedSchema = z.object({
+  to_account: z.number().int().nullable(),
+});
+export type FaucetAddressParsed = z.infer<typeof faucetAddressParsedSchema>;
 
 export const chainInfoSchema = z.object({
   chain: z.string(),
@@ -174,6 +184,8 @@ export const statusSchema = z.object({
   endpoints: endpointsSchema.optional(),
   // Optional so a newer dashboard remains compatible with an older server.
   wallet_sync: walletSyncSchema.optional(),
+  // Optional so a dashboard built before #450 still loads; absent on older servers.
+  nu7_activation_height: z.number().int().nonnegative().optional(),
 });
 export type Status = z.infer<typeof statusSchema>;
 
@@ -309,8 +321,8 @@ export type Transaction = z.infer<typeof transactionSchema>;
 export const addressSchema = z.object({
   address: z.string(),
   balance: z.looseObject({
-    balance: z.number().int().nonnegative().default(0),
-    received: z.number().int().nonnegative().default(0),
+    balance: zatoshi.default(0n),
+    received: zatoshi.default(0n),
   }),
 });
 export type AddressInfo = z.infer<typeof addressSchema>;

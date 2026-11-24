@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::router;
+use crate::db::ActivityOutput;
 use crate::mining::MiningMode;
 use crate::network::regtest_network;
 use crate::state::tests::{state_with_local_wallet, state_with_mode};
@@ -36,6 +37,7 @@ fn journal_send(txid: &str) -> Activity {
         status: "confirmed".to_owned(),
         created_at: "2026-10-15 10:00:00".to_owned(),
         last_error: None,
+        outputs: Vec::new(),
     }
 }
 
@@ -47,6 +49,7 @@ fn canonical_activity(direction: &'static str, txid: &str) -> CanonicalActivity 
         from_accounts: vec![1],
         to_accounts: vec![2],
         recipient_addresses: Vec::new(),
+        external_addresses: Vec::new(),
         source_pools: vec!["ironwood".to_owned()],
         destination_pools: vec!["ironwood".to_owned()],
         amount_zatoshi: 100_000_000,
@@ -79,6 +82,18 @@ fn journal_entry(id: &str, status: &str, created_at: &str) -> Activity {
     activity.status = status.to_owned();
     activity.created_at = created_at.to_owned();
     activity
+}
+
+#[test]
+fn unknown_created_at_is_reported_as_no_timestamp() {
+    // Regression for a review comment on #456: a payment carrying the
+    // sentinel the migration backfills for a real creation time that was
+    // never recorded must report no timestamp, not a literal 1970 date.
+    assert_eq!(known_created_at(UNKNOWN_CREATED_AT.to_owned()), None);
+    assert_eq!(
+        known_created_at("2026-01-01 00:00:00".to_owned()),
+        Some("2026-01-01 00:00:00".to_owned())
+    );
 }
 
 fn page(
@@ -159,6 +174,7 @@ fn internal_transfer_is_returned_once_with_both_accounts() {
     assert_eq!(activity[0].to_accounts, [2]);
     assert_eq!(activity[0].to_address, None);
     assert_eq!(activity[0].recipient_addresses, ["uregtest1account2"]);
+    assert!(activity[0].external_addresses.is_empty());
 }
 
 #[test]
@@ -313,6 +329,7 @@ fn canonical_activity_preserves_every_recipient_address() {
         "uregtest1external1".to_owned(),
         "uregtest1external2".to_owned(),
     ];
+    canonical.external_addresses = canonical.recipient_addresses.clone();
 
     let activity = unified_activity(Vec::new(), vec![canonical], 30);
 
@@ -321,10 +338,7 @@ fn canonical_activity_preserves_every_recipient_address() {
         activity[0].recipient_addresses,
         ["uregtest1external1", "uregtest1external2"]
     );
-    assert_eq!(
-        activity[0].to_address.as_deref(),
-        Some("uregtest1external1")
-    );
+    assert_eq!(activity[0].to_address, None);
 }
 
 #[test]
@@ -1198,6 +1212,143 @@ async fn health_returns_unavailable_when_lightwalletd_stalls() {
 }
 
 #[tokio::test]
+async fn external_address_faucet_payments_appear_in_activity_through_reorg() {
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/issues/455:
+    // external-address faucet payments were stored but never surfaced in the
+    // unified activity feed.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let address = "tm-external-activity";
+    let internal = store
+        .claim_faucet(2, "transparent", 1_000, "internal-sibling")
+        .unwrap();
+    let claimed = store
+        .claim_address_faucet(address, 2_500_000, "external-activity-key")
+        .unwrap();
+    store
+        .record_address_prepared(&claimed.id, "external-txid", b"raw", 140)
+        .unwrap();
+    store
+        .mark_address_broadcast(&claimed.id, "external-txid")
+        .unwrap();
+
+    let find = |body: &Value, id: &str| {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing from activity"))
+            .clone()
+    };
+    let relative_order = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .filter(|id| *id == claimed.id || *id == internal.id)
+            .collect()
+    };
+
+    let (status, body) = api_get(&state, "/api/v1/activity?kind=faucet").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = find(&body, &claimed.id);
+    assert_eq!(entry["to_address"], json!(address));
+    assert_eq!(entry["from_account"], Value::Null);
+    assert_eq!(entry["to_account"], Value::Null);
+    assert_eq!(entry["amount_zatoshi"], json!(2_500_000));
+    assert_eq!(entry["status"], json!("broadcast"));
+    assert_eq!(entry["txid"], json!("external-txid"));
+    let first_order = relative_order(&body);
+    assert_eq!(first_order.len(), 2, "both payments must be present");
+
+    // Account filters never match an external payment; it has none.
+    for account in 1..=5 {
+        let (_, body) = api_get(&state, &format!("/api/v1/activity?account={account}")).await;
+        assert!(
+            body.as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["id"] != json!(claimed.id))
+        );
+    }
+
+    store
+        .confirm_address(&claimed.id, "external-txid", "external-block")
+        .unwrap();
+    let (_, filtered) = api_get(&state, "/api/v1/activity?status=confirmed").await;
+    let entry = find(&filtered, &claimed.id);
+    assert_eq!(entry["status"], json!("confirmed"));
+    assert_eq!(entry["block_hash"], json!("external-block"));
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    assert_eq!(relative_order(&body), first_order);
+
+    // A reorg unconfirms it without losing the transaction, same as an
+    // internal payment, then a later block can reconfirm it.
+    store
+        .unconfirm_blocks(&["external-block".to_owned()])
+        .unwrap();
+    let (_, filtered) = api_get(&state, "/api/v1/activity?status=unconfirmed").await;
+    let entry = find(&filtered, &claimed.id);
+    assert_eq!(entry["status"], json!("unconfirmed"));
+    assert_eq!(entry["txid"], json!("external-txid"));
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    assert_eq!(relative_order(&body), first_order);
+
+    store
+        .confirm_reorged_transaction("external-txid", "reorged-block")
+        .unwrap();
+    let (_, body) = api_get(&state, "/api/v1/activity?limit=100").await;
+    let entry = find(&body, &claimed.id);
+    assert_eq!(entry["status"], json!("confirmed"));
+    assert_eq!(entry["block_hash"], json!("reorged-block"));
+    assert_eq!(relative_order(&body), first_order);
+}
+
+async fn activity_ids(state: &AppState, uri: &str) -> Vec<String> {
+    let (status, body) = api_get(state, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn external_faucet_claim_keeps_newer_account_payment_ahead() {
+    // Regression for https://github.com/zcashlabs/thus-spoke-zakura/issues/462:
+    // the external claim must receive its first-seen sequence at admission,
+    // before any activity read can assign one lazily.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let external = store
+        .claim_address_faucet("tm-external-order", 2_500_000, "external-order-key")
+        .unwrap();
+    let account = store
+        .claim_faucet(2, "transparent", 1_000, "account-order-key")
+        .unwrap();
+
+    let expected = vec![account.id.clone(), external.id.clone()];
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+
+    let replay = store
+        .claim_address_faucet("tm-external-order", 2_500_000, "external-order-key")
+        .unwrap();
+    assert_eq!(replay.id, external.id);
+    assert_eq!(
+        activity_ids(&state, "/api/v1/activity?limit=4").await,
+        expected
+    );
+}
+
+#[tokio::test]
 async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() {
     let (state, _dir) = state_with_local_wallet();
     let store = &state.0.store;
@@ -1248,15 +1399,14 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
     store
         .confirm(&confirmed.id, "confirmed-txid", "block")
         .unwrap();
-    store
+    let external = store
         .claim_address_faucet("tm-external", 5, "lookup-external")
         .unwrap();
 
     let (status, listed) = api_get(&state, "/api/v1/activity?limit=10").await;
     assert_eq!(status, StatusCode::OK);
-    let listed: Vec<_> = listed
-        .as_array()
-        .unwrap()
+    let listed_array = listed.as_array().unwrap();
+    let listed: Vec<_> = listed_array
         .iter()
         .map(|row| {
             (
@@ -1265,6 +1415,16 @@ async fn activity_lookup_by_key_returns_every_state_regardless_of_list_limits() 
                 row["txid"].clone(),
             )
         })
+        .collect();
+    // The external claim's relative position depends on wall-clock timing
+    // (first-seen ordering falls back to `created_at`, second-resolution),
+    // so only its presence is asserted; the journaled entries' relative
+    // order does not depend on it.
+    assert_eq!(listed_array.len(), 5);
+    assert!(listed.contains(&(json!(external.id), json!("preparing"), json!(""))));
+    let listed: Vec<_> = listed
+        .into_iter()
+        .filter(|(id, _, _)| *id != json!(external.id))
         .collect();
     assert_eq!(
         listed,
@@ -1516,3 +1676,299 @@ async fn health_and_chain_effects_wait_until_startup_finishes() {
 }
 
 use crate::api::payments::tests::valid_send;
+
+fn journal_batch(txid: &str) -> Activity {
+    let output = |to_account, to_address: Option<&str>, destination_pool: &str| ActivityOutput {
+        to_account,
+        to_address: to_address.map(str::to_owned),
+        destination_pool: destination_pool.to_owned(),
+        amount_zatoshi: 100_000_000,
+        memo: None,
+    };
+    Activity {
+        id: "batch-1".to_owned(),
+        to_account: None,
+        destination_pool: "mixed".to_owned(),
+        amount_zatoshi: 300_000_000,
+        status: "broadcast".to_owned(),
+        block_hash: None,
+        outputs: vec![
+            output(Some(2), None, "ironwood"),
+            output(Some(3), None, "transparent"),
+            output(None, Some("uregtest1external"), "ironwood"),
+        ],
+        ..journal_send(txid)
+    }
+}
+
+#[test]
+fn pending_batch_lists_every_recipient_and_pool() {
+    let activity = unified_activity(vec![journal_batch("")], Vec::new(), 30);
+
+    assert_eq!(activity.len(), 1);
+    let entry = &activity[0];
+    assert_eq!(entry.id, "batch-1");
+    // Accounts 2 and 3 are paid, but so is an external address.
+    assert_eq!(entry.direction, "outgoing");
+    assert_eq!(entry.to_account, None);
+    assert_eq!(entry.to_accounts, [2, 3]);
+    assert_eq!(entry.to_address, None);
+    assert_eq!(entry.recipient_addresses, ["uregtest1external"]);
+    assert_eq!(entry.external_addresses, ["uregtest1external"]);
+    assert_eq!(entry.destination_pool, None);
+    assert_eq!(entry.destination_pools, ["ironwood", "transparent"]);
+    assert_eq!(entry.amount_zatoshi, 300_000_000);
+    let json = serde_json::to_value(entry).unwrap();
+    assert!(!json.to_string().contains("mixed"), "{json}");
+}
+
+#[test]
+fn mined_batch_keeps_every_recipient_and_pool() {
+    let mut canonical = canonical_activity("internal", "batch-tx");
+    canonical.to_account = None;
+    canonical.to_accounts = vec![2, 3];
+    canonical.destination_pools = vec!["ironwood".into(), "transparent".into()];
+    // The wallet lists every recipient address, development accounts included.
+    canonical.recipient_addresses = vec![
+        "tmaccount3".into(),
+        "uregtest1account2".into(),
+        "uregtest1external".into(),
+    ];
+    canonical.external_addresses = vec!["uregtest1external".into()];
+
+    let activity = unified_activity(vec![journal_batch("batch-tx")], vec![canonical], 30);
+
+    assert_eq!(activity.len(), 1);
+    let entry = &activity[0];
+    assert_eq!(entry.id, "batch-1");
+    assert_eq!(entry.direction, "outgoing");
+    assert_eq!(entry.to_accounts, [2, 3]);
+    assert_eq!(
+        entry.recipient_addresses,
+        ["tmaccount3", "uregtest1account2", "uregtest1external"]
+    );
+    assert_eq!(entry.external_addresses, ["uregtest1external"]);
+    assert_eq!(entry.destination_pool, None);
+    assert_eq!(entry.destination_pools, ["ironwood", "transparent"]);
+    assert_eq!(entry.amount_zatoshi, 300_000_000);
+}
+
+fn journal_external_batch(txid: &str) -> Activity {
+    let output = |to_address: &str| ActivityOutput {
+        to_account: None,
+        to_address: Some(to_address.to_owned()),
+        destination_pool: "ironwood".to_owned(),
+        amount_zatoshi: 100_000_000,
+        memo: None,
+    };
+    Activity {
+        id: "batch-external".to_owned(),
+        to_account: None,
+        to_address: None,
+        destination_pool: "ironwood".to_owned(),
+        amount_zatoshi: 200_000_000,
+        status: "broadcast".to_owned(),
+        block_hash: None,
+        outputs: vec![output("uregtest1first"), output("uregtest1second")],
+        ..journal_send(txid)
+    }
+}
+
+fn canonical_external_batch(txid: &str, mined_height: Option<u32>) -> CanonicalActivity {
+    let mut canonical = canonical_activity("outgoing", txid);
+    canonical.to_account = None;
+    canonical.to_accounts = Vec::new();
+    canonical.recipient_addresses = vec!["uregtest1first".into(), "uregtest1second".into()];
+    canonical.external_addresses = canonical.recipient_addresses.clone();
+    canonical.mined_height = mined_height;
+    canonical
+}
+
+fn assert_no_single_external_recipient(entry: &ActivityEntry) {
+    assert_eq!(entry.id, "batch-external");
+    assert_eq!(entry.to_account, None);
+    assert!(entry.to_accounts.is_empty());
+    assert_eq!(entry.to_address, None);
+    assert_eq!(
+        entry.recipient_addresses,
+        ["uregtest1first", "uregtest1second"]
+    );
+    assert_eq!(
+        entry.external_addresses,
+        ["uregtest1first", "uregtest1second"]
+    );
+    assert_eq!(entry.amount_zatoshi, 200_000_000);
+}
+
+#[test]
+fn pending_batch_to_several_addresses_has_no_single_to_address() {
+    let journal_only = unified_activity(vec![journal_external_batch("")], Vec::new(), 30);
+    assert_eq!(journal_only.len(), 1);
+    assert_no_single_external_recipient(&journal_only[0]);
+    assert_eq!(journal_only[0].status, "broadcast");
+
+    let in_mempool = unified_activity(
+        vec![journal_external_batch("batch-tx")],
+        vec![canonical_external_batch("batch-tx", None)],
+        30,
+    );
+    assert_eq!(in_mempool.len(), 1);
+    assert_no_single_external_recipient(&in_mempool[0]);
+    assert_eq!(in_mempool[0].status, "broadcast");
+}
+
+#[test]
+fn confirmed_batch_to_several_addresses_has_no_single_to_address() {
+    let activity = unified_activity(
+        vec![journal_external_batch("batch-tx")],
+        vec![canonical_external_batch("batch-tx", Some(120))],
+        30,
+    );
+
+    assert_eq!(activity.len(), 1);
+    assert_no_single_external_recipient(&activity[0]);
+    assert_eq!(activity[0].status, "confirmed");
+}
+
+/// Account 1 pays its own transparent pool and an external address in one
+/// transaction.
+fn journal_self_and_external_batch(txid: &str) -> Activity {
+    let output = |to_account, to_address: Option<&str>, destination_pool: &str| ActivityOutput {
+        to_account,
+        to_address: to_address.map(str::to_owned),
+        destination_pool: destination_pool.to_owned(),
+        amount_zatoshi: 100_000_000,
+        memo: None,
+    };
+    Activity {
+        id: "batch-self".to_owned(),
+        to_account: None,
+        to_address: None,
+        destination_pool: "mixed".to_owned(),
+        amount_zatoshi: 200_000_000,
+        status: "broadcast".to_owned(),
+        block_hash: None,
+        outputs: vec![
+            output(Some(1), None, "transparent"),
+            output(None, Some("uregtest1external"), "ironwood"),
+        ],
+        ..journal_send(txid)
+    }
+}
+
+fn assert_self_and_external_is_outgoing(entry: &ActivityEntry) {
+    assert_eq!(entry.id, "batch-self");
+    assert_eq!(entry.direction, "outgoing");
+    assert_eq!(entry.from_accounts, [1]);
+    assert_eq!(entry.to_accounts, [1]);
+    assert_eq!(entry.to_address, None);
+    assert_eq!(entry.external_addresses, ["uregtest1external"]);
+    assert_eq!(entry.amount_zatoshi, 200_000_000);
+}
+
+#[test]
+fn pending_batch_paying_the_sender_and_an_address_is_outgoing() {
+    let activity = unified_activity(vec![journal_self_and_external_batch("")], Vec::new(), 30);
+
+    assert_eq!(activity.len(), 1);
+    assert_self_and_external_is_outgoing(&activity[0]);
+    assert_eq!(activity[0].status, "broadcast");
+}
+
+#[test]
+fn confirmed_batch_paying_the_sender_and_an_address_is_outgoing() {
+    let mut canonical = canonical_activity("outgoing", "batch-self-tx");
+    canonical.to_account = Some(1);
+    canonical.to_accounts = vec![1];
+    canonical.recipient_addresses = vec!["tmaccount1".into(), "uregtest1external".into()];
+    canonical.external_addresses = vec!["uregtest1external".into()];
+    canonical.destination_pools = vec!["ironwood".into(), "transparent".into()];
+
+    let activity = unified_activity(
+        vec![journal_self_and_external_batch("batch-self-tx")],
+        vec![canonical],
+        30,
+    );
+
+    assert_eq!(activity.len(), 1);
+    assert_self_and_external_is_outgoing(&activity[0]);
+    assert_eq!(activity[0].status, "confirmed");
+    assert_eq!(
+        activity[0].recipient_addresses,
+        ["tmaccount1", "uregtest1external"]
+    );
+}
+
+#[test]
+fn a_send_between_the_senders_own_pools_is_still_self() {
+    let mut send = journal_send("");
+    send.to_account = Some(1);
+    send.status = "broadcast".to_owned();
+    send.block_hash = None;
+
+    let activity = unified_activity(vec![send], Vec::new(), 30);
+
+    assert_eq!(activity[0].direction, "self");
+}
+
+#[tokio::test]
+async fn account_filters_include_unmined_batch_recipients() {
+    // A batch row has no `to_account`; its recipients live in its outputs,
+    // and nothing canonical names them before the batch is mined.
+    let (state, _dir) = state_with_local_wallet();
+    let store = &state.0.store;
+    let output = |to_account| ActivityOutput {
+        to_account: Some(to_account),
+        to_address: None,
+        destination_pool: "ironwood".to_owned(),
+        amount_zatoshi: 100_000_000,
+        memo: None,
+    };
+    let batch = store
+        .claim_batch_transfer(1, "ironwood", &[output(2), output(3)], "batch-filter")
+        .unwrap();
+    // A newer unrelated payment, so the batch is not the only page entry.
+    store
+        .claim_faucet(4, "ironwood", 1_000, "unrelated-faucet")
+        .unwrap();
+
+    let ids = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let assert_listed_for = |status: &'static str| {
+        let state = state.clone();
+        let id = batch.id.clone();
+        async move {
+            for account in [1, 2, 3] {
+                let (code, body) = api_get(
+                    &state,
+                    &format!("/api/v1/activity?account={account}&status={status}&limit=1"),
+                )
+                .await;
+                assert_eq!(code, StatusCode::OK);
+                assert_eq!(
+                    ids(&body),
+                    [id.as_str()],
+                    "account {account} while {status}"
+                );
+            }
+            let (_, body) = api_get(
+                &state,
+                &format!("/api/v1/activity?account=5&status={status}"),
+            )
+            .await;
+            assert!(
+                !ids(&body).contains(&id),
+                "account 5 is not paid by the batch"
+            );
+        }
+    };
+
+    assert_listed_for("preparing").await;
+    store.fail(&batch.id, "insufficient funds").unwrap();
+    assert_listed_for("failed").await;
+}
