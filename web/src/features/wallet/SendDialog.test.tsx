@@ -1127,6 +1127,85 @@ describe('SendDialog', () => {
     expect(sendCalls(fetchMock)).toHaveLength(0);
   });
 
+  it('keeps Max waiting when a payment arrives while it mines the anchor block', async () => {
+    let quote: typeof QUOTE = PARTIAL_ANCHOR_WAIT;
+    fetchMock.mockImplementation((input, init) => sendImpl(quote)(input, init));
+    const secondJob = { ...ANCHOR_JOB, id: '7c1f3a52-0d4e-4b8a-9f61-2e5d8c3b1a90' };
+    let job = ANCHOR_JOB;
+    const start = vi
+      .spyOn(api, 'startMining')
+      .mockImplementationOnce(() => {
+        // The first block makes 1 ZEC spendable, but a new 0.5 ZEC payment in
+        // it now waits for block 109.
+        quote = {
+          ...QUOTE,
+          available_zatoshi: 150_000_000,
+          max_zatoshi: 149_990_000,
+          pending_zatoshi: 50_000_000,
+          anchor_height: 109,
+        };
+        return Promise.resolve(job);
+      })
+      .mockImplementationOnce(() => {
+        quote = { ...QUOTE, available_zatoshi: 200_000_000, max_zatoshi: 199_990_000 };
+        job = secondJob;
+        return Promise.resolve(secondJob);
+      });
+    vi.spyOn(api, 'miningJob').mockImplementation(() =>
+      Promise.resolve({ job: { ...job, completed_blocks: 1, state: 'completed' } }),
+    );
+    renderWithProviders(
+      <SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />,
+      clientInMode('auto'),
+    );
+
+    await screen.findByText(/becomes spendable at block 108; Max mines that block first/);
+    const max = screen.getByRole('button', { name: 'Max' });
+    await waitFor(() => expect(max).toBeEnabled());
+    await userEvent.click(max);
+
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    // Never the 1.4999 ZEC quoted while the new payment waited for block 109.
+    await waitFor(() => expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1.9999'));
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(sendCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('stops Max after three anchor blocks if funds keep arriving', async () => {
+    fetchMock.mockImplementation(sendImpl(PARTIAL_ANCHOR_WAIT));
+    let mined = 0;
+    const start = vi.spyOn(api, 'startMining').mockImplementation(() => {
+      mined += 1;
+      return Promise.resolve({ ...ANCHOR_JOB, id: `00000000-0000-4000-8000-00000000000${mined}` });
+    });
+    vi.spyOn(api, 'miningJob').mockImplementation(() =>
+      Promise.resolve({
+        job: {
+          ...ANCHOR_JOB,
+          id: `00000000-0000-4000-8000-00000000000${mined}`,
+          completed_blocks: 1,
+          state: 'completed',
+        },
+      }),
+    );
+    renderWithProviders(
+      <SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />,
+      clientInMode('auto'),
+    );
+
+    const max = await screen.findByRole('button', { name: 'Max' });
+    await waitFor(() => expect(max).toBeEnabled());
+    await userEvent.click(max);
+
+    expect(
+      await screen.findByText(
+        /1 ZEC still waits for block 108 after mining 3 blocks; press Max again/,
+      ),
+    ).toBeInTheDocument();
+    expect(start).toHaveBeenCalledTimes(3);
+    expect(screen.getByLabelText('Amount (ZEC)')).toHaveValue('1');
+  });
+
   it('quotes the fee without the destination account', async () => {
     renderWithProviders(<SendDialog open onOpenChange={vi.fn()} accounts={testAccounts} />);
 

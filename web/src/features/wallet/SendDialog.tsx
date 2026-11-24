@@ -33,6 +33,9 @@ import { SelectField } from './fields';
 import { POOL_OPTIONS, accountOptions } from './field-options';
 import { PaymentWarning } from './PaymentStatus';
 
+/** Anchor blocks one Max press mines, matching `MAX_ANCHOR_BLOCKS` in the CLI. */
+const MAX_ANCHOR_BLOCKS = 3;
+
 export function SendDialog({
   open,
   onOpenChange,
@@ -269,17 +272,22 @@ export function SendDialog({
     jobId: string;
     height: number;
     source: string;
+    /** Anchor blocks this Max press has mined, including this job's. */
+    blocks: number;
   } | null>(null);
+  // The last anchor job whose requote has settled. Max stays busy from a job's
+  // completion until then rather than briefly offering a partial amount.
+  const [requotedAnchorJob, setRequotedAnchorJob] = useState<string | null>(null);
   const sourceKey = `${fromAccount}:${sourcePool}:${destinationPool}`;
   const anchorFailed = (height: number, reason: string) =>
     form.setError('amount', {
       message: `Could not mine block ${height.toLocaleString()}: ${reason}`,
     });
-  const mineAnchorBlock = (height: number) => {
+  const mineAnchorBlock = (height: number, blocks = 1, source = sourceKey) => {
     form.clearErrors('amount');
     mineAnchor.mutate(1, {
       onSuccess: (job) => {
-        if (mounted.current) setAnchorMining({ jobId: job.id, height, source: sourceKey });
+        if (mounted.current) setAnchorMining({ jobId: job.id, height, source, blocks });
       },
       onError: (error) => {
         if (mounted.current) anchorFailed(height, errorMessage(error));
@@ -288,7 +296,10 @@ export function SendDialog({
   };
   const anchorJob = anchorMining && miningJob?.id === anchorMining.jobId ? miningJob : undefined;
   const anchorBusy =
-    mineAnchor.isPending || anchorJob?.state === 'mining' || anchorJob?.state === 'syncing';
+    mineAnchor.isPending ||
+    anchorJob?.state === 'mining' ||
+    anchorJob?.state === 'syncing' ||
+    (anchorJob?.state === 'completed' && requotedAnchorJob !== anchorJob.id);
   const refetchQuote = quote.refetch;
   // Each anchor job finishes once; the mining query keeps reporting it after.
   const finishedAnchorJob = useRef<string | null>(null);
@@ -300,19 +311,38 @@ export function SendDialog({
         anchorFailed(anchorMining.height, error ?? 'the mining job failed.');
         return;
       }
+      const jobId = anchorMining.jobId;
       void refetchQuote().then(({ data }) => {
+        if (!mounted.current) return;
+        setRequotedAnchorJob(jobId);
         // A different source chosen while mining must not receive this amount.
-        if (mounted.current && data && data.max_zatoshi > 0n && anchorMining.source === sourceKey)
-          fillAmount(data.max_zatoshi);
+        if (data === undefined || anchorMining.source !== sourceKey) return;
+        // A payment received while the anchor block was mined waits for the
+        // next block. Filling now would leave it out, so Max mines again, up
+        // to the same bound as `ths wallet send --max`.
+        if (data.pending_zatoshi > 0n && data.anchor_height !== null) {
+          if (anchorMining.blocks < MAX_ANCHOR_BLOCKS) {
+            mineAnchorBlock(data.anchor_height, anchorMining.blocks + 1, anchorMining.source);
+          } else {
+            form.setError('amount', {
+              message: `${formatZecAmount(data.pending_zatoshi)} still waits for block ${data.anchor_height.toLocaleString()} after mining ${MAX_ANCHOR_BLOCKS} blocks; press Max again.`,
+            });
+          }
+          return;
+        }
+        if (data.max_zatoshi > 0n) fillAmount(data.max_zatoshi);
       });
     },
   );
+  // The job id is a dependency because a re-mined anchor job can already
+  // report completed on its first render, the same state as the job before it.
+  const anchorJobId = anchorJob?.id;
   const anchorState = anchorJob?.state;
   const anchorError = anchorJob?.error ?? null;
   useEffect(() => {
     if (anchorState === 'completed' || anchorState === 'failed')
       finishAnchorBlock(anchorState, anchorError);
-  }, [anchorState, anchorError]);
+  }, [anchorJobId, anchorState, anchorError]);
 
   const applyPaymentUri = (parsed: PaymentUri) => {
     verifiedAddress.current = {

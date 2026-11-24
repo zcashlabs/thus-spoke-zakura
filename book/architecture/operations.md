@@ -86,7 +86,8 @@ other modes it stops and names the block rather than sending less than the
 account holds. The dashboard's **Send ZEC** dialog shows the waiting amount
 under the amount field and requotes after each wallet scan. In auto mode its
 **Max** button mines the block through `POST /api/v1/mining/jobs` and fills in
-the requoted maximum once the job completes, as `--max` does.
+the requoted maximum once the job completes. If that quote still has funds
+waiting, it mines again, up to the same three blocks as `--max`.
 
 ## HTTP admission and status
 
