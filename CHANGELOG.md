@@ -4,38 +4,149 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## Unreleased
 
-- **Native by default (migration):** The installer now installs the launcher
-  with its native runtime, and `ths`, `ths start`, `ths run`, and `ths doctor`
-  use it without Docker. Add `--docker` to use containers; `start --docker`
-  and `run --docker` pull missing images. Native `start` uses the same fixed
-  default ports as Docker, so a second instance needs `--port-offset`.
-  `THS_INSTALL_RUNTIME=docker` installs images instead of the runtime, and
-  `none` only the launcher. After `ths update` from an older launcher, the
-  first `ths start` installs the native runtime. `--native` is rejected with
-  a migration message, and `run` no longer executes an unrecognized option
-  given before its command.
-  [#452](https://github.com/zcashlabs/thus-spoke-zakura/pull/452)
+## v0.5.0
 
-- **Zakura Common 4:** Upgrade the wallet to Common 4.0.0, backend/SQLite
-  0.1.0-rc9.4, and Zakura 1.7.0; raise the minimum Rust version to 1.97.
-  Recreate the disposable instance after updating to initialize a fresh chain
-  and wallet. Ordinary NU7 payments use a 120-block expiry delta. Newly confirmed
-  Ironwood may need another block before spending; automatic Sends advance once
-  and retry, while other mining modes wait for chain progress.
-  [#436](https://github.com/zcashlabs/thus-spoke-zakura/issues/436)
+This release runs THS natively: the installer installs the launcher with a
+native runtime, and `ths` starts Zakura, lightwalletd, and the dashboard
+without Docker. Docker remains available with `--docker`. It also moves the
+wallet to Zakura Common 4, adds mining modes, a configurable NU7 activation
+height, and several CLI commands, and fixes faucet, explorer, and dashboard
+issues.
 
-- **Docker failures name the failed command:** A Docker invocation that exited
-  nonzero without printing anything produced an empty error message, so a
-  launcher read that goes through Docker could report a blank reason with no
-  indication of which command had failed. The failed command and its exit
-  status are now always included, and Docker's own stderr is still retained
-  when it has something to say.
-  [#370](https://github.com/zcashlabs/thus-spoke-zakura/issues/370)
-- **Wallet quotes from the CLI:** `ths wallet quote --from <N> --source-pool
-  <POOL> --destination-pool <POOL>` prints an account's spendable funds, fee,
-  and maximum send for one pool route without sending, with integer zatoshi
-  fields under `--json`.
-  [#294](https://github.com/zcashlabs/thus-spoke-zakura/issues/294)
+### Action required
+
+- **Native by default (breaking):** `ths`, `ths start`, `ths run`, and
+  `ths doctor` use the native runtime on macOS 12+ or Linux with glibc 2.35+.
+  Add `--docker` to use containers; `start --docker` and `run --docker` pull
+  missing images. `--native` was removed and is rejected with a migration
+  message. Native `start` uses the same fixed default ports as Docker, so a
+  second instance needs `--port-offset`. `THS_INSTALL_RUNTIME=docker` installs
+  images instead of the runtime, and `none` only the launcher.
+  [#452](https://github.com/zcashlabs/thus-spoke-zakura/pull/452),
+  [#472](https://github.com/zcashlabs/thus-spoke-zakura/pull/472)
+- **Updating from v0.4.1:** `ths update` runs the installer built into v0.4.1,
+  which pulls the new release's Docker images before replacing the launcher.
+  Start Docker first, or skip the pull with `THS_SKIP_IMAGE_PULL=1 ths update`.
+  The first `ths start` afterwards installs the native runtime once.
+- **Recreate instances:** The wallet moves to Zakura Common 4.0.0,
+  backend/SQLite 0.1.0-rc9.4, and Zakura 1.7.0. Stop and start each instance
+  after updating to initialize a fresh chain and wallet. Building from source
+  needs Rust 1.97 or newer. Ordinary NU7 payments use a 120-block expiry delta.
+  Newly confirmed Ironwood may need another block before spending; automatic
+  sends advance once and retry, while other mining modes wait for chain
+  progress. [#437](https://github.com/zcashlabs/thus-spoke-zakura/pull/437)
+
+### New
+
+- **Mining modes:** `ths start --block-time <SECONDS>` mines an empty block on
+  an interval, `--mine-on-mempool` mines when a transaction arrives, and
+  `--no-auto-mine` mines only on `ths mine`.
+  [#312](https://github.com/zcashlabs/thus-spoke-zakura/pull/312)
+- **NU7 activation height:** `ths start --nu7-height <HEIGHT>` chooses the
+  block at which NU7 activates, fixed for the life of the instance. The
+  Network page shows it. [#450](https://github.com/zcashlabs/thus-spoke-zakura/pull/450),
+  [#458](https://github.com/zcashlabs/thus-spoke-zakura/pull/458)
+- **CLI:** `ths rpc` calls the instance's Zakura endpoint
+  ([#335](https://github.com/zcashlabs/thus-spoke-zakura/pull/335)),
+  `ths completions bash|zsh|fish` prints shell completions
+  ([#332](https://github.com/zcashlabs/thus-spoke-zakura/pull/332)), and
+  `ths wallet quote` prints an account's spendable funds, fee, and maximum
+  send for one pool route
+  ([#303](https://github.com/zcashlabs/thus-spoke-zakura/pull/303)).
+- **Wallet sends:** `ths wallet send --to-address` pays an external address
+  from a development account
+  ([#420](https://github.com/zcashlabs/thus-spoke-zakura/pull/420)), and a
+  multi-recipient ZIP-321 request is paid in one transaction
+  ([#432](https://github.com/zcashlabs/thus-spoke-zakura/pull/432)).
+- **Activity:** Recent activity supports filtering and cursor pagination, and
+  `ths wallet activity` takes `--account`, `--kind`, `--status`, `--before`,
+  and `--watch`. Faucet payments to external addresses appear in Recent
+  activity. [#425](https://github.com/zcashlabs/thus-spoke-zakura/pull/425),
+  [#442](https://github.com/zcashlabs/thus-spoke-zakura/pull/442),
+  [#463](https://github.com/zcashlabs/thus-spoke-zakura/pull/463),
+  [#456](https://github.com/zcashlabs/thus-spoke-zakura/pull/456)
+- **Explorer and wallet detail:** The Explorer shows pending transactions and
+  identifies local accounts, the Wallet shows account details and a
+  transaction's outputs, memos, and change, and the server decodes raw
+  transactions before broadcast.
+  [#393](https://github.com/zcashlabs/thus-spoke-zakura/pull/393),
+  [#394](https://github.com/zcashlabs/thus-spoke-zakura/pull/394),
+  [#430](https://github.com/zcashlabs/thus-spoke-zakura/pull/430),
+  [#431](https://github.com/zcashlabs/thus-spoke-zakura/pull/431)
+- **JavaScript testing package:** `packages/thsjs` starts an isolated,
+  manually mined instance from Node test suites. It is built from this
+  repository and is not yet published to npm.
+  [#460](https://github.com/zcashlabs/thus-spoke-zakura/pull/460)
+- **Website:** A static public site at <https://ths.zypherpunk.xyz/>.
+  [#386](https://github.com/zcashlabs/thus-spoke-zakura/pull/386)
+
+### Fixes
+
+- **Faucet:** In mempool mining mode, a second faucet payment no longer waits
+  in `preparing` for a treasury maturity block
+  ([#441](https://github.com/zcashlabs/thus-spoke-zakura/pull/441)), and
+  external faucet payments are ordered when they are claimed
+  ([#464](https://github.com/zcashlabs/thus-spoke-zakura/pull/464)).
+- **Wallet:** A transparent send over budget reports the real spendable
+  balance instead of `have 0 ZEC`
+  ([#451](https://github.com/zcashlabs/thus-spoke-zakura/pull/451)), the
+  transparent Max quote stays within the send input cap
+  ([#414](https://github.com/zcashlabs/thus-spoke-zakura/pull/414),
+  [#458](https://github.com/zcashlabs/thus-spoke-zakura/pull/458)), and payment
+  admission returns the stored creation time
+  ([#341](https://github.com/zcashlabs/thus-spoke-zakura/pull/341)).
+- **CLI:** `ths run` keeps launcher output off the child's stdout
+  ([#407](https://github.com/zcashlabs/thus-spoke-zakura/pull/407)) and the
+  app reports the dashboard port a `ths run` caller reached
+  ([#415](https://github.com/zcashlabs/thus-spoke-zakura/pull/415)). Local API
+  requests bypass proxy settings
+  ([#426](https://github.com/zcashlabs/thus-spoke-zakura/pull/426)),
+  zero-second `run` and `wait` timeouts are rejected
+  ([#417](https://github.com/zcashlabs/thus-spoke-zakura/pull/417)), and a
+  Docker failure without output names the failed command
+  ([#399](https://github.com/zcashlabs/thus-spoke-zakura/pull/399)).
+- **Installer:** A directory or a symbolic link to one is rejected as the
+  launcher destination.
+  [#454](https://github.com/zcashlabs/thus-spoke-zakura/pull/454)
+- **Explorer:** Incomplete transparent inputs are flagged, pagination is kept
+  in the URL, and an empty search is rejected before calling Zakura.
+  [#362](https://github.com/zcashlabs/thus-spoke-zakura/pull/362),
+  [#328](https://github.com/zcashlabs/thus-spoke-zakura/pull/328),
+  [#433](https://github.com/zcashlabs/thus-spoke-zakura/pull/433)
+- **Dashboard:** Controls are accessible and report failures, payment URI
+  parsing keeps draft edits, activity ages refresh while idle, the address
+  faucet dialog accepts its own address shapes, the health label follows
+  lightwalletd reachability, and the favicon adapts to the theme.
+  [#435](https://github.com/zcashlabs/thus-spoke-zakura/pull/435),
+  [#339](https://github.com/zcashlabs/thus-spoke-zakura/pull/339),
+  [#340](https://github.com/zcashlabs/thus-spoke-zakura/pull/340),
+  [#444](https://github.com/zcashlabs/thus-spoke-zakura/pull/444),
+  [#398](https://github.com/zcashlabs/thus-spoke-zakura/pull/398),
+  [#445](https://github.com/zcashlabs/thus-spoke-zakura/pull/445)
+- **Server logs:** `ths logs app` prints plain text without color codes.
+  [#346](https://github.com/zcashlabs/thus-spoke-zakura/pull/346)
+
+### Project updates
+
+- **Performance:** The explorer block list fetches compact blocks, and RPC
+  results are no longer cloned before deserialization.
+  [#459](https://github.com/zcashlabs/thus-spoke-zakura/pull/459),
+  [#330](https://github.com/zcashlabs/thus-spoke-zakura/pull/330)
+- **Development:** The web dev proxy defaults to dashboard port 32805, CI runs
+  once per pull-request commit, and the book distinguishes payment acceptance
+  from completion.
+  [#404](https://github.com/zcashlabs/thus-spoke-zakura/pull/404),
+  [#453](https://github.com/zcashlabs/thus-spoke-zakura/pull/453),
+  [#372](https://github.com/zcashlabs/thus-spoke-zakura/pull/372)
+
+### Credits and comparison
+
+- **Contributors:** Thank you to @Abidoyesimze, @AkshatGada, @amiabix,
+  @Anuoluwapo25, @malik672, @MayurK-cmd, @megabyte0x, @naz3eh,
+  @nikhilkumar1612, @Not-Sarthak, @raizo07, @robertocarlous, @Shiva953,
+  @tanctl, @USCMig, @Ved-viraj, @vkpatva, @Webghost01-NG, @yash251,
+  @Yonkoo11, and @zeeshan8281.
+- **Full changelog:** [Compare v0.4.1 with v0.5.0](https://github.com/zcashlabs/thus-spoke-zakura/compare/v0.4.1...v0.5.0).
 
 ## v0.4.1
 
