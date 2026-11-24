@@ -80,11 +80,11 @@
             "@id": "https://ths.zypherpunk.xyz/#software",
             "name": "Thus Spoke Zakura",
             "alternateName": "ths",
-            "description": "An open-source launcher that runs a disposable Zcash Regtest network on your machine: a Zakura node, lightwalletd, and a wallet-backed dashboard in Docker, with five development accounts.",
+            "description": "An open-source launcher that runs a disposable Zcash Regtest network on your machine: a Zakura node, lightwalletd, and a wallet-backed dashboard as native processes or in Docker, with five development accounts.",
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "Blockchain development environment",
             "operatingSystem": "macOS, Linux",
-            "softwareRequirements": "Docker",
+            "softwareRequirements": "macOS 12 or later, or Linux with glibc 2.35 or later",
             "url": "https://ths.zypherpunk.xyz/",
             "downloadUrl": "https://github.com/zcashlabs/thus-spoke-zakura/releases/latest",
             "installUrl": "https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh",
@@ -168,12 +168,12 @@
           <h1 id="hero-title">A private Zcash network, <span>on your machine.</span></h1>
           <p class="hero-lead">Run a complete Zcash Regtest network locally. Fund accounts, send transactions, mine blocks, and inspect every step.</p>
           <div class="install" role="group" aria-label="Install command">
-            <code id="install-command">curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh</code>
+            <code id="install-command">curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh</code>
             <button class="copy-button" type="button" data-copy-install>Copy</button>
           </div>
           <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
           <div class="hero-actions">
-            <p>Linux and macOS · Docker required · then run <code>ths</code></p>
+            <p>Linux and macOS · no Docker needed · then run <code>ths</code></p>
             <a class="primary-link" href="#how">See it in action <span aria-hidden="true">↗</span></a>
           </div>
         </div>

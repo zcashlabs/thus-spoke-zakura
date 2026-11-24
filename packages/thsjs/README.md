@@ -2,7 +2,7 @@
 
 `@zcashlabs/thsjs` exports `withTestTHS` and `createTestTHSClient` for Node 22.23.4 and newer (tested on Node 22 and 24). They start an isolated, manually mined Regtest instance with the existing [Thus Spoke Zakura](https://github.com/zcashlabs/thus-spoke-zakura) launcher. This is a standalone Node-only package owned by THS. It has no runtime dependencies and does not depend on ZcashJS. Applications install it as a development dependency; their wallet SDK remains separate.
 
-Install or build a THS launcher and matching native runtime before using this API. The launcher must support `start --native --json` and the status, mine, reorg and rollback APIs. See the [native runtime instructions](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/book/development.md#native-runtime-no-docker) for installation and source builds. Native THS supports macOS and Linux on Intel and ARM. This API uses your installation and never downloads executables. Docker startup is not supported by this helper.
+Install or build a THS launcher and matching native runtime before using this API. The launcher must start the native runtime by default with `start --json` and the status, mine, reorg and rollback APIs. See the [native runtime instructions](https://github.com/zcashlabs/thus-spoke-zakura/blob/main/book/development.md#native-runtime-no-docker) for installation and source builds. Native THS supports macOS and Linux on Intel and ARM. This API uses your installation and never downloads executables. Docker startup is not supported by this helper.
 
 ## Install from this checkout
 

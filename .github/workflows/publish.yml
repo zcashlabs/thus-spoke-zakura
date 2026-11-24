@@ -46,6 +46,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           THS_INSTALL_DIR: ${{ runner.temp }}/bin
+          # Native is the default; this step checks the public Docker images.
+          THS_INSTALL_RUNTIME: docker
         shell: bash
         run: |
           export THS_VERSION="$RELEASE_TAG"
@@ -65,10 +67,9 @@ jobs:
         env:
           THS_VERSION: ${{ github.event.release.tag_name }}
           THS_INSTALL_DIR: ${{ runner.temp }}/native-bin
-          THS_INSTALL_RUNTIME: native
         shell: bash
         run: |
           installer="https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/$THS_VERSION/install.sh"
           curl --proto '=https' --tlsv1.2 -fsSL "$installer" | sh
-          "$THS_INSTALL_DIR/ths" doctor --native
-          "$THS_INSTALL_DIR/ths" --name public-smoke run --native --timeout 300 -- true
+          "$THS_INSTALL_DIR/ths" doctor
+          "$THS_INSTALL_DIR/ths" --name public-smoke run --timeout 300 -- true

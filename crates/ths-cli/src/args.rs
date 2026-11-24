@@ -29,12 +29,18 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Start an environment in the foreground; interrupting deletes it.
     Start {
-        #[arg(long)]
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
         native: bool,
-        #[arg(long, requires = "native")]
+        /// Start Docker containers instead of the native runtime.
+        #[arg(long)]
+        docker: bool,
+        /// Native runtime bundle to use instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
         /// Native startup and settlement deadline in seconds (default 180).
-        #[arg(long, requires = "native", value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, conflicts_with = "docker", value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
         #[arg(long)]
         no_open: bool,
@@ -72,15 +78,24 @@ pub(crate) enum Command {
     },
     /// Run a command in a fresh, settled environment and delete it afterward.
     Run {
-        #[arg(long)]
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
         native: bool,
-        #[arg(long, requires = "native")]
+        /// Start Docker containers instead of the native runtime.
+        #[arg(long)]
+        docker: bool,
+        /// Native runtime bundle to use instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
         /// Maximum time for startup and settlement, in seconds.
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
         /// Command and arguments to execute.
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        // Without `allow_hyphen_values`, an unknown option before the command is
+        // rejected instead of being executed as the program. Arguments after the
+        // program name, and anything after `--`, still pass through unchanged.
+        #[arg(required = true, trailing_var_arg = true)]
         command: Vec<OsString>,
     },
     /// Build the runtime images from the current source.
@@ -200,9 +215,15 @@ pub(crate) enum Command {
     List,
     /// Check local runtime and configuration prerequisites.
     Doctor {
-        #[arg(long)]
+        /// Removed when native became the default; kept hidden only so it is
+        /// rejected with a migration message.
+        #[arg(long, hide = true)]
         native: bool,
-        #[arg(long, requires = "native")]
+        /// Check Docker instead of the native runtime.
+        #[arg(long)]
+        docker: bool,
+        /// Native runtime bundle to check instead of the installed one.
+        #[arg(long, conflicts_with = "docker")]
         runtime_dir: Option<PathBuf>,
     },
     /// Print a shell completion script.

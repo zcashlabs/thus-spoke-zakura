@@ -173,6 +173,7 @@ fn reports_the_conflicting_loopback_port() {
         message.contains(&port.to_string()),
         "error should name port {port}, got {message}"
     );
+    assert!(message.contains("--port-offset"), "{message}");
 }
 
 #[test]

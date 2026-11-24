@@ -26,19 +26,49 @@ struct Pins {
     lightwalletd_commit: String,
 }
 
-pub(super) fn resolve(runtime_dir: Option<&Path>) -> Result<NativeBundle> {
-    let directory = match runtime_dir
+/// With `install_missing`, a release launcher whose own bundle was never installed installs it.
+/// Launchers released before native support update through an installer that only pulls Docker
+/// images, so their users reach a new launcher without its bundle.
+pub(super) fn resolve(runtime_dir: Option<&Path>, install_missing: bool) -> Result<NativeBundle> {
+    if let Some(directory) = runtime_dir
         .map(Path::to_path_buf)
         .or_else(|| env::var_os("THS_RUNTIME_DIR").map(PathBuf::from))
     {
-        Some(directory) => directory,
-        None => env::current_exe()?
-            .canonicalize()?
-            .parent()
-            .context("installed launcher has no parent directory")?
-            .join(".ths-runtime")
-            .join(env!("CARGO_PKG_VERSION")),
-    };
+        return validate(&directory);
+    }
+    let directory = env::current_exe()?
+        .canonicalize()?
+        .parent()
+        .context("installed launcher has no parent directory")?
+        .join(".ths-runtime")
+        .join(env!("CARGO_PKG_VERSION"));
+    // An existing directory is never replaced here: validation reports what is wrong with it.
+    if !directory.exists() {
+        if !cfg!(feature = "release-distribution") {
+            bail!(
+                "the native runtime for ths {} is not installed at {}; a source build needs --runtime-dir or THS_RUNTIME_DIR, or add --docker to use Docker",
+                env!("CARGO_PKG_VERSION"),
+                directory.display()
+            );
+        }
+        if !install_missing {
+            bail!(
+                "the native runtime for ths {} is not installed at {}; `ths start` installs it, or add --docker to use Docker",
+                env!("CARGO_PKG_VERSION"),
+                directory.display()
+            );
+        }
+        eprintln!(
+            "Installing the native runtime for ths {} (one time)…",
+            env!("CARGO_PKG_VERSION")
+        );
+        crate::updater::install_native_runtime().context(
+            format!(
+                "installing the native runtime for ths {} failed; the installer output above names the cause. Retry, or add --docker to use Docker",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )?;
+    }
     validate(&directory)
 }
 
@@ -53,12 +83,14 @@ fn target() -> Result<&'static str> {
 }
 
 fn validate(directory: &Path) -> Result<NativeBundle> {
-    let manifest: Manifest = serde_json::from_slice(
-        &fs::read(directory.join("manifest.json")).with_context(|| format!(
-            "native runtime is missing at {}; reinstall with THS_INSTALL_RUNTIME=native or pass --runtime-dir",
-            directory.display()
-        ))?,
-    ).context("invalid native runtime manifest")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(directory.join("manifest.json")).with_context(|| {
+            format!(
+                "native runtime is missing at {}; rerun the install command or pass --runtime-dir",
+                directory.display()
+            )
+        })?)
+        .context("invalid native runtime manifest")?;
     let pins: Pins = serde_json::from_str(include_str!("../../../../../native/runtime.json"))?;
     ensure!(
         manifest.format == 1,

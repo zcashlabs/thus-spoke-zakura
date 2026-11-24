@@ -35,6 +35,37 @@ impl Runtime {
     }
 }
 
+/// Bounds a pull only to end a hung download; a slow first download must still finish.
+const IMAGE_PULL_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// Pulls this launcher's images that are not present, so `--docker` works after an install that
+/// fetched only the native runtime. Callers check that Docker is reachable first and hold the
+/// instance, so `stop` and Ctrl+C cancel a pull. Docker's progress goes to stderr because
+/// `--json start` and the `run` child own stdout. Source builds never pull: a published image
+/// with their version tag would not contain local changes.
+pub(super) fn pull_missing_images(docker: &LifecycleDocker<'_>) -> Result<()> {
+    if !cfg!(feature = "release-distribution") {
+        return Ok(());
+    }
+    let pull = docker.scoped(Deadline::after(IMAGE_PULL_CAP), IMAGE_PULL_CAP);
+    for image in [app_image(), lightwalletd_image(), ZAKURA_IMAGE.to_owned()] {
+        // Any other inspection failure is left to `startup_require_image`'s diagnosis.
+        if docker
+            .execute(
+                &["image", "inspect", "--format", "{{.Id}}", &image],
+                OutputMode::Capture,
+            )
+            .is_ok()
+        {
+            continue;
+        }
+        eprintln!("Pulling {image}…");
+        pull.execute(&["pull", &image], OutputMode::InheritStderr)
+            .map_err(|error| anyhow!("{error}").context(format!("pulling {image}")))?;
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_image(image: &str) -> Result<()> {
     if docker_output(["image", "inspect", image]).is_err() {
         println!("Pulling {image}…");

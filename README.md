@@ -12,26 +12,24 @@ lightwalletd, and a wallet-backed dashboard as native processes or in Docker.
 ## Install and start
 
 On macOS 12+ or Linux with glibc 2.35+ (Intel or ARM), install the launcher and
-its matching native runtime. This mode needs no Docker or Python:
+its matching native runtime, then start an instance. This needs no Docker or
+Python:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=native sh
-ths start --native
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | sh
+ths start
 ```
 
-Native installation requires a release containing native runtime archives.
-For a source checkout, see [native builds](book/development.md). To use Docker,
-start Docker, then install and run `ths`:
+To run the same services in Docker instead, start Docker and add `--docker`:
 
 ```console
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/zcashlabs/thus-spoke-zakura/main/install.sh | THS_INSTALL_RUNTIME=docker sh
-ths
+ths start --docker
 ```
 
-Fresh installations default to Docker unless native mode is selected. Once
-native bundles are installed, ordinary `ths update` installs the matching new
-bundle too. Select native startup with `--native`; later commands find the
-instance automatically. Startup without `--native` still uses Docker.
+`--docker` pulls any missing images first. To install only for Docker, set
+`THS_INSTALL_RUNTIME=docker` on the installer. Later commands such as
+`ths wallet` or `ths stop` find each instance's backend automatically. For a
+source checkout, see [native builds](book/development.md).
 
 Startup may take a few minutes while the chain and wallet are prepared.
 When `ths` prints `default is ready`, it opens the dashboard. Keep that terminal

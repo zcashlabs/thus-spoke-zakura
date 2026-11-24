@@ -52,3 +52,23 @@ fn endpoints_env_rejects_json() {
         assert!(error.contains("endpoints --env"), "{error}");
     }
 }
+
+#[test]
+fn removed_native_flag_explains_the_migration() {
+    for args in [
+        &["ths", "start", "--native"][..],
+        &["ths", "doctor", "--native"],
+        &["ths", "run", "--native", "--", "true"],
+        &["ths", "run", "--docker", "--native", "--", "true"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let error = run(cli).unwrap_err().to_string();
+        assert!(error.contains("--native was removed"), "{args:?}: {error}");
+    }
+    let child_flag = Cli::try_parse_from(["ths", "run", "node", "--native"]).unwrap();
+    assert!(matches!(
+        child_flag.command,
+        Some(Command::Run { native: false, command, .. })
+            if command == [OsString::from("node"), OsString::from("--native")]
+    ));
+}

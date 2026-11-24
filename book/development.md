@@ -1,9 +1,11 @@
 # Appendix B: Develop from source
 
 The teaching chapters use an installed `ths` launcher. For changes to this
-repository, the crucial rule is that `ths` starts **Docker images**. Editing
-Rust or React source does not change a running container or an already-built
-image.
+repository, the crucial rule is that `ths start --docker` starts **Docker
+images**, and `ths start` starts a **native bundle**. Editing Rust or React
+source changes neither a running instance nor an already-built image or
+bundle. A source launcher has no installed bundle, so this appendix uses
+Docker first; [Native runtime](#native-runtime-no-docker) builds a bundle.
 
 ![The web and server sources build the app image, the lightwalletd Dockerfile builds the lightwalletd image, and Zakura is pinned and pulled. ths start refuses to run until all three exist. Editing source changes neither a running container nor an existing image.](images/source-to-runtime.svg)
 
@@ -22,15 +24,15 @@ the repository root of the [recorded main checkout](README.md):
 ```console
 npm ci --prefix web
 cargo run -p thus-spoke-zakura -- build --dev
-cargo run -p thus-spoke-zakura -- start
+cargo run -p thus-spoke-zakura -- start --docker
 ```
 
 The Cargo package is `thus-spoke-zakura`; `ths` is its binary name. The
 first command installs the dashboard's locked dependencies. The second
 builds runtime images, keeping workspace Rust code unoptimized for faster
 development builds. The last launches the default instance in the
-foreground. With no subcommand, the source launcher starts the same
-environment.
+foreground. Without `--docker`, the source launcher looks for a native bundle
+and stops with an error, because it never installs one.
 
 Keep the launch terminal open. Ctrl+C triggers instance-scoped cleanup,
 as explained in [Chapter 1](getting-started.md). After changing
@@ -41,8 +43,9 @@ cargo run -p thus-spoke-zakura -- build --dev
 ```
 
 Then start a new instance. `build` without `--dev` produces
-release-optimized images. `start` requires the matching images already
-present; it does not fetch or rebuild them.
+release-optimized images. A source launcher's `start --docker` requires the
+matching images already present; it does not fetch or rebuild them. Release
+launchers pull missing images, which would not contain your changes.
 
 ## Run a test against a disposable instance
 
@@ -50,7 +53,7 @@ Once the matching runtime images exist, the source launcher can run a child
 command against a settled, fresh environment:
 
 ```console
-cargo run -p thus-spoke-zakura -- run --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
+cargo run -p thus-spoke-zakura -- run --docker --timeout 180 -- sh -c 'curl -fsS "$THS_API_URL/api/v1/accounts"'
 ```
 
 The child receives the instance's `THS_*` endpoint variables, and the launcher
@@ -62,7 +65,8 @@ use `cargo run -p thus-spoke-zakura -- --name alice wait --timeout 180`.
 
 ## Native runtime (no Docker)
 
-The Rust launcher runs Zakura, lightwalletd, and ths-server as local processes.
+The Rust launcher runs Zakura, lightwalletd, and ths-server as local processes
+by default.
 The installed native bundle contains compatible pinned binaries and the built
 web dashboard; Python and Docker are not runtime dependencies. Native support
 covers macOS and Linux on x86_64 and aarch64. macOS uses its system
@@ -77,9 +81,9 @@ before creating an instance. Rebuild ths-server and the dashboard when changing
 those sources, then recreate the bundle.
 
 ```console
-cargo run -p thus-spoke-zakura -- doctor --native --runtime-dir /path/to/ths-runtime
-cargo run -p thus-spoke-zakura -- --name native start --native --runtime-dir /path/to/ths-runtime --no-open
-cargo run -p thus-spoke-zakura -- run --native --runtime-dir /path/to/ths-runtime --timeout 180 -- node tests/native_smoke.mjs
+cargo run -p thus-spoke-zakura -- doctor --runtime-dir /path/to/ths-runtime
+cargo run -p thus-spoke-zakura -- --name native start --runtime-dir /path/to/ths-runtime --no-open
+cargo run -p thus-spoke-zakura -- run --runtime-dir /path/to/ths-runtime --timeout 180 -- node tests/native_smoke.mjs
 cargo test -p thus-spoke-zakura --test native_runtime
 ```
 
@@ -89,8 +93,9 @@ real services and checks funding, mining, a shielded payment, idempotent replay,
 reorganization and rollback. It uses the runner's default automatic mining.
 
 Each start reserves a fresh name under the usual launcher ownership lock and
-creates private instance state. Ports are reserved on loopback during
-initialization. The node uses the legacy TCP peer stack, disabling its separate
+creates private instance state. `start` reserves the fixed default ports, or
+those `--port-offset` shifts, and fails if one is taken; `run` reserves free
+ones. Ports stay reserved on loopback during initialization. The node uses the legacy TCP peer stack, disabling its separate
 QUIC listener; lightwalletd metrics bind to `127.0.0.1:0`. Services receive a
 minimal environment, with no inherited proxies, backend addresses or config.
 The native initializer emits loopback addresses directly from typed port/path

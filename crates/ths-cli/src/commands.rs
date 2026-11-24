@@ -14,6 +14,18 @@ use crate::{
 use wallet::send;
 
 pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if matches!(
+        cli.command,
+        Some(
+            Command::Start { native: true, .. }
+                | Command::Run { native: true, .. }
+                | Command::Doctor { native: true, .. }
+        )
+    ) {
+        anyhow::bail!(
+            "--native was removed: the native runtime is now the default; add --docker to use Docker"
+        );
+    }
     if cli.json && matches!(cli.command, Some(Command::Run { .. })) {
         anyhow::bail!("--json cannot be used with `run`; the child command owns stdout");
     }
@@ -41,6 +53,7 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let runtime = Runtime::discover()?;
     match cli.command.unwrap_or(Command::Start {
         native: false,
+        docker: false,
         runtime_dir: None,
         timeout: None,
         no_open: false,
@@ -51,7 +64,8 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         nu7_height: DEFAULT_NU7_ACTIVATION_HEIGHT,
     }) {
         Command::Start {
-            native,
+            native: _,
+            docker,
             runtime_dir,
             timeout,
             no_open,
@@ -62,47 +76,50 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             nu7_height,
         } => {
             let mining = MiningConfig::from_flags(block_time, mine_on_mempool, no_auto_mine);
-            if native {
+            if docker {
                 return runtime
-                    .native_start(
-                        &name,
-                        runtime_dir.as_deref(),
-                        Duration::from_secs(timeout.unwrap_or(180)),
-                        no_open,
-                        cli.json,
-                        port_offset,
-                        mining,
-                        nu7_height,
-                        None,
-                    )
-                    .map(ExitCode::from);
+                    .start(&name, no_open, cli.json, port_offset, mining, nu7_height)
+                    .map(|()| ExitCode::SUCCESS);
             }
-            runtime.start(&name, no_open, cli.json, port_offset, mining, nu7_height)
+            return runtime
+                .native_start(
+                    &name,
+                    runtime_dir.as_deref(),
+                    Duration::from_secs(timeout.unwrap_or(180)),
+                    no_open,
+                    cli.json,
+                    Some(port_offset),
+                    mining,
+                    nu7_height,
+                    None,
+                )
+                .map(ExitCode::from);
         }
         Command::Wait { timeout } => runtime.wait(&name, Duration::from_secs(timeout), cli.json),
         Command::Run {
+            native: _,
             timeout,
             command,
-            native,
+            docker,
             runtime_dir,
         } => {
-            if native {
+            if docker {
                 return runtime
-                    .native_start(
-                        &name,
-                        runtime_dir.as_deref(),
-                        Duration::from_secs(timeout),
-                        true,
-                        false,
-                        0,
-                        MiningConfig::default(),
-                        DEFAULT_NU7_ACTIVATION_HEIGHT,
-                        Some(&command),
-                    )
+                    .run(&name, Duration::from_secs(timeout), &command)
                     .map(ExitCode::from);
             }
             return runtime
-                .run(&name, Duration::from_secs(timeout), &command)
+                .native_start(
+                    &name,
+                    runtime_dir.as_deref(),
+                    Duration::from_secs(timeout),
+                    true,
+                    false,
+                    None,
+                    MiningConfig::default(),
+                    DEFAULT_NU7_ACTIVATION_HEIGHT,
+                    Some(&command),
+                )
                 .map(ExitCode::from);
         }
         Command::Build { dev } => runtime.build(dev),
@@ -234,13 +251,14 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Reset { force } => runtime.reset(&name, force),
         Command::List => runtime.list(cli.json),
         Command::Doctor {
-            native,
+            native: _,
+            docker,
             runtime_dir,
         } => {
-            if native {
-                runtime.native_doctor(runtime_dir.as_deref(), cli.json)
-            } else {
+            if docker {
                 runtime.doctor(cli.json)
+            } else {
+                runtime.native_doctor(runtime_dir.as_deref(), cli.json)
             }
         }
         Command::Completions { .. } => {
@@ -271,11 +289,7 @@ fn write_completions(shell: CompletionShell, buf: &mut dyn Write) {
 }
 
 fn should_check_for_updates(cli: &Cli) -> bool {
-    !cli.json
-        && matches!(
-            cli.command,
-            None | Some(Command::Start { native: false, .. })
-        )
+    !cli.json && matches!(cli.command, None | Some(Command::Start { .. }))
 }
 
 #[cfg(test)]

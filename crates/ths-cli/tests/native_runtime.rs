@@ -4,11 +4,19 @@ use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU16, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
+/// `start` uses fixed ports, so every native start in this binary gets its own offset.
+fn port_offset() -> String {
+    static NEXT: AtomicU16 = AtomicU16::new(1000);
+    NEXT.fetch_add(10, Ordering::Relaxed).to_string()
+}
 fn fixture_binary() -> &'static Path {
     static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
     FIXTURE.get_or_init(|| {
@@ -74,6 +82,8 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.temp.path().join("config-home"))
             .env("HTTP_PROXY", "http://foreign.invalid:1")
             .env("ZEBRA_CONFIG", "foreign")
+            // Release builds check for updates on human-readable `start`.
+            .env("THS_RELEASE_API_URL", "http://127.0.0.1:9/")
             .arg("--name")
             .arg(name);
         cmd
@@ -81,7 +91,6 @@ impl Fixture {
     fn run(&self, name: &str, args: &[&str]) -> std::process::Output {
         self.command(name)
             .arg("run")
-            .arg("--native")
             .arg("--runtime-dir")
             .arg(self.temp.path())
             .args(["--timeout", "8", "--"])
@@ -92,7 +101,7 @@ impl Fixture {
     fn state(&self, name: &str) -> PathBuf {
         let output = self
             .command(name)
-            .args(["--json", "doctor", "--native", "--runtime-dir"])
+            .args(["--json", "doctor", "--runtime-dir"])
             .arg(self.temp.path())
             .output()
             .unwrap();
@@ -109,7 +118,8 @@ impl Fixture {
             .args([
                 "--json",
                 "start",
-                "--native",
+                "--port-offset",
+                &port_offset(),
                 "--no-open",
                 "--timeout",
                 "8",
@@ -238,7 +248,7 @@ fn native_stop_does_not_report_an_unfinished_run_as_success() {
     let marker = fixture.temp.path().join("child-started");
     let mut child = fixture
         .command("stopped-run")
-        .args(["run", "--native", "--runtime-dir"])
+        .args(["run", "--runtime-dir"])
         .arg(fixture.temp.path())
         .args([
             "--timeout",
@@ -282,7 +292,7 @@ fn native_run_forwards_each_shutdown_signal_to_the_application() {
         let fixture = Fixture::new("normal");
         let marker = fixture.temp.path().join("signal");
         let mut child = fixture.command("signal-run")
-            .args(["run", "--native", "--runtime-dir"])
+            .args(["run", "--runtime-dir"])
             .arg(fixture.temp.path())
             .args(["--timeout", "8", "--", "/bin/sh", "-c",
                 "trap 'echo INT > \"$1\"; exit 0' INT; trap 'echo TERM > \"$1\"; exit 0' TERM; trap 'echo HUP > \"$1\"; exit 0' HUP; echo ready > \"$1\"; while :; do sleep 0.1; done", "sh"])
@@ -482,7 +492,8 @@ fn native_browser_failure_keeps_environment_running_until_stop() {
             .args([
                 "--json",
                 "start",
-                "--native",
+                "--port-offset",
+                &port_offset(),
                 "--timeout",
                 "8",
                 "--runtime-dir",
@@ -559,7 +570,8 @@ fn native_initialization_and_slow_http_have_absolute_deadlines() {
             .command("deadline")
             .args([
                 "start",
-                "--native",
+                "--port-offset",
+                &port_offset(),
                 "--no-open",
                 "--timeout",
                 "1",
@@ -584,7 +596,8 @@ fn native_never_adopts_a_foreign_listener() {
         .command("foreign-listener")
         .args([
             "start",
-            "--native",
+            "--port-offset",
+            &port_offset(),
             "--no-open",
             "--timeout",
             "1",
@@ -634,7 +647,8 @@ fn native_interrupted_startup_removes_state_and_allows_the_same_name() {
             .command("cancel-start")
             .args([
                 "start",
-                "--native",
+                "--port-offset",
+                &port_offset(),
                 "--no-open",
                 "--timeout",
                 "30",
@@ -749,7 +763,7 @@ fn native_stale_state_never_signals_persisted_pids_or_deletes_data() {
     assert!(!fixture.run("stale", &["/usr/bin/true"]).status.success());
     let output = fixture
         .command("stale")
-        .args(["--json", "doctor", "--native", "--runtime-dir"])
+        .args(["--json", "doctor", "--runtime-dir"])
         .arg(fixture.temp.path())
         .output()
         .unwrap();
@@ -814,7 +828,7 @@ fn docker_start_and_run_cannot_delete_abandoned_native_state() {
         );
         let output = fixture
             .command("abandoned")
-            .args(["--json", "doctor", "--native", "--runtime-dir"])
+            .args(["--json", "doctor", "--runtime-dir"])
             .arg(fixture.temp.path())
             .output()
             .unwrap();
@@ -831,9 +845,9 @@ fn docker_start_and_run_cannot_delete_abandoned_native_state() {
             format!("{}:/usr/bin:/bin", fixture.temp.path().display()),
         );
         if mode == "start" {
-            command.args(["--json", "start", "--no-open"]);
+            command.args(["--json", "start", "--docker", "--no-open"]);
         } else {
-            command.args(["run", "--", "/usr/bin/true"]);
+            command.args(["run", "--docker", "--", "/usr/bin/true"]);
         }
         let output = command.output().unwrap();
         assert!(!output.status.success());

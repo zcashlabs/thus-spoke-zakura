@@ -18,7 +18,7 @@ struct NativeRecord {
 
 impl Runtime {
     pub(crate) fn native_doctor(&self, directory: Option<&Path>, json: bool) -> Result<()> {
-        let bundle = bundle::resolve(directory)?;
+        let bundle = bundle::resolve(directory, false)?;
         process::prerequisites()?;
         if json {
             println!(
@@ -39,18 +39,16 @@ impl Runtime {
         timeout: Duration,
         no_open: bool,
         json: bool,
-        offset: u16,
+        port_offset: Option<u16>,
         mining: MiningConfig,
         nu7_activation_height: u32,
         application: Option<&[OsString]>,
     ) -> Result<u8> {
-        let bundle = bundle::resolve(directory)?;
+        // Like Docker, `start` uses the fixed default ports and `run` takes free ones, so
+        // concurrent runs never collide.
+        let requested_ports = port_offset.map(host_ports).transpose()?.unwrap_or_default();
+        let bundle = bundle::resolve(directory, true)?;
         process::prerequisites()?;
-        let requested_ports = if offset == 0 {
-            HostPorts::default()
-        } else {
-            host_ports(offset)?
-        };
         let deadline = Instant::now()
             .checked_add(timeout)
             .context("startup timeout too large")?;
@@ -58,6 +56,18 @@ impl Runtime {
         let context = LifecycleContext::new_for_start(LifecyclePolicy::default(), true);
         let mut ownership = self.own_start(name, &shutdown, &context)?;
         ownership.remove_lifecycle_when_dropped();
+        // A taken fixed port is a usage error, not a failure worth retaining state for: check
+        // before creating any, so the same name can be retried with `--port-offset`.
+        if port_offset.is_some() {
+            for port in [
+                requested_ports.dashboard,
+                requested_ports.rpc,
+                requested_ports.lightwalletd,
+                requested_ports.p2p,
+            ] {
+                require_free_loopback(port)?;
+            }
+        }
         let state = self.instance_dir(name);
         fs::create_dir(&state).with_context(|| {
             format!("environment {name} already exists; choose a fresh name or stop it first")
@@ -84,10 +94,15 @@ impl Runtime {
                 requested_ports.lightwalletd,
                 requested_ports.p2p,
             ] {
-                reservations.push(Some(
-                    TcpListener::bind(("127.0.0.1", port))
-                        .with_context(|| format!("reserving loopback port {port}"))?,
-                ));
+                reservations.push(Some(TcpListener::bind(("127.0.0.1", port)).map_err(
+                    |error| {
+                        if error.kind() == std::io::ErrorKind::AddrInUse {
+                            port_in_use(port)
+                        } else {
+                            anyhow!(error).context(format!("reserving loopback port {port}"))
+                        }
+                    },
+                )?));
             }
             let ports: Vec<u16> = reservations
                 .iter()
@@ -252,7 +267,7 @@ impl Runtime {
                     println!("{}", serde_json::to_string(&endpoints)?);
                     std::io::stdout().flush()?;
                 } else {
-                    eprintln!("{name} ready\n{}", endpoint_lines(&endpoints));
+                    eprintln!("{name} is ready 🌸\n{}", endpoint_lines(&endpoints));
                 }
                 if !no_open
                     && let Err(error) = open_url_with(&endpoints.dashboard, &shutdown, &context)

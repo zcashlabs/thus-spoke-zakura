@@ -97,20 +97,20 @@ installer verifies checksums and archive paths, installs the immutable runtime
 beside `ths`, and replaces the launcher last. A modified same-version runtime
 is never overwritten; publish a new patch version for corrections.
 
-Native assets must be attached to the draft before publishing. Until the first
-such release, explicit native installation fails. The installer's default
-`auto` mode selects native when `.ths-runtime` exists beside the installed
-launcher; otherwise it selects Docker. Native users therefore receive the
-matching bundle on ordinary updates, while Docker installations keep pulling
-images. A missing or invalid native bundle fails the update without replacing
-the launcher. Use `THS_INSTALL_RUNTIME=native` for a first native installation,
-then `start --native` or `run --native` to select the new backend. Explicit
-`docker` and `none` installation modes override detection without deleting
+Native assets must be attached to the draft before publishing. `ths start` and
+`ths run` use the native runtime unless `--docker` is given, and the installer
+installs it by default for every release after 0.4.1; a release without it
+fails installation and updates without replacing the launcher. Releases up to
+0.4.1 predate native support, so installing or rolling back to one pulls its
+Docker images by default. `THS_INSTALL_RUNTIME=docker` pulls images instead of
+installing the runtime, and `none` installs only the launcher; neither deletes
 older native bundles.
 
-Tell users upgrading from older launchers to rerun the public installer for
-native support. Those launchers embed their previous installer and cannot
-fetch a native bundle through their existing `ths update` implementation.
+Launchers released before native support update with the installer compiled
+into them, which installs only the new launcher and pulls images. The new
+release launcher's first native `start` or `run` notices that its own bundle is
+missing and installs it with its embedded installer, so `ths update` needs no
+manual step.
 
 ## Image contract
 

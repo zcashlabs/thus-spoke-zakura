@@ -197,7 +197,7 @@ export function createTestTHSClient(options: TestTHSOptions = {}): TestTHSClient
       return run.starting;
     }
     const instance = `thsjs-${randomUUID().replaceAll('-', '')}`;
-    const args = ['--name', instance, '--json', 'start', '--native',
+    const args = ['--name', instance, '--json', 'start',
       ...(runtimeDir === undefined ? [] : ['--runtime-dir', runtimeDir]),
       '--timeout', String(Math.ceil(timeoutMs / 1000)), '--no-open', '--no-auto-mine'];
     // Let the supervisor finish cleanup even if the test runner's process group is killed.

@@ -5,8 +5,7 @@ fn run_and_wait_require_positive_timeouts() {
     for args in [
         &["ths", "run", "--timeout", "0", "--", "true"][..],
         &["ths", "wait", "--timeout", "0"],
-        &["ths", "run", "--native", "--timeout", "0", "--", "true"],
-        &["ths", "start", "--native", "--timeout", "0"],
+        &["ths", "start", "--timeout", "0"],
     ] {
         let error = match Cli::try_parse_from(args) {
             Ok(_) => panic!("accepted {args:?}"),
@@ -764,36 +763,72 @@ fn wallet_tx_takes_a_transaction_id_and_an_optional_account() {
 }
 
 #[test]
-fn native_runtime_flags_and_positive_timeout() {
+fn native_flags_conflict_with_docker() {
     for args in [
         vec![
             "ths",
             "start",
-            "--native",
             "--runtime-dir",
             "/bundle",
             "--timeout",
             "180",
         ],
+        vec!["ths", "run", "--runtime-dir", "/bundle", "--", "true"],
+        vec!["ths", "doctor", "--runtime-dir", "/bundle"],
+        vec!["ths", "start", "--docker", "--port-offset", "10"],
+        vec!["ths", "run", "--docker", "--", "true"],
+        vec!["ths", "doctor", "--docker"],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+    }
+    for args in [
+        vec!["ths", "start", "--docker", "--runtime-dir", "/bundle"],
+        vec!["ths", "start", "--docker", "--timeout", "1"],
         vec![
             "ths",
             "run",
-            "--native",
+            "--docker",
             "--runtime-dir",
             "/bundle",
             "--",
             "true",
         ],
-        vec!["ths", "doctor", "--native", "--runtime-dir", "/bundle"],
-    ] {
-        assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
-    }
-    for args in [
-        vec!["ths", "start", "--runtime-dir", "/bundle"],
-        vec!["ths", "start", "--timeout", "1"],
-        vec!["ths", "start", "--native", "--timeout", "0"],
-        vec!["ths", "run", "--native", "--timeout", "0", "--", "true"],
+        vec!["ths", "doctor", "--docker", "--runtime-dir", "/bundle"],
     ] {
         assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn run_rejects_unknown_options_before_the_command() {
+    for flag in ["--frobnicate", "-x"] {
+        let error = match Cli::try_parse_from(["ths", "run", flag, "--", "true"]) {
+            Ok(_) => panic!("accepted {flag} as the command"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+    for (args, expected) in [
+        (&["ths", "run", "--", "--weird"][..], &["--weird"][..]),
+        (&["ths", "run", "node", "--help"], &["node", "--help"]),
+        (&["ths", "run", "--", "node", "--json"], &["node", "--json"]),
+        (
+            &["ths", "run", "--", "git", "log", "--", "file"],
+            &["git", "log", "--", "file"],
+        ),
+        (
+            &["ths", "run", "x", "--timeout", "5"],
+            &["x", "--timeout", "5"],
+        ),
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(
+            matches!(
+                cli.command,
+                Some(Command::Run { timeout: 120, ref command, .. })
+                    if command.iter().map(|arg| arg.to_str().unwrap()).eq(expected.iter().copied())
+            ),
+            "{args:?}"
+        );
     }
 }

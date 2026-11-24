@@ -70,9 +70,18 @@ fn embedded_installer_receives_exact_version_and_destination() {
         &version,
         Path::new("/tmp/ths"),
         false,
+        None,
     )
     .unwrap();
-    assert!(run_installer("exit 7\n", &version, Path::new("/tmp/ths"), false).is_err());
+    run_installer(
+        "test \"$THS_INSTALL_RUNTIME\" = native\n",
+        &version,
+        Path::new("/tmp/ths"),
+        false,
+        Some("native"),
+    )
+    .unwrap();
+    assert!(run_installer("exit 7\n", &version, Path::new("/tmp/ths"), false, None).is_err());
 }
 
 #[test]
@@ -119,6 +128,7 @@ fn update_and_uninstall_act_on_the_launcher_behind_a_symlink() {
         &Version::new(0, 2, 1),
         resolved.parent().unwrap(),
         false,
+        None,
     )
     .unwrap();
     assert_eq!(std::fs::read_to_string(&launcher).unwrap(), "0.2.1");

@@ -94,8 +94,8 @@ jobs:
         shell: bash
         run: |
           launcher="$PWD/target/${{ matrix.target }}/release/ths"
-          "$launcher" doctor --native --runtime-dir "$PWD/native-dist/ths-runtime"
-          "$launcher" --name release-smoke run --native --runtime-dir "$PWD/native-dist/ths-runtime" \
+          "$launcher" doctor --runtime-dir "$PWD/native-dist/ths-runtime"
+          "$launcher" --name release-smoke run --runtime-dir "$PWD/native-dist/ths-runtime" \
             --timeout 300 -- node tests/native_smoke.mjs
       - name: Verify Linux launcher on Ubuntu 22.04 and Debian 12
         if: contains(matrix.target, 'unknown-linux-gnu')
