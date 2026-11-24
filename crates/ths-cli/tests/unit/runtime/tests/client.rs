@@ -1048,6 +1048,8 @@ fn quote_prints_the_route_and_server_fields_without_submitting_a_payment() {
             "available_zatoshi": 500_000_000,
             "fee_zatoshi": 15_000,
             "max_zatoshi": 499_985_000,
+            "pending_zatoshi": 0,
+            "anchor_height": null,
         })
     );
     let requests: Vec<_> = requests.try_iter().collect();
@@ -1268,6 +1270,222 @@ fn max_send_quotes_then_submits_the_quoted_amount() {
     let submitted: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
     assert_eq!(submitted["amount_zatoshi"], 490);
     assert_eq!(json_stdout(&out)["amount_zatoshi"], 490);
+}
+
+const AUTO_STATUS: &str = r#"{"wallet_sync":{"state":"ready","error":null},"mining_mode":"auto"}"#;
+const ANCHOR_JOB: &str = r#"{"id":"anchor-job","requested_blocks":1,"completed_blocks":1,"state":"completed","error":null,"progress_uncertain":false,"hashes":["anchor"]}"#;
+
+#[test]
+fn max_send_mines_the_anchor_block_in_auto_mode_and_sends_everything() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":4,"to_account":5,"to_address":null,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":149990000,"txid":"max-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let (url, requests) = serve(vec![
+        // 0.5 ZEC is spendable now; the 1 ZEC note mined at the tip is not.
+        (
+            "200 OK",
+            r#"{"available_zatoshi":50000000,"fee_zatoshi":10000,"max_zatoshi":49990000,"pending_zatoshi":100000000,"anchor_height":108}"#,
+        ),
+        ("200 OK", AUTO_STATUS),
+        ("201 Created", ANCHOR_JOB),
+        (
+            "200 OK",
+            r#"{"available_zatoshi":150000000,"fee_zatoshi":10000,"max_zatoshi":149990000,"pending_zatoshi":0,"anchor_height":null}"#,
+        ),
+        ("200 OK", confirmed),
+    ]);
+    let mut out = Vec::new();
+
+    runtime
+        .wallet_send_with(
+            &alpha,
+            &url,
+            &reqwest::blocking::Client::new(),
+            &mut out,
+            Instant::now() + Duration::from_secs(5),
+            4,
+            5,
+            "ironwood",
+            "ironwood",
+            TransferAmount::Max,
+            None,
+            true,
+        )
+        .unwrap();
+
+    let requests: Vec<_> = requests.try_iter().collect();
+    let lines: Vec<_> = requests.iter().map(|request| request.0.as_str()).collect();
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    assert!(lines[0].starts_with("POST /api/v1/send/quote "));
+    assert!(lines[1].starts_with("GET /api/v1/status "));
+    assert!(lines[2].starts_with("POST /api/v1/mining/jobs "));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].1).unwrap()["blocks"],
+        1
+    );
+    assert!(lines[3].starts_with("POST /api/v1/send/quote "));
+    assert!(lines[4].starts_with("POST /api/v1/send "));
+    let submitted: serde_json::Value = serde_json::from_str(&requests[4].1).unwrap();
+    assert_eq!(submitted["amount_zatoshi"], 149_990_000);
+    assert_eq!(json_stdout(&out)["amount_zatoshi"], 149_990_000);
+}
+
+const ANCHOR_WAIT_QUOTE: &str = r#"{"available_zatoshi":0,"fee_zatoshi":10000,"max_zatoshi":0,"pending_zatoshi":10000000,"anchor_height":108}"#;
+
+/// Responses for `blocks` anchor rounds in which the quote still waits.
+fn anchor_rounds(blocks: usize) -> Vec<(&'static str, &'static str)> {
+    (0..blocks)
+        .flat_map(|_| {
+            [
+                ("200 OK", ANCHOR_WAIT_QUOTE),
+                ("200 OK", AUTO_STATUS),
+                ("201 Created", ANCHOR_JOB),
+            ]
+        })
+        .collect()
+}
+
+fn send_max_from_one(
+    runtime: &Runtime,
+    alpha: &InstanceName,
+    url: &str,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    runtime.wallet_send_with(
+        alpha,
+        url,
+        &reqwest::blocking::Client::new(),
+        out,
+        Instant::now() + Duration::from_secs(5),
+        1,
+        3,
+        "ironwood",
+        "ironwood",
+        TransferAmount::Max,
+        None,
+        true,
+    )
+}
+
+#[test]
+fn max_send_quotes_again_after_its_last_anchor_block() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let confirmed = r#"{"id":"max-send","kind":"send","from_account":1,"to_account":3,"to_address":null,"source_pool":"ironwood","destination_pool":"ironwood","amount_zatoshi":9990000,"txid":"max-txid","block_hash":"block","status":"confirmed","last_error":null}"#;
+    let mut responses = anchor_rounds(3);
+    responses.push((
+        "200 OK",
+        r#"{"available_zatoshi":10000000,"fee_zatoshi":10000,"max_zatoshi":9990000,"pending_zatoshi":0,"anchor_height":null}"#,
+    ));
+    responses.push(("200 OK", confirmed));
+    let (url, requests) = serve(responses);
+    let mut out = Vec::new();
+
+    send_max_from_one(&runtime, &alpha, &url, &mut out).unwrap();
+
+    let lines: Vec<_> = requests.try_iter().map(|request| request.0).collect();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("POST /api/v1/mining/jobs "))
+            .count(),
+        3,
+        "{lines:?}"
+    );
+    assert!(
+        lines[9].starts_with("POST /api/v1/send/quote "),
+        "{lines:?}"
+    );
+    assert!(lines[10].starts_with("POST /api/v1/send "), "{lines:?}");
+    assert_eq!(json_stdout(&out)["amount_zatoshi"], 9_990_000);
+}
+
+#[test]
+fn max_send_stops_without_a_fourth_anchor_block_or_a_short_send() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    let mut responses = anchor_rounds(3);
+    responses.push(("200 OK", ANCHOR_WAIT_QUOTE));
+    responses.push(("200 OK", AUTO_STATUS));
+    let (url, requests) = serve(responses);
+
+    let error = send_max_from_one(&runtime, &alpha, &url, &mut Vec::new()).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("after mining 3 blocks"),
+        "{error:#}"
+    );
+    let lines: Vec<_> = requests.try_iter().map(|request| request.0).collect();
+    assert_eq!(lines.len(), 11, "{lines:?}");
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("POST /api/v1/send "))
+    );
+}
+
+#[test]
+fn max_send_explains_an_anchor_wait_instead_of_sending_short_outside_auto_mode() {
+    for mode in ["manual", "interval", "mempool"] {
+        let (_dir, runtime, alpha) = payment_runtime();
+        let (url, requests) = serve(vec![
+            (
+                "200 OK",
+                r#"{"available_zatoshi":0,"fee_zatoshi":10000,"max_zatoshi":0,"pending_zatoshi":10000000,"anchor_height":108}"#
+                    .to_owned(),
+            ),
+            (
+                "200 OK",
+                format!(r#"{{"wallet_sync":{{"state":"ready","error":null}},"mining_mode":"{mode}"}}"#),
+            ),
+        ]);
+
+        let error = runtime
+            .wallet_send_with(
+                &alpha,
+                &url,
+                &reqwest::blocking::Client::new(),
+                Vec::new(),
+                Instant::now() + Duration::from_secs(5),
+                1,
+                3,
+                "ironwood",
+                "ironwood",
+                TransferAmount::Max,
+                None,
+                true,
+            )
+            .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("0.1 ZEC"), "{mode}: {message}");
+        assert!(message.contains("block 108"), "{mode}: {message}");
+        assert!(message.contains("ths mine 1"), "{mode}: {message}");
+        // No mining job and no send: the command must not pay a partial Max.
+        assert_eq!(requests.try_iter().count(), 2, "{mode}");
+    }
+}
+
+#[test]
+fn quote_reports_funds_waiting_for_the_anchor_block() {
+    let (_dir, runtime, alpha) = payment_runtime();
+    const WAITING: &str = r#"{"available_zatoshi":50000000,"fee_zatoshi":10000,"max_zatoshi":49990000,"pending_zatoshi":100000000,"anchor_height":108}"#;
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", WAITING)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", false);
+    result.unwrap();
+    assert!(
+        out.contains(
+            "  Maximum send  0.4999 ZEC\n\
+             1 ZEC received in the latest block becomes spendable at block 108; \
+             `--max` includes it once that block is mined.\n"
+        ),
+        "{out}"
+    );
+
+    let (url, _requests) = serve(vec![("200 OK", READY), ("200 OK", WAITING)]);
+    let (result, out) = quote_with(&runtime, &alpha, &url, "ironwood", "ironwood", true);
+    result.unwrap();
+    let output = json_stdout(out.as_bytes());
+    assert_eq!(output["pending_zatoshi"], 100_000_000);
+    assert_eq!(output["anchor_height"], 108);
 }
 
 #[test]

@@ -24,6 +24,11 @@ pub struct SendQuote {
     pub available_zatoshi: u64,
     pub fee_zatoshi: u64,
     pub max_zatoshi: u64,
+    /// Ironwood value mined at the tip. It is not in `max_zatoshi` because it
+    /// has no anchor yet, and becomes spendable once the chain reaches
+    /// `anchor_height`.
+    pub pending_zatoshi: u64,
+    pub anchor_height: Option<u64>,
 }
 
 fn format_zec(zatoshi: u64) -> String {
@@ -91,6 +96,25 @@ impl RealWallet {
     where
         DbT: ProposalDb,
     {
+        let Some((pending, anchor_height)) = Self::tip_receipts(db, account_id, only_txid)? else {
+            return Ok(None);
+        };
+        let potential = available
+            .checked_add(pending)
+            .context("available Ironwood balance exceeds the maximum money supply")?;
+        Ok((potential >= required).then_some(anchor_height))
+    }
+
+    /// Ironwood value mined at the tip, which the current anchor cannot spend,
+    /// and the height that makes it spendable. `None` when there is none.
+    fn tip_receipts<DbT>(
+        db: &DbT,
+        account_id: <DbT as InputSource>::AccountId,
+        only_txid: Option<&str>,
+    ) -> Result<Option<(u64, u64)>>
+    where
+        DbT: ProposalDb,
+    {
         let Some((target, anchor)) =
             db.get_target_and_anchor_heights(ConfirmationsPolicy::MIN.trusted())?
         else {
@@ -121,10 +145,7 @@ impl RealWallet {
                 total.checked_add(note.note().value().inner())
             })
             .context("pending Ironwood balance exceeds the maximum money supply")?;
-        let potential = available
-            .checked_add(pending)
-            .context("available Ironwood balance exceeds the maximum money supply")?;
-        Ok((pending > 0 && potential >= required).then_some(u64::from(u32::from(tip)) + 1))
+        Ok((pending > 0).then_some((pending, u64::from(u32::from(tip)) + 1)))
     }
 
     pub(crate) async fn startup_anchor_height(&self, funding_txid: &str) -> Result<Option<u64>> {
@@ -514,7 +535,7 @@ impl RealWallet {
         DbT: ProposalDb,
     {
         if source_pool == "ironwood" {
-            match propose_send_max_transfer::<_, _, _, Infallible>(
+            let quote = match propose_send_max_transfer::<_, _, _, Infallible>(
                 db,
                 params,
                 account_id,
@@ -546,25 +567,41 @@ impl RealWallet {
                             .and_then(|payment| payment.amount())
                             .unwrap_or(Zatoshis::ZERO),
                     );
-                    Ok(SendQuote {
+                    SendQuote {
                         available_zatoshi: max + fee,
                         fee_zatoshi: fee,
                         max_zatoshi: max,
-                    })
+                        pending_zatoshi: 0,
+                        anchor_height: None,
+                    }
                 }
                 Err(WalletError::InsufficientFunds {
                     available,
                     required,
-                }) => Ok(SendQuote {
+                }) => SendQuote {
                     available_zatoshi: u64::from(available),
                     fee_zatoshi: u64::from(required).saturating_sub(1),
                     max_zatoshi: 0,
-                }),
+                    pending_zatoshi: 0,
+                    anchor_height: None,
+                },
                 Err(WalletError::ScanRequired) => {
-                    Err(anyhow::Error::new(PaymentError::ScanRequired))
+                    return Err(anyhow::Error::new(PaymentError::ScanRequired));
                 }
-                Err(error) => Err(anyhow::anyhow!("proposing max spend: {error}")),
-            }
+                Err(error) => return Err(anyhow::anyhow!("proposing max spend: {error}")),
+            };
+            // The send-max proposal only sees notes the current anchor can
+            // spend. Report a tip receipt separately, so a caller can wait for
+            // or mine the anchor block and quote again instead of sending short.
+            let (pending_zatoshi, anchor_height) = match Self::tip_receipts(db, account_id, None)? {
+                Some((pending, height)) => (pending, Some(height)),
+                None => (0, None),
+            };
+            Ok(SendQuote {
+                pending_zatoshi,
+                anchor_height,
+                ..quote
+            })
         } else if source_pool == "transparent" {
             let spendable = Self::transparent_spendable(db, account_id)?;
             // There is no send-max proposal for transparent inputs, but the
@@ -587,6 +624,8 @@ impl RealWallet {
                             available_zatoshi: spendable,
                             fee_zatoshi: fee,
                             max_zatoshi: spendable.saturating_sub(fee),
+                            pending_zatoshi: 0,
+                            anchor_height: None,
                         })
                     }
                     _ => Err(error),

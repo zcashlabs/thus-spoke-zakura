@@ -346,6 +346,8 @@ describe('WalletPage', () => {
         available_zatoshi: 500_000_000n,
         fee_zatoshi: 10_000n,
         max_zatoshi: 499_990_000n,
+        pending_zatoshi: 0n,
+        anchor_height: null,
       });
       const name =
         kind === 'send'
@@ -799,6 +801,8 @@ describe('WalletPage', () => {
       available_zatoshi: 500_000_000n,
       fee_zatoshi: 10_000n,
       max_zatoshi: 499_990_000n,
+      pending_zatoshi: 0n,
+      anchor_height: null,
     });
     let resolve!: (activity: Activity) => void;
     let payment: Activity | null = null;
@@ -874,6 +878,8 @@ describe('WalletPage', () => {
         available_zatoshi: 500_000_000n,
         fee_zatoshi: 10_000n,
         max_zatoshi: 499_990_000n,
+        pending_zatoshi: 0n,
+        anchor_height: null,
       });
       let reject!: (error: Error) => void;
       const response = new Promise<Activity>((_resolve, fail) => {

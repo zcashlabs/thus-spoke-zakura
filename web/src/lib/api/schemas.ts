@@ -327,11 +327,17 @@ export const addressSchema = z.object({
 });
 export type AddressInfo = z.infer<typeof addressSchema>;
 
-/** Fee and maximum spendable amount from a server-side dry-run proposal. */
+/**
+ * Fee and maximum spendable amount from a server-side dry-run proposal.
+ * `pending_zatoshi` is Ironwood mined at the tip, left out of `max_zatoshi`
+ * until the chain reaches `anchor_height`.
+ */
 export const sendQuoteSchema = z.object({
   available_zatoshi: zatoshi,
   fee_zatoshi: zatoshi,
   max_zatoshi: zatoshi,
+  pending_zatoshi: zatoshi.default(0n),
+  anchor_height: z.number().int().nullable().default(null),
 });
 export type SendQuote = z.infer<typeof sendQuoteSchema>;
 export interface SendQuoteInput {

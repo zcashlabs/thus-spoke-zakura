@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useEffectEvent, useRef, useState, type FormEvent } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { ArrowRight } from 'lucide-react';
 import { Dialog } from '@/components/ui/Dialog';
@@ -9,9 +9,14 @@ import { useToast } from '@/components/ui/toast-context';
 import { api, errorMessage, type Account, type PaymentUri } from '@/lib/api';
 import { shortHash } from '@/lib/format';
 import { formatZec, formatZecAmount } from '@/lib/money';
-import { useParsePaymentUri, type PaymentResult, type SendVariables } from '@/hooks/mutations';
+import {
+  useParsePaymentUri,
+  useStartMining,
+  type PaymentResult,
+  type SendVariables,
+} from '@/hooks/mutations';
 import { paymentName, type PaymentIdentity } from '@/hooks/payment-identity';
-import { isTerminalPayment, usePaymentStatus } from '@/hooks/queries';
+import { isTerminalPayment, useMiningJob, usePaymentStatus, useStatus } from '@/hooks/queries';
 import { useWalletPayments } from './payment-context';
 import { useSendQuote } from '@/hooks/queries';
 import {
@@ -27,6 +32,9 @@ import { cn } from '@/lib/cn';
 import { SelectField } from './fields';
 import { POOL_OPTIONS, accountOptions } from './field-options';
 import { PaymentWarning } from './PaymentStatus';
+
+/** Anchor blocks one Max press mines, matching `MAX_ANCHOR_BLOCKS` in the CLI. */
+const MAX_ANCHOR_BLOCKS = 3;
 
 export function SendDialog({
   open,
@@ -235,6 +243,107 @@ export function SendDialog({
     destination_pool: destinationPool,
   });
 
+  // An older server sends no `mining_mode`; its `auto_mine` still identifies
+  // auto mode. Until the status loads, nothing is mined on the user's behalf.
+  const status = useStatus().data;
+  const autoMines =
+    status !== undefined &&
+    (status.mining_mode ?? (status.auto_mine ? 'auto' : 'manual')) === 'auto';
+  const anchorWait =
+    quote.data !== undefined && quote.data.pending_zatoshi > 0n && quote.data.anchor_height !== null
+      ? { pending: quote.data.pending_zatoshi, height: quote.data.anchor_height }
+      : undefined;
+
+  const fillAmount = (max: bigint) => {
+    form.setValue('amount', formatZec(max, { grouping: false }), {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    form.clearErrors('amount');
+  };
+
+  // Auto mode only mines for payments, so nothing else produces the block that
+  // anchors a tip receipt. Max mines it through the mining-job API, as
+  // `ths wallet send --max` does, and fills the amount once the job reports
+  // the wallet synced and a fresh quote includes those funds.
+  const mineAnchor = useStartMining();
+  const miningJob = useMiningJob().data?.job;
+  const [anchorMining, setAnchorMining] = useState<{
+    jobId: string;
+    height: number;
+    source: string;
+    /** Anchor blocks this Max press has mined, including this job's. */
+    blocks: number;
+  } | null>(null);
+  // The last anchor job whose requote has settled. Max stays busy from a job's
+  // completion until then rather than briefly offering a partial amount.
+  const [requotedAnchorJob, setRequotedAnchorJob] = useState<string | null>(null);
+  const sourceKey = `${fromAccount}:${sourcePool}:${destinationPool}`;
+  const anchorFailed = (height: number, reason: string) =>
+    form.setError('amount', {
+      message: `Could not mine block ${height.toLocaleString()}: ${reason}`,
+    });
+  const mineAnchorBlock = (height: number, blocks = 1, source = sourceKey) => {
+    form.clearErrors('amount');
+    mineAnchor.mutate(1, {
+      onSuccess: (job) => {
+        if (mounted.current) setAnchorMining({ jobId: job.id, height, source, blocks });
+      },
+      onError: (error) => {
+        if (mounted.current) anchorFailed(height, errorMessage(error));
+      },
+    });
+  };
+  const anchorJob = anchorMining && miningJob?.id === anchorMining.jobId ? miningJob : undefined;
+  const anchorBusy =
+    mineAnchor.isPending ||
+    anchorJob?.state === 'mining' ||
+    anchorJob?.state === 'syncing' ||
+    (anchorJob?.state === 'completed' && requotedAnchorJob !== anchorJob.id);
+  const refetchQuote = quote.refetch;
+  // Each anchor job finishes once; the mining query keeps reporting it after.
+  const finishedAnchorJob = useRef<string | null>(null);
+  const finishAnchorBlock = useEffectEvent(
+    (state: 'completed' | 'failed', error: string | null) => {
+      if (anchorMining === null || finishedAnchorJob.current === anchorMining.jobId) return;
+      finishedAnchorJob.current = anchorMining.jobId;
+      if (state === 'failed') {
+        anchorFailed(anchorMining.height, error ?? 'the mining job failed.');
+        return;
+      }
+      const jobId = anchorMining.jobId;
+      void refetchQuote().then(({ data }) => {
+        if (!mounted.current) return;
+        setRequotedAnchorJob(jobId);
+        // A different source chosen while mining must not receive this amount.
+        if (data === undefined || anchorMining.source !== sourceKey) return;
+        // A payment received while the anchor block was mined waits for the
+        // next block. Filling now would leave it out, so Max mines again, up
+        // to the same bound as `ths wallet send --max`.
+        if (data.pending_zatoshi > 0n && data.anchor_height !== null) {
+          if (anchorMining.blocks < MAX_ANCHOR_BLOCKS) {
+            mineAnchorBlock(data.anchor_height, anchorMining.blocks + 1, anchorMining.source);
+          } else {
+            form.setError('amount', {
+              message: `${formatZecAmount(data.pending_zatoshi)} still waits for block ${data.anchor_height.toLocaleString()} after mining ${MAX_ANCHOR_BLOCKS} blocks; press Max again.`,
+            });
+          }
+          return;
+        }
+        if (data.max_zatoshi > 0n) fillAmount(data.max_zatoshi);
+      });
+    },
+  );
+  // The job id is a dependency because a re-mined anchor job can already
+  // report completed on its first render, the same state as the job before it.
+  const anchorJobId = anchorJob?.id;
+  const anchorState = anchorJob?.state;
+  const anchorError = anchorJob?.error ?? null;
+  useEffect(() => {
+    if (anchorState === 'completed' || anchorState === 'failed')
+      finishAnchorBlock(anchorState, anchorError);
+  }, [anchorJobId, anchorState, anchorError]);
+
   const applyPaymentUri = (parsed: PaymentUri) => {
     verifiedAddress.current = {
       address: parsed.address,
@@ -370,9 +479,24 @@ export function SendDialog({
         releaseSendSubmission();
         return;
       }
-      if (quoted !== undefined && values.amount > quoted.max_zatoshi) {
+      const waiting =
+        quoted !== undefined && quoted.pending_zatoshi > 0n && quoted.anchor_height !== null
+          ? { pending: quoted.pending_zatoshi, height: quoted.anchor_height }
+          : undefined;
+      // In auto mode a payment mines its own anchor block, so funds waiting for
+      // it can be spent. The server's proposal settles the exact fee.
+      const anchorCovers =
+        autoMines &&
+        waiting !== undefined &&
+        quoted !== undefined &&
+        values.amount <= quoted.max_zatoshi + waiting.pending;
+      if (quoted !== undefined && values.amount > quoted.max_zatoshi && !anchorCovers) {
         form.setError('amount', {
-          message: `For this send, Account ${values.from_account}'s ${values.source_pool} pool has ${formatZecAmount(quoted.available_zatoshi)} available. The ${formatZecAmount(quoted.fee_zatoshi)} network fee leaves at most ${formatZecAmount(quoted.max_zatoshi)} spendable.`,
+          message: `For this send, Account ${values.from_account}'s ${values.source_pool} pool has ${formatZecAmount(quoted.available_zatoshi)} available. The ${formatZecAmount(quoted.fee_zatoshi)} network fee leaves at most ${formatZecAmount(quoted.max_zatoshi)} spendable.${
+            waiting
+              ? ` ${formatZecAmount(waiting.pending)} more becomes spendable once block ${waiting.height.toLocaleString()} is mined.`
+              : ''
+          }`,
         });
         releaseSendSubmission();
         return;
@@ -536,7 +660,15 @@ export function SendDialog({
           label="Amount (ZEC)"
           hint={
             quote.data !== undefined
-              ? `${formatZecAmount(quote.data.max_zatoshi)} spendable after a ${formatZecAmount(quote.data.fee_zatoshi)} network fee.`
+              ? `${formatZecAmount(quote.data.max_zatoshi)} spendable after a ${formatZecAmount(quote.data.fee_zatoshi)} network fee.${
+                  anchorWait === undefined
+                    ? ''
+                    : ` ${formatZecAmount(anchorWait.pending)} received in the latest block becomes spendable at block ${anchorWait.height.toLocaleString()}; ${
+                        autoMines
+                          ? 'Max mines that block first, then includes it.'
+                          : 'press Mine to mine it now, or wait for the next block, and Max then includes it.'
+                      }`
+                }`
               : `${formatZecAmount(available)} available in the ${sourcePool} pool.`
           }
           error={form.formState.errors.amount?.message}
@@ -554,15 +686,21 @@ export function SendDialog({
                 type="button"
                 variant="subtle"
                 size="sm"
-                disabled={quote.data === undefined || quote.data.max_zatoshi === 0n}
+                loading={anchorBusy}
+                // Outside auto mode Max waits for the anchor block rather than
+                // filling a partial amount, as `ths wallet send --max` refuses to.
+                disabled={
+                  quote.data === undefined ||
+                  anchorBusy ||
+                  (anchorWait ? !autoMines : quote.data.max_zatoshi === 0n)
+                }
                 onClick={() => {
+                  if (autoMines && anchorWait) {
+                    mineAnchorBlock(anchorWait.height);
+                    return;
+                  }
                   const max = quote.data?.max_zatoshi;
-                  if (max === undefined) return;
-                  form.setValue('amount', formatZec(max, { grouping: false }), {
-                    shouldDirty: true,
-                    shouldValidate: true,
-                  });
-                  form.clearErrors('amount');
+                  if (max !== undefined) fillAmount(max);
                 }}
               >
                 Max

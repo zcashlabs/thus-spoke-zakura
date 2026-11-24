@@ -1325,6 +1325,68 @@ fn tip_ironwood_receipt_waits_for_anchor_without_becoming_insufficient() {
     .unwrap();
 }
 
+/// Receives one Ironwood note at the new tip, where it cannot be spent until
+/// one more block provides an anchor. Returns the tip height.
+fn receive_ironwood_at_tip(st: &mut TestState, value: u64) -> u64 {
+    let fvk = IronwoodFvk(OrchardPoolTester::test_account_fvk(st));
+    let (height, _, _) = st.generate_next_block(
+        &fvk,
+        AddressType::DefaultExternal,
+        Zatoshis::const_from_u64(value),
+    );
+    st.scan_cached_blocks(height, 1);
+    u64::from(u32::from(height))
+}
+
+#[test]
+fn ironwood_quote_reports_a_tip_receipt_waiting_for_the_anchor() {
+    let mut st = test_state();
+    add_empty_blocks(&mut st, 10);
+    let tip = receive_ironwood_at_tip(&mut st, 100_000_000);
+    let height_before = st.wallet().chain_height().unwrap();
+
+    let waiting = quote(&mut st, "ironwood", "ironwood").unwrap();
+    assert_eq!(waiting.max_zatoshi, 0);
+    assert_eq!(waiting.pending_zatoshi, 100_000_000);
+    assert_eq!(waiting.anchor_height, Some(tip + 1));
+    // A quote is read-only: it reports the anchor block, it never mines it.
+    assert_eq!(st.wallet().chain_height().unwrap(), height_before);
+
+    add_empty_blocks(&mut st, 1);
+    let spendable = quote(&mut st, "ironwood", "ironwood").unwrap();
+    assert_eq!(spendable.max_zatoshi, 99_990_000);
+    assert_eq!(spendable.pending_zatoshi, 0);
+    assert_eq!(spendable.anchor_height, None);
+}
+
+#[test]
+fn ironwood_quote_separates_spendable_notes_from_a_tip_receipt() {
+    let mut st = test_state();
+    fund_ironwood(&mut st, 50_000_000);
+    let tip = receive_ironwood_at_tip(&mut st, 100_000_000);
+
+    let partial = quote(&mut st, "ironwood", "ironwood").unwrap();
+    assert_eq!(partial.max_zatoshi, 49_990_000);
+    assert_eq!(partial.pending_zatoshi, 100_000_000);
+    assert_eq!(partial.anchor_height, Some(tip + 1));
+
+    add_empty_blocks(&mut st, 1);
+    let full = quote(&mut st, "ironwood", "ironwood").unwrap();
+    assert_eq!(full.max_zatoshi, 149_990_000);
+    assert_eq!(full.pending_zatoshi, 0);
+    assert_eq!(full.anchor_height, None);
+}
+
+#[test]
+fn transparent_quote_never_reports_an_anchor_wait() {
+    let mut st = test_state();
+    fund_transparent(&mut st, 100_000_000);
+    receive_ironwood_at_tip(&mut st, 100_000_000);
+    let quote = quote(&mut st, "transparent", "ironwood").unwrap();
+    assert_eq!(quote.pending_zatoshi, 0);
+    assert_eq!(quote.anchor_height, None);
+}
+
 #[test]
 fn unmined_ironwood_receipt_does_not_authorize_anchor_mining() {
     let mut st = test_state();

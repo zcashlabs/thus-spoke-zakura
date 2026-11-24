@@ -157,7 +157,25 @@ describe('useServerEvents', () => {
       [{ queryKey: ['wallet-transaction'] }],
       [{ queryKey: ['address'] }],
       [{ queryKey: ['status'] }],
+      [{ queryKey: ['send-quote'] }],
       [{ queryKey: ['mining'] }],
+    ]);
+  });
+
+  it('requotes after every wallet scan, so an anchor block reaches Max', () => {
+    // Mining the anchor block leaves balances unchanged, so no wallet update
+    // follows; only the scan that published it can make the funds spendable.
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+    render(
+      <QueryClientProvider client={client}>
+        <Live>{null}</Live>
+      </QueryClientProvider>,
+    );
+    FakeEventSource.current?.emit('sync');
+    expect(invalidate.mock.calls).toEqual([
+      [{ queryKey: ['status'] }],
+      [{ queryKey: ['send-quote'] }],
     ]);
   });
 
