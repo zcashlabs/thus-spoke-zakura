@@ -6,6 +6,8 @@ For earlier releases, see [GitHub Releases](https://github.com/zcashlabs/thus-sp
 
 ## v0.5.0
 
+![Thus Spoke Zakura v0.5.0 release artwork](docs/images/release-v0.5.0.png)
+
 THS now runs natively: the installer installs the launcher with a native
 runtime, and `ths` starts without Docker. This release also moves the wallet to
 Zakura Common 4 and adds mining modes, a configurable NU7 activation height,
