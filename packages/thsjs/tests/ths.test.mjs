@@ -38,7 +38,7 @@ test('coalesces start, parses split JSON, exposes frozen config, stops repeatedl
   assert.match(a.instance, /^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/);
   assert.equal(a, b); assert.equal(a, ths.config()); assert.ok(Object.isFrozen(a));
   const details = await (await fetch(`${a.dashboard}/fixture`)).json();
-  assert.deepEqual(details.args, ['--name', a.instance, '--json', 'start', '--native', '--runtime-dir', 'split',
+  assert.deepEqual(details.args, ['--name', a.instance, '--json', 'start', '--runtime-dir', 'split',
     '--timeout', '2', '--no-open', '--no-auto-mine']);
   await ths.stop(); await ths.stop(); assert.throws(() => ths.config(), /ready/i);
   assert.notEqual((await ths.start()).instance, a.instance);
