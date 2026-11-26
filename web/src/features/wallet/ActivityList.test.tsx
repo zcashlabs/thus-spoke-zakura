@@ -411,3 +411,69 @@ describe('ActivityList clock', () => {
     }
   });
 });
+
+describe('ActivityList faucet direction icons', () => {
+  it('uses the direction for external and account faucet icons and styling', () => {
+    renderWithProviders(
+      <MemoryRouter>
+        <ActivityList
+          activity={{
+            isPending: false,
+            isError: false,
+            error: null,
+            data: [
+              {
+                id: 'external-faucet',
+                kind: 'faucet',
+                direction: 'outgoing',
+                from_account: null,
+                to_account: null,
+                to_address: 'tmExternalFaucetRecipient',
+                source_pool: 'ironwood',
+                destination_pool: 'transparent',
+                amount_zatoshi: 100_000_000n,
+                txid: '01'.repeat(32),
+                block_hash: 'cd'.repeat(32),
+                status: 'confirmed',
+                last_error: null,
+                created_at: '2026-10-15 12:00:00',
+              },
+              {
+                id: 'account-faucet',
+                kind: 'faucet',
+                direction: 'incoming',
+                from_account: null,
+                to_account: 2,
+                to_address: null,
+                source_pool: 'ironwood',
+                destination_pool: 'ironwood',
+                amount_zatoshi: 100_000_000n,
+                txid: '02'.repeat(32),
+                block_hash: 'cd'.repeat(32),
+                status: 'confirmed',
+                last_error: null,
+                created_at: '2026-10-15 12:00:00',
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    const links = screen.getAllByRole('link');
+    const external = links.find((link) => link.textContent?.startsWith('Faucet → tm'));
+    const account = links.find((link) => link.textContent === 'Faucet → Account 2');
+    expect(external).toBeDefined();
+    expect(account).toBeDefined();
+    const externalRow = external?.closest('tr');
+    const accountRow = account?.closest('tr');
+    expect(externalRow).not.toBeNull();
+    expect(accountRow).not.toBeNull();
+    const outgoingIcon = externalRow?.querySelector('.lucide-arrow-right');
+    const incomingIcon = accountRow?.querySelector('.lucide-arrow-down-to-line');
+    expect(outgoingIcon).not.toBeNull();
+    expect(incomingIcon).not.toBeNull();
+    expect(outgoingIcon?.parentElement).toHaveClass('bg-raised');
+    expect(incomingIcon?.parentElement).toHaveClass('bg-accent-soft');
+  });
+});

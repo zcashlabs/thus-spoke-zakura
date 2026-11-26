@@ -611,6 +611,10 @@ fn changed_cursor_outside_the_filter_is_stale() {
 fn activity_rejects_invalid_filters_and_empty_cursors() {
     for (page, expected) in [
         (
+            page(Some(0), None, None, None, None),
+            "limit must be greater than 0",
+        ),
+        (
             page(None, Some(6), None, None, None),
             "account must be between 1 and 5",
         ),
@@ -1253,11 +1257,13 @@ async fn external_address_faucet_payments_appear_in_activity_through_reorg() {
     assert_eq!(status, StatusCode::OK);
     let entry = find(&body, &claimed.id);
     assert_eq!(entry["to_address"], json!(address));
+    assert_eq!(entry["direction"], json!("outgoing"));
     assert_eq!(entry["from_account"], Value::Null);
     assert_eq!(entry["to_account"], Value::Null);
     assert_eq!(entry["amount_zatoshi"], json!(2_500_000));
     assert_eq!(entry["status"], json!("broadcast"));
     assert_eq!(entry["txid"], json!("external-txid"));
+    assert_eq!(find(&body, &internal.id)["direction"], json!("incoming"));
     let first_order = relative_order(&body);
     assert_eq!(first_order.len(), 2, "both payments must be present");
 

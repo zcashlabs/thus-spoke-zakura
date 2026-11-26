@@ -108,11 +108,11 @@ function ActivityRow({ activity, index, now }: { activity: Activity; index: numb
             <span
               className={cn(
                 'xp-raised grid size-6 shrink-0 place-items-center rounded-xs',
-                isFaucet || isIncoming ? 'bg-accent-soft text-accent' : 'bg-raised text-ink-muted',
+                isIncoming ? 'bg-accent-soft text-accent' : 'bg-raised text-ink-muted',
               )}
               aria-hidden
             >
-              {isFaucet || isIncoming ? (
+              {isIncoming ? (
                 <ArrowDownToLine className="size-3" />
               ) : (
                 <ArrowRight className="size-3" />

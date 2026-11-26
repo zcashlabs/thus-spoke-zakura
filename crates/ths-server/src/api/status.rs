@@ -338,7 +338,13 @@ fn activity_direction(
     external_addresses: &[String],
 ) -> &'static str {
     if kind == "faucet" {
-        "incoming"
+        // A faucet payment is incoming only when its recipient is one of the
+        // development accounts. External-address payments leave the treasury.
+        if to_accounts.is_empty() {
+            "outgoing"
+        } else {
+            "incoming"
+        }
     } else {
         crate::wallet::payment_direction(from_accounts, to_accounts, !external_addresses.is_empty())
     }
@@ -815,6 +821,9 @@ const ACTIVITY_STATUSES: [&str; 7] = [
 ];
 
 fn validate_activity_page(page: &Page) -> ApiResult<()> {
+    if page.limit == Some(0) {
+        return Err(ApiError::bad_request("limit must be greater than 0"));
+    }
     if let Some(account) = page.account
         && !(1..=USER_ACCOUNT_COUNT).contains(&account)
     {
